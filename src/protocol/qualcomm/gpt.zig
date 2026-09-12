@@ -41,7 +41,7 @@ pub const Header = struct {
     }
 };
 
-pub const Error = error{ NotGpt, BadCrc, Truncated };
+pub const Error = error{ NotGpt, BadCrc, Truncated, OutOfMemory };
 
 /// Parse and verify the GPT header found at LBA 1 (`bytes` covers LBA 0..1,
 /// i.e. at least 2 × sector_size bytes).
@@ -67,9 +67,24 @@ pub fn parseHeader(bytes: []const u8, sector_size: u32) Error!Header {
     };
 }
 
+/// Parsed partition entries plus their backing allocation (free with
+/// `deinit` using the SAME allocator — the backing is larger than `len`).
+pub const EntryList = struct {
+    backing: []Partition,
+    len: usize,
+
+    pub fn items(self: *const EntryList) []Partition {
+        return self.backing[0..self.len];
+    }
+
+    pub fn deinit(self: *const EntryList, alloc: std.mem.Allocator) void {
+        alloc.free(self.backing);
+    }
+};
+
 /// Parse the partition entry array. `bytes` starts at LBA `header.entry_lba`.
 /// Unused entries (zero type GUID) are skipped.
-pub fn parseEntries(bytes: []const u8, header: Header, sector_size: u32) Error![]Partition {
+pub fn parseEntries(alloc: std.mem.Allocator, bytes: []const u8, header: Header, sector_size: u32) Error!EntryList {
     const entry_bytes = @as(u64, header.num_entries) * header.entry_size;
     if (header.num_entries == 0 or header.num_entries > max_partitions) return error.Truncated;
     if (header.entry_size < 128) return error.Truncated;
@@ -78,11 +93,9 @@ pub fn parseEntries(bytes: []const u8, header: Header, sector_size: u32) Error![
     // The entry-array CRC lives in the header (offset 88) and was verified
     // against the raw array bytes by the reader before handing them here.
 
-    var out: []Partition = &.{};
-    var count: usize = 0;
-    const storage = std.heap.page_allocator;
-    out = storage.alloc(Partition, header.num_entries) catch return error.Truncated;
+    const backing = alloc.alloc(Partition, header.num_entries) catch return error.OutOfMemory;
 
+    var count: usize = 0;
     for (0..header.num_entries) |i| {
         const o = i * header.entry_size;
         const e = bytes[o .. o + header.entry_size];
@@ -93,11 +106,11 @@ pub fn parseEntries(bytes: []const u8, header: Header, sector_size: u32) Error![
         part.first_lba = std.mem.readInt(u64, e[32..40], .little);
         part.last_lba = std.mem.readInt(u64, e[40..48], .little);
         decodeName(e[56..128], &part.name, &part.name_len);
-        out[count] = part;
+        backing[count] = part;
         count += 1;
     }
     _ = sector_size;
-    return out[0..count];
+    return .{ .backing = backing, .len = count };
 }
 
 fn isZeroGuid(g: *const [16]u8) bool {
@@ -204,8 +217,9 @@ test "header and entries parse from fixture" {
     try std.testing.expectEqual(@as(u32, 4), hdr.num_entries);
     try std.testing.expectEqual(@as(u64, 1), hdr.entrySectors(512));
 
-    const parts = try parseEntries(buf[2 * 512 ..], hdr, 512);
-    defer std.heap.page_allocator.free(parts);
+    const list = try parseEntries(std.testing.allocator, buf[2 * 512 ..], hdr, 512);
+    defer list.deinit(std.testing.allocator);
+    const parts = list.items();
     try std.testing.expectEqual(@as(usize, 2), parts.len);
     try std.testing.expectEqualStrings("boot", parts[0].nameSlice());
     try std.testing.expectEqual(@as(u64, 34), parts[0].first_lba);

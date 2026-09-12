@@ -533,15 +533,15 @@ pub const Manager = struct {
             return;
         }
 
-        const parts = gpt.parseEntries(ent_buf, header, sector_size) catch |e| {
+        const list = gpt.parseEntries(self.alloc, ent_buf, header, sector_size) catch |e| {
             self.logger.err("GPT parse failed: {s}", .{@errorName(e)});
             pushFinished(self.channel, false, @errorName(e));
             return;
         };
-        defer self.alloc.free(parts);
+        defer list.deinit(self.alloc);
 
         var event = ev.PartitionsEvent{ .lun = lun, .sector_size = sector_size, .luns = self.num_luns };
-        for (parts) |p| {
+        for (list.items()) |p| {
             if (event.count >= ev.max_partition_rows) break;
             event.parts[event.count] = .{
                 .index = p.index,
@@ -859,7 +859,7 @@ test "manager: already-in-firehose connect loads partitions" {
     defer harness.deinit();
     var opener = SimOpener{ .harness = &harness };
 
-    const mgr = try Manager.init(heap, logger, channel, &cancel, &SimOpener.open, &opener);
+    const mgr = try Manager.init(std.testing.allocator, logger, channel, &cancel, &SimOpener.open, &opener);
     defer mgr.shutdown();
     try mgr.start();
 
@@ -968,7 +968,7 @@ test "manager: loader upload reuses the probed connection (replayed HELLO)" {
     defer harness.deinit();
     var opener = SimOpener{ .harness = &harness };
 
-    const mgr = try Manager.init(heap, logger, channel, &cancel, &SimOpener.open, &opener);
+    const mgr = try Manager.init(std.testing.allocator, logger, channel, &cancel, &SimOpener.open, &opener);
     defer mgr.shutdown();
     try mgr.start();
 
