@@ -1,3 +1,5 @@
 test {
-    // Milestone 1 placeholder — modules are registered here as they land.
+    _ = @import("core/log.zig");
+    _ = @import("core/event.zig");
+    _ = @import("core/util.zig");
 }

@@ -30,6 +30,7 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.linkSystemLibrary("libadwaita-1", .{});
     exe_mod.linkSystemLibrary("libusb-1.0", .{});
+    exe_mod.linkSystemLibrary("glib-2.0", .{});
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -42,7 +43,17 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/test_root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "glib", .module = gobject.module("glib2") },
+            .{ .name = "gobject", .module = gobject.module("gobject2") },
+            .{ .name = "gio", .module = gobject.module("gio2") },
+            .{ .name = "gdk", .module = gobject.module("gdk4") },
+            .{ .name = "gtk", .module = gobject.module("gtk4") },
+            .{ .name = "adw", .module = gobject.module("adw1") },
+        },
     });
+    test_mod.linkSystemLibrary("glib-2.0", .{});
+    test_mod.linkSystemLibrary("libusb-1.0", .{});
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
