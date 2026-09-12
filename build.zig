@@ -38,7 +38,7 @@ pub fn build(b: *std.Build) void {
     const app_id = "io.github.redminote11tech.Ultron";
     b.installFile("data/" ++ app_id ++ ".desktop", "share/applications/" ++ app_id ++ ".desktop",);
     b.installFile("data/" ++ app_id ++ ".metainfo.xml", "share/metainfo/" ++ app_id ++ ".metainfo.xml",);
-    b.installFile("data/icons/hicolor/scalable/apps/" ++ app_id ++ ".svg", "share/icons/hicolor/scalable/apps/" ++ app_id ++ ".svg",);
+    b.installFile("data/icons/hicolor/256x256/apps/" ++ app_id ++ ".png", "share/icons/hicolor/256x256/apps/" ++ app_id ++ ".png",);
     b.installFile("data/70-ultron.rules", "lib/udev/rules.d/70-ultron.rules",);
 
     const run_cmd = b.addRunArtifact(exe);

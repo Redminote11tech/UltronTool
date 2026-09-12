@@ -1,17 +1,36 @@
+<div align="center">
+
+<img src="data/icons/io.github.redminote11tech.Ultron-source.png" width="140" alt="Ultron icon"/>
+
 # Ultron
 
-<p align="center">
-  <img src="data/icons/hicolor/scalable/apps/io.github.redminote11tech.Ultron.svg" width="96" alt="Ultron icon"/>
-</p>
+**Flash and unbrick Qualcomm EDL (9008) devices — natively on Linux.**
 
-A beautiful, native Linux GUI flashing/unbricking tool for Qualcomm EDL (9008)
-devices — the graphical successor to [`qdl`](https://github.com/linux-msm/qdl),
-written in Zig with GTK4/libadwaita.
+A native GTK4/libadwaita GUI, with Sahara and Firehose reimplemented in Zig.
 
-> **Status: v0.1.0** — Qualcomm EDL is fully working (full qdl parity). The
-> architecture is plugin-based: **MediaTek (BROM/mtkclient-style)** and
-> **Samsung (Odin/Heimdall-style)** protocol modules are planned on top of the
-> same protocol registry.
+To our knowledge this is the **first native Linux GUI tool** to reimplement the
+Qualcomm **Sahara** and **Firehose** protocols in **Zig** — a graphical successor
+to the classic [`qdl`](https://github.com/linux-msm/qdl) command-line tool.
+
+GPL-3.0 · Zig 0.16 · GTK4/libadwaita · Linux (Wayland/X11)
+
+</div>
+
+---
+
+> **Status: v0.2.0** — Qualcomm EDL is fully usable. The architecture is
+> plugin-based: **MediaTek (BROM/mtkclient-style)** and **Samsung
+> (Odin/Heimdall-style)** protocol modules are planned on top of the same
+> protocol registry.
+
+## Why Ultron?
+
+Existing EDL tooling on Linux is a pile of Python scripts or a bare CLI.
+Ultron is a **real desktop app**: it detects your device the moment you plug it
+in, walks you through loader upload and flashing with confirmations on every
+destructive action, shows the device's actual partition table, and logs every
+byte of protocol traffic in a built-in console — while the protocol core stays
+a small, dependency-free Zig library you can audit in an afternoon.
 
 ## Features
 
@@ -43,8 +62,9 @@ written in Zig with GTK4/libadwaita.
   (`/usr/lib/udev/rules.d/70-ultron.rules`, installed by the PKGBUILD). On
   other distros copy it manually, then:
   `sudo udevadm control --reload && sudo udevadm trigger`
-- Your device's own signed **programmer** (firehose) file and flash-layout XML
-  files — these are vendor-specific and **not included**
+- Your device's own signed **programmer** (firehose) file and, for rawprogram
+  flashing, its flash-layout XML files — these are vendor-specific and
+  **never included**
 
 ## Building
 
@@ -52,7 +72,7 @@ Requires **Zig 0.16.x** (the GUI uses zig-gobject v0.3.2, GNOME 50 bindings).
 
 ```
 zig build --release=fast
-zig build test      # unit tests (Sahara/Firehose/XML over a simulated device)
+zig build test      # unit tests (Sahara/Firehose/GPT over a simulated device)
 ```
 
 ## Packaging (Arch / CachyOS)
@@ -65,7 +85,7 @@ makepkg -sri
 
 # or with the standalone script (no pkg/ staging needed):
 ./tools/make-package.sh
-sudo pacman -U ultron-0.1.0-1-x86_64.pkg.tar.zst
+sudo pacman -U ultron-0.2.0-1-x86_64.pkg.tar.zst
 ```
 
 The package installs the binary, desktop entry, AppStream metainfo, icon and
@@ -79,15 +99,29 @@ src/
 ├── transport/  Transport vtable · libusb backend (qdl ZLP semantics) · sim backend
 ├── device/     libudev hot-plug scanner
 ├── protocol/   Protocol vtable + registry (the plugin point)
-│   └── qualcomm/  sahara · firehose · xml · rawprogram · session
-└── ui/         libadwaita app (device / flash / console pages)
+│   └── qualcomm/  sahara · firehose · gpt · xml · rawprogram · session · manager
+└── ui/         libadwaita app (workflow page + console)
 ```
 
 Protocol logic is ported line-by-line from the reference implementations;
-see [docs/PROTOCOL.md](docs/PROTOCOL.md) for the full spec and sources.
+[docs/PROTOCOL.md](docs/PROTOCOL.md) documents every constant, packet layout,
+timeout and quirk with sources.
+
+### Adding a protocol module
+
+A protocol is one `Protocol` value in `src/protocol/protocol.zig`: a
+device-USB match policy plus a classifier. The scanner, UI and manager need
+zero changes — MediaTek and Samsung modules are planned exactly this way.
+
+## Credits
+
+- [`linux-msm/qdl`](https://github.com/linux-msm/qdl) (BSD-3-Clause) — the
+  primary reference; Sahara/Firehose/USB semantics are ported from its source
+- [`bkerler/edl`](https://github.com/bkerler/edl) (GPL-3.0) and
+  [`strongtz/edl-ng`](https://github.com/strongtz/edl-ng) (MIT) — cross-checks
+- [`ianprime0509/zig-gobject`](https://github.com/ianprime0509/zig-gobject)
+  (0BSD) — GTK4/libadwaita bindings for Zig
 
 ## License
 
-GPL-3.0-or-later — see [LICENSE](LICENSE). Protocol logic is ported from
-linux-msm/qdl (BSD-3-Clause) and cross-checked against bkerler/edl and
-strongtz/edl-ng.
+GPL-3.0-or-later — see [LICENSE](LICENSE).
