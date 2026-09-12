@@ -85,6 +85,8 @@ pub const Ui = struct {
     toast_overlay: ?*adw.ToastOverlay = null,
     cancel_button: ?*gtk.Button = null,
     progress: ?*gtk.ProgressBar = null,
+    spinner: ?*gtk.Spinner = null,
+    state_chip: ?*gtk.Label = null,
     console_view: ?*gtk.TextView = null,
 
     // Main page sections.
@@ -153,8 +155,12 @@ pub const Ui = struct {
     fn startJob(self: *Ui) void {
         self.outstanding += 1;
         self.setBusy(true);
+        if (self.spinner) |sp| {
+            gtk.Spinner.start(sp);
+            gtk.Widget.setVisible(sp.as(gtk.Widget), 1);
+        }
         if (self.progress) |p| {
-            gtk.Widget.setVisible(p.as(gtk.Widget), 1);
+            gtk.Widget.setVisible(p.as(gtk.Widget), 0); // appears on first %
             gtk.ProgressBar.setFraction(p, 0);
             gtk.ProgressBar.setText(p, "working…");
         }
@@ -165,6 +171,10 @@ pub const Ui = struct {
         if (self.outstanding == 0) {
             self.setBusy(false);
             if (self.progress) |p| gtk.Widget.setVisible(p.as(gtk.Widget), 0);
+            if (self.spinner) |sp| {
+                gtk.Spinner.stop(sp);
+                gtk.Widget.setVisible(sp.as(gtk.Widget), 0);
+            }
         }
     }
 };
@@ -295,11 +305,20 @@ fn buildWindow(ui: *Ui, app: *adw.Application) void {
     // Live operation strip: progress with label inside + cancel — pinned to
     // the header so it is visible no matter where the page is scrolled.
     const progress_box = gtk.Box.new(.horizontal, 8);
+    gtk.Widget.setValign(progress_box.as(gtk.Widget), .center);
+
+    const spinner = gtk.Spinner.new();
+    gtk.Spinner.setSpinning(spinner, 0);
+    gtk.Widget.setVisible(spinner.as(gtk.Widget), 0);
+    ui.spinner = spinner;
+    gtk.Box.append(progress_box, spinner.as(gtk.Widget));
+
     const progress = gtk.ProgressBar.new();
     gtk.ProgressBar.setShowText(progress, 1);
     gtk.ProgressBar.setText(progress, "working…");
     gtk.Widget.setSizeRequest(progress.as(gtk.Widget), 260, -1);
     gtk.Widget.setValign(progress.as(gtk.Widget), .center);
+    gtk.Widget.addCssClass(progress.as(gtk.Widget), "ultron-progress");
     gtk.Widget.setVisible(progress.as(gtk.Widget), 0);
     ui.progress = progress;
     gtk.Box.append(progress_box, progress.as(gtk.Widget));
@@ -401,6 +420,15 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     adw.ActionRow.addSuffix(mode_row, mode_val.as(gtk.Widget));
     ui.dev_mode_label = mode_val;
     adw.PreferencesGroup.add(dev_group, mode_row.as(gtk.Widget));
+
+    const state_row = adw.ActionRow.new();
+    rowTitle(state_row, "Session");
+    const state_chip = gtk.Label.new("not connected");
+    gtk.Widget.addCssClass(state_chip.as(gtk.Widget), "state-chip");
+    gtk.Widget.addCssClass(state_chip.as(gtk.Widget), "dim");
+    adw.ActionRow.addSuffix(state_row, state_chip.as(gtk.Widget));
+    ui.state_chip = state_chip;
+    adw.PreferencesGroup.add(dev_group, state_row.as(gtk.Widget));
 
     const vidpid_row = adw.ActionRow.new();
     rowTitle(vidpid_row, "USB device");
@@ -1185,6 +1213,11 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
         },
         .progress => |p| {
             if (ui.progress) |bar| {
+                gtk.Widget.setVisible(bar.as(gtk.Widget), 1);
+                if (ui.spinner) |sp| {
+                    gtk.Spinner.stop(sp);
+                    gtk.Widget.setVisible(sp.as(gtk.Widget), 0);
+                }
                 if (p.fraction < 0) {
                     gtk.ProgressBar.pulse(bar);
                     var pz: [200]u8 = undefined;

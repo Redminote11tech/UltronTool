@@ -122,6 +122,10 @@ pub const Manager = struct {
     sector_size: u32 = 0,
     num_luns: u32 = 1,
     state: ev.SessionState = .disconnected,
+    /// Loader used for the current session — reused by stuck-state recovery.
+    last_programmer: ?[]u8 = null,
+    /// A USB reset recovery may run once per connect.
+    reset_used: bool = false,
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -169,6 +173,7 @@ pub const Manager = struct {
         if (self.thread) |t| t.join();
         for (self.pending.items) |*item| item.deinit();
         self.pending.deinit(self.alloc);
+        if (self.last_programmer) |p| self.alloc.free(p);
         self.alloc.destroy(self);
     }
 
@@ -284,6 +289,7 @@ pub const Manager = struct {
     /// Open a transport and probe what is running.
     fn connect(self: *Manager, programmer: ?[]const u8, storage: firehose.StorageType, skip_storage_init: bool) void {
         if (self.cancel.load(.acquire)) return;
+        self.reset_used = false;
 
         // Already waiting for a loader with the HELLO preserved: a re-probe
         // would close the transport and lose the HELLO (the PBL does not
@@ -422,6 +428,7 @@ pub const Manager = struct {
 
     fn uploadLoader(self: *Manager, programmer: []const u8, storage: firehose.StorageType, skip_storage_init: bool) void {
         if (self.cancel.load(.acquire)) return;
+        self.rememberLoader(programmer);
 
         // Fresh connection if the probe consumed/closed one: the device
         // re-issues its HELLO on reopen.
@@ -484,8 +491,14 @@ pub const Manager = struct {
 
         fh.configure(storage, skip_storage_init) catch |e| {
             self.logger.err("Firehose configure failed: {s}", .{@errorName(e)});
-            if (e == Error.Timeout) {
-                self.logger.err("hint: if the device is in EDL mode, unplug it, replug, and Connect again to upload a loader", .{});
+            // A timeout here with a "confirmed" programmer means it is stuck
+            // (e.g. still retrying a failed write in a raw data phase) and is
+            // not parsing commands. A USB reset forces a clean EDL state; the
+            // loader is then re-uploaded automatically.
+            if (e == Error.Timeout and !self.reset_used) {
+                self.reset_used = true;
+                self.recoverViaReset(storage, skip_storage_init);
+                return;
             }
             self.teardown();
             pushFinished(self.channel, false, @errorName(e));
@@ -511,6 +524,59 @@ pub const Manager = struct {
         self.emitState(.firehose_ready);
         pushFinished(self.channel, true, "connected");
         self.listPartitions(0);
+    }
+
+    fn rememberLoader(self: *Manager, programmer: []const u8) void {
+        if (self.last_programmer) |old| {
+            if (std.mem.eql(u8, old, programmer)) return;
+            self.alloc.free(old);
+        }
+        self.last_programmer = self.alloc.dupe(u8, programmer) catch null;
+    }
+
+    /// Force the device back to a clean EDL state: USB reset (software
+    /// replug), reopen, expect a fresh Sahara HELLO, then continue the
+    /// normal loader flow — re-uploading the session's loader if one was
+    /// used before.
+    fn recoverViaReset(self: *Manager, storage: firehose.StorageType, skip_storage_init: bool) void {
+        self.logger.warn("programmer looks stuck — forcing a USB reset to recover to a clean EDL state", .{});
+        if (self.t) |tr| tr.reset();
+        self.teardown();
+        glib.usleep(1500 * std.time.us_per_ms);
+        if (!self.openTransport()) return;
+
+        var buf: [4096]u8 = undefined;
+        var hello_n: usize = 0;
+        var attempt: u32 = 0;
+        while (attempt < 3) : (attempt += 1) {
+            if (self.cancel.load(.acquire)) return;
+            hello_n = self.io.?.read(&buf, 1000) catch 0;
+            if (hello_n > 0) break;
+        }
+        if (hello_n < 8) {
+            self.teardown();
+            self.logger.err("device did not come back after reset — unplug the USB cable, replug into EDL mode, and retry", .{});
+            pushFinished(self.channel, false, "device not responding");
+            self.emitState(.disconnected);
+            return;
+        }
+        const cmd = std.mem.readInt(u32, buf[0..4], .little);
+        const length = std.mem.readInt(u32, buf[4..8], .little);
+        if (@as(u32, @intCast(hello_n)) != length or cmd != sahara.HELLO) {
+            self.teardown();
+            pushFinished(self.channel, false, "unexpected device after reset");
+            self.emitState(.disconnected);
+            return;
+        }
+
+        self.io.?.pushBack(buf[0..hello_n]);
+        self.logger.info("device recovered to clean EDL state", .{});
+        if (self.last_programmer) |p| {
+            self.uploadLoader(p, storage, skip_storage_init);
+        } else {
+            self.emitState(.needs_loader);
+            pushFinished(self.channel, true, "loader required");
+        }
     }
 
     /// Close the transport and drop the Firehose session. Safe to call twice.
