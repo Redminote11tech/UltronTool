@@ -196,6 +196,48 @@ pub const Session = struct {
         }
     }
 
+    /// Non-blocking response poll for streaming loops: drains whatever has
+    /// already arrived (1 ms transport timeout), splitting concatenated XML
+    /// documents exactly like readResponse. Used to catch a mid-stream NAK
+    /// immediately instead of after the full stream times out.
+    fn pollResponse(self: *Session) Error!Response {
+        var buf: [read_buf_size]u8 = undefined;
+        const n = self.io.read(&buf, 1) catch |e| switch (e) {
+            Error.Timeout => return Response{ .kind = .timeout },
+            else => return e,
+        };
+        if (n == 0) return Response{ .kind = .timeout };
+
+        self.logger.debug("FIREHOSE READ: {s}", .{buf[0..n]});
+        var resp: Response = .{};
+        var cursor: usize = 0;
+        while (cursor < n) {
+            const start = std.mem.indexOfPos(u8, buf[0..n], cursor, "<?xml") orelse break;
+            var chunk_end: usize = undefined;
+            if (std.mem.indexOfPos(u8, buf[0..n], start, "</data>")) |close| {
+                chunk_end = close + "</data>".len;
+            } else {
+                chunk_end = n;
+            }
+
+            var elems = std.ArrayList(xml.Element).empty;
+            defer elems.deinit(self.alloc);
+            self.parseResponseElements(buf[start..chunk_end], &elems) catch {
+                self.logger.err("failed to parse firehose response", .{});
+                return Response{ .kind = .io };
+            };
+            for (elems.items) |*elem| {
+                if (try self.consumeElement(elem, &resp)) resp.rawmode = true;
+            }
+            cursor = start + chunk_end;
+            if (resp.rawmode) {
+                if (cursor < n) self.io.pushBack(buf[cursor..n]);
+                break;
+            }
+        }
+        return resp;
+    }
+
     /// Port of firehose_generic_parser + attribute collection.
     /// Returns whether rawmode was signaled.
     fn consumeElement(self: *Session, elem: *xml.Element, resp: *Response) Error!bool {
@@ -432,31 +474,83 @@ pub const Session = struct {
         file.seekTo(@as(u64, op.file_offset) * sector_size) catch return Error.Io;
 
         var left: u64 = num_sectors;
+        var ack_seen = false; // ACK may arrive while our last chunks are in flight
+        var drain_mode = false; // op failed device-side: feed zeros to finish the data phase
+        var drain_deadline: i64 = 0;
+        var write_timeouts: u32 = 0;
         while (left > 0) {
             if (self.cancelled()) return Error.Cancelled;
+
             const chunk_sectors = @min(self.max_payload_size / sector_size, left);
             const chunk_bytes = chunk_sectors * sector_size;
-            const got = file.readAll(buf[0..@intCast(chunk_bytes)]) catch return Error.Io;
-            // Zero-pad short reads: the wire expects exactly chunk_bytes.
-            if (got < chunk_bytes) @memset(buf[@intCast(got)..@intCast(chunk_bytes)], 0);
+            if (drain_mode) {
+                // The op already failed device-side; keep the data phase fed
+                // with zeros so the programmer returns to command mode.
+                if (monoNow() > drain_deadline) {
+                    self.logger.err("drain deadline exceeded — the device stopped responding entirely", .{});
+                    return Error.Timeout;
+                }
+                @memset(buf[0..@intCast(chunk_bytes)], 0);
+            } else {
+                const got = file.readAll(buf[0..@intCast(chunk_bytes)]) catch return Error.Io;
+                // Zero-pad short reads: the wire expects exactly chunk_bytes.
+                if (got < chunk_bytes) @memset(buf[@intCast(got)..@intCast(chunk_bytes)], 0);
+            }
 
-            _ = self.io.write(buf[0..@intCast(chunk_bytes)], zlp_timeout) catch |e| {
-                // The device stopped consuming (e.g. it NAK'd mid-stream after
-                // a UFS write failure). Drain its response so the reason lands
-                // in the console, then fail fast.
-                self.logger.err("device stopped accepting data — draining its response", .{});
-                _ = self.readResponse(5000) catch {};
-                return e;
+            _ = self.io.write(buf[0..@intCast(chunk_bytes)], zlp_timeout) catch |e| switch (e) {
+                Error.Timeout => {
+                    write_timeouts += 1;
+                    if (!drain_mode) {
+                        self.logger.err("device stopped consuming the write — attempting to drain the data phase", .{});
+                        drain_mode = true;
+                        drain_deadline = monoNow() + 120 * std.time.us_per_s;
+                    }
+                    // Three strikes with zero consumption: nothing more to
+                    // drain over USB; escalate to the reset recovery chain.
+                    if (write_timeouts >= 3) {
+                        self.logger.err("device is not consuming data at all", .{});
+                        return Error.Timeout;
+                    }
+                    continue;
+                },
+                else => return e,
             };
+            write_timeouts = 0;
+
+            // Mid-stream failure handling: a UFS write refusal makes some
+            // programmers NAK the operation while still consuming the data
+            // phase. There is no cancel command, so the only graceful exit
+            // is to FEED the declared remaining bytes (zeros) until the op
+            // completes and the programmer returns to command mode.
+            const mid = self.pollResponse() catch |e| switch (e) {
+                Error.Cancelled => return e,
+                else => Response{ .kind = .timeout },
+            };
+            if (mid.isAck()) ack_seen = true;
+            if (mid.kind == .nak) {
+                if (!drain_mode) {
+                    drain_mode = true;
+                    drain_deadline = monoNow() + 120 * std.time.us_per_s;
+                    self.logger.err("device NAK'd the write mid-stream — draining the data phase so the session survives", .{});
+                }
+            }
+            if (mid.kind == .io) {
+                self.logger.err("unparseable response mid-stream — aborting", .{});
+                return Error.Io;
+            }
 
             left -= chunk_sectors;
             self.progress.report(op.label orelse fname, num_sectors - left, num_sectors);
         }
 
-        const final = try self.readResponse(120000);
-        if (!final.isAck()) {
-            self.logger.err("flashing of {s} failed", .{op.label orelse fname});
-            return Error.Io;
+        if (!ack_seen) {
+            const final = try self.readResponse(120000);
+            if (!final.isAck()) {
+                self.logger.err("flashing of {s} failed", .{op.label orelse fname});
+                // The data phase completed, so the programmer is back in
+                // command mode — the session survives the failed write.
+                return error.WriteFailed;
+            }
         }
         self.logger.info("flashed \"{s}\" successfully", .{op.label orelse fname});
     }

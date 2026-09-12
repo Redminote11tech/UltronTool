@@ -20,6 +20,9 @@ pub const Error = error{
     NoDevice,
     /// Transfer or claim failed.
     Io,
+    /// The operation failed on the device side but the session survived
+    /// (data phase was completed cleanly and commands parse again).
+    WriteFailed,
     OutOfMemory,
 };
 

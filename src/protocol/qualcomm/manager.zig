@@ -122,6 +122,8 @@ pub const Manager = struct {
     sector_size: u32 = 0,
     num_luns: u32 = 1,
     state: ev.SessionState = .disconnected,
+    storage: firehose.StorageType = .ufs,
+    skip_saved: bool = false,
     /// Loader used for the current session — reused by stuck-state recovery.
     last_programmer: ?[]u8 = null,
     /// A USB reset recovery may run once per connect.
@@ -290,6 +292,7 @@ pub const Manager = struct {
     fn connect(self: *Manager, programmer: ?[]const u8, storage: firehose.StorageType, skip_storage_init: bool) void {
         if (self.cancel.load(.acquire)) return;
         self.reset_used = false;
+        self.storage = storage;
 
         // Already waiting for a loader with the HELLO preserved: a re-probe
         // would close the transport and lose the HELLO (the PBL does not
@@ -332,6 +335,7 @@ pub const Manager = struct {
 
         if (n >= 5 and std.mem.eql(u8, buf[0..5], "<?xml")) {
             self.logger.info("device already runs a Firehose programmer — skipping loader", .{});
+            self.skip_saved = skip_storage_init;
             self.configureNow(storage, skip_storage_init);
             return;
         }
@@ -363,6 +367,7 @@ pub const Manager = struct {
         // send would be eaten as disk data. Probe actively with <nop>: an
         // XML reply means real Firehose; silence means a stuck device that
         // needs a USB reset to get back to a clean EDL state.
+        self.skip_saved = skip_storage_init;
         self.logger.info("no greeting received — probing with <nop>", .{});
         const nop = "<?xml version=\"1.0\" ?><data><nop /></data>";
         _ = self.io.?.write(nop, 1000) catch {};
@@ -473,6 +478,7 @@ pub const Manager = struct {
 
     fn uploadLoader(self: *Manager, programmer: []const u8, storage: firehose.StorageType, skip_storage_init: bool) void {
         if (self.cancel.load(.acquire)) return;
+        self.skip_saved = skip_storage_init;
         self.rememberLoader(programmer);
 
         // Fresh connection if the probe consumed/closed one: the device
@@ -569,6 +575,10 @@ pub const Manager = struct {
         self.emitState(.firehose_ready);
         pushFinished(self.channel, true, "connected");
         self.listPartitions(0);
+    }
+
+    fn msg_arr() [512]u8 {
+        return @splat(0);
     }
 
     fn rememberLoader(self: *Manager, programmer: []const u8) void {
@@ -812,13 +822,25 @@ pub const Manager = struct {
         fh.progress = .{ .ctx = &jp, .cb = JobProgress.cb };
         defer fh.progress = saved_progress;
 
-        fh.program(&op, &file) catch |e| {
-            self.sessionError(e);
-            return;
-        };
-        var msg = ev.FixedStr(512){};
-        msg.set(std.fmt.bufPrint(&jp.prefix, "{s}: write finished", .{label}) catch "write finished");
-        self.channel.push(.{ .finished = .{ .success = true, .message = msg } });
+        if (fh.program(&op, &file)) |_| {
+            var msg = ev.FixedStr(512){};
+            msg.set(std.fmt.bufPrint(&jp.prefix, "{s}: write finished", .{label}) catch "write finished");
+            self.channel.push(.{ .finished = .{ .success = true, .message = msg } });
+        } else |e| switch (e) {
+            Error.WriteFailed => {
+                // The device refused the write (protected region) but the
+                // data phase completed cleanly: Firehose is still alive.
+                self.logger.err("write to {s} was refused by the device — session recovered, no reset needed", .{label});
+                var msg = ev.FixedStr(512){};
+                var msg_arr_v: [512]u8 = undefined;
+                const msg_s = std.fmt.bufPrint(&msg_arr_v, "{s}: write refused by device", .{label}) catch "write refused by device";
+                msg.set(msg_s);
+                self.channel.push(.{ .finished = .{ .success = false, .message = msg } });
+            },
+            else => {
+                self.sessionError(e);
+            },
+        }
     }
 
     fn flashXml(self: *Manager, files: []const []const u8, allow_missing: bool) void {
@@ -903,12 +925,22 @@ pub const Manager = struct {
         pushFinished(self.channel, true, "flash finished");
     }
 
-    /// Transport-level failure: the session is history.
+    /// Transport-level failure: the session is history. A failed operation
+    /// can leave the programmer in an unparseable raw data phase, so the
+    /// session is torn down AND the device is reset back to a clean EDL
+    /// state with the loader re-uploaded automatically (once per connect).
     fn sessionError(self: *Manager, e: Error) void {
         self.logger.err("session error: {s} — disconnecting", .{@errorName(e)});
         self.teardown();
         self.emitState(.disconnected);
-        pushFinished(self.channel, false, @errorName(e));
+        var msg_buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "session error: {s}", .{@errorName(e)}) catch "session error";
+        pushFinished(self.channel, false, msg);
+
+        if (e != Error.Gone and !self.reset_used) {
+            self.reset_used = true;
+            _ = self.tryResetRecover(self.storage, self.skip_saved, self.last_programmer);
+        }
     }
 };
 

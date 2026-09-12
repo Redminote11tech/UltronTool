@@ -308,7 +308,7 @@ const SimStep = @import("../../transport/sim.zig").Step;
     defer h.deinit();
     var io = transport.Io.init(std.testing.allocator, h.transport());
     defer io.deinit();
-    var logger = log.Logger{ .mirror_stderr = false };
+    var logger = log.Logger{ .mirror_stderr = true };
 
     // Drive the post-transport stages directly (usb.open is not simulated).
     var cancel = std.atomic.Value(bool).init(false);
