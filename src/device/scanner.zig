@@ -9,6 +9,7 @@
 const std = @import("std");
 const c = @cImport({
     @cInclude("libudev.h");
+    @cInclude("stdio.h");
 });
 const log = @import("../core/log.zig");
 const ev = @import("../core/event.zig");
@@ -26,16 +27,19 @@ pub const Scanner = struct {
     monitor: ?*c.struct_udev_monitor = null,
     monitor_fd: std.posix.fd_t = -1,
     known: std.StringArrayHashMapUnmanaged(ev.DeviceInfo) = .empty,
+    /// Interface descriptors seen on usb_interface events, keyed by the
+    /// parent usb_device sysfs path.
+    ifaces: std.StringHashMapUnmanaged(InterfaceInfo) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, logger: *log.Logger, channel: *EventChannel) !*Scanner {
         const self = try allocator.create(Scanner);
         errdefer allocator.destroy(self);
 
         const udev = c.udev_new() orelse return error.UdevInitFailed;
-        errdefer c.udev_unref(udev);
+        errdefer _ = c.udev_unref(udev);
 
         const monitor = c.udev_monitor_new_from_netlink(udev, "udev") orelse return error.UdevMonitorFailed;
-        errdefer c.udev_monitor_unref(monitor);
+        errdefer _ = c.udev_monitor_unref(monitor);
         _ = c.udev_monitor_filter_add_match_subsystem_devtype(monitor, "usb", "usb_device");
         _ = c.udev_monitor_enable_receiving(monitor);
 
@@ -59,8 +63,13 @@ pub const Scanner = struct {
         if (self.thread) |t| t.join();
         for (self.known.keys()) |k| self.allocator.free(k);
         self.known.deinit(self.allocator);
-        if (self.monitor) |m| c.udev_monitor_unref(m);
-        if (self.udev) |u| c.udev_unref(u);
+        {
+            var kit = self.ifaces.keyIterator();
+            while (kit.next()) |k| self.allocator.free(k.*);
+        }
+        self.ifaces.deinit(self.allocator);
+        if (self.monitor) |m| _ = c.udev_monitor_unref(m);
+        if (self.udev) |u| _ = c.udev_unref(u);
         self.allocator.destroy(self);
     }
 
@@ -80,7 +89,7 @@ pub const Scanner = struct {
             if (ready > 0) {
                 while (true) {
                     const dev = c.udev_monitor_receive_device(self.monitor) orelse break;
-                    defer c.udev_device_unref(dev);
+                    defer _ = c.udev_device_unref(dev);
                     self.handleDevice(dev);
                 }
             }
@@ -96,7 +105,7 @@ pub const Scanner = struct {
 
     fn enumerate(self: *Scanner) void {
         const e = c.udev_enumerate_new(self.udev) orelse return;
-        defer c.udev_enumerate_unref(e);
+        defer _ = c.udev_enumerate_unref(e);
         _ = c.udev_enumerate_add_match_subsystem(e, "usb");
         if (c.udev_enumerate_scan_devices(e) != 0) return;
 
@@ -104,19 +113,23 @@ pub const Scanner = struct {
         while (it != null) : (it = c.udev_list_entry_get_next(it)) {
             const syspath = c.udev_list_entry_get_name(it) orelse continue;
             const dev = c.udev_device_new_from_syspath(self.udev, syspath) orelse continue;
-            defer c.udev_device_unref(dev);
+            defer _ = c.udev_device_unref(dev);
             self.handleDevice(dev);
         }
     }
 
-    /// Process one udev device (from enumeration or monitor). Interfaces
-    /// (devtype usb_interface) are ignored; only usb_device nodes classify.
+    /// Process one udev device (from enumeration or monitor). Interface
+    /// nodes feed the descriptor cache; only usb_device nodes classify.
     fn handleDevice(self: *Scanner, dev: *c.struct_udev_device) void {
         const devtype = c.udev_device_get_devtype(dev) orelse return;
-        if (!std.mem.eql(u8, std.mem.span(devtype), "usb_device")) return;
+        if (!std.mem.eql(u8, std.mem.span(devtype), "usb_device")) {
+            self.noteInterface(dev);
+            return;
+        }
 
         const syspath = c.udev_device_get_syspath(dev) orelse return;
-        const action = c.udev_device_get_action(dev) orelse "add";
+        const action_ptr = c.udev_device_get_action(dev);
+        const action: []const u8 = if (action_ptr) |a| std.mem.span(a) else "add";
         const path_slice = std.mem.span(syspath);
 
         if (std.mem.eql(u8, action, "remove")) {
@@ -145,6 +158,37 @@ pub const Scanner = struct {
         self.channel.push(.{ .device_added = info });
     }
 
+    /// Record an interface node's descriptor against its parent device path.
+    fn noteInterface(self: *Scanner, dev: *c.struct_udev_device) void {
+        const parent = c.udev_device_get_parent(dev) orelse return;
+        const parent_path = c.udev_device_get_syspath(parent) orelse return;
+        const class = blk: {
+            const v = c.udev_device_get_sysattr_value(dev, "bInterfaceClass") orelse return;
+            break :blk std.fmt.parseInt(u8, std.mem.trim(u8, std.mem.span(v), " \t\r\n"), 16) catch null;
+        };
+        const subclass: ?u8 = blk: {
+            const v = c.udev_device_get_sysattr_value(dev, "bInterfaceSubClass") orelse break :blk null;
+            break :blk std.fmt.parseInt(u8, std.mem.trim(u8, std.mem.span(v), " \t\r\n"), 16) catch null;
+        };
+        const protocol: ?u8 = blk: {
+            const v = c.udev_device_get_sysattr_value(dev, "bInterfaceProtocol") orelse break :blk null;
+            break :blk std.fmt.parseInt(u8, std.mem.trim(u8, std.mem.span(v), " \t\r\n"), 16) catch null;
+        };
+
+        const info = InterfaceInfo{ .class = class, .subclass = subclass, .protocol = protocol };
+        const key = self.allocator.dupe(u8, std.mem.span(parent_path)) catch return;
+        const gop = self.ifaces.getOrPut(self.allocator, key) catch {
+            self.allocator.free(key);
+            return;
+        };
+        if (gop.found_existing) {
+            self.allocator.free(key);
+        } else {
+            gop.key_ptr.* = key;
+        }
+        gop.value_ptr.* = info;
+    }
+
     fn removeKnown(self: *Scanner, path: []const u8) void {
         if (self.known.fetchSwapRemove(path)) |kv| {
             self.allocator.free(kv.key);
@@ -154,7 +198,6 @@ pub const Scanner = struct {
     }
 
     fn buildInfo(self: *Scanner, dev: *c.struct_udev_device) ?ev.DeviceInfo {
-        _ = self;
         var info = ev.DeviceInfo{};
 
         const syspath = c.udev_device_get_syspath(dev) orelse return null;
@@ -168,8 +211,15 @@ pub const Scanner = struct {
         if (sysattr(dev, "product")) |s| info.product.set(s);
         if (sysattr(dev, "serial")) |s| info.serial.set(s);
 
-        // First child interface's descriptor, when the sysfs nodes are there.
-        const ifc = readFirstInterface(info.key.path.slice());
+        // Interface descriptor from the cache, when interface events have
+        // been processed for this device.
+        const ifc: ?InterfaceInfo = blk: {
+            if (self.ifaces.fetchRemove(info.key.path.slice())) |kv| {
+                self.allocator.free(kv.key);
+                break :blk kv.value;
+            }
+            break :blk null;
+        };
         if (ifc) |i| {
             info.mode = proto.classify(.{
                 .vid = info.vid,
@@ -192,33 +242,41 @@ const InterfaceInfo = struct {
 };
 
 /// Read the first child interface's class attributes straight from sysfs
-/// (children of a usb_device node are named like "1-2:1.0").
+/// (children of a usb_device node are named like "1-2:1.0"). libc-based so
+/// it works from the scanner thread without the new Io handle.
 fn readFirstInterface(syspath: []const u8) ?InterfaceInfo {
-    var dir = std.fs.openDirAbsolute(syspath, .{ .iterate = true }) catch return null;
-    defer dir.close();
+    const c_dirent = @cImport({
+        @cInclude("dirent.h");
+    });
+    var spbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const spz = std.fmt.bufPrintZ(&spbuf, "{s}", .{syspath}) catch return null;
+    const dir = c_dirent.opendir(spz.ptr) orelse return null;
+    defer _ = c_dirent.closedir(dir);
 
-    var it = dir.iterate();
-    while (it.next() catch null) |entry| {
-        if (entry.kind != .directory) continue;
-        if (std.mem.indexOfScalar(u8, entry.name, ':') == null) continue;
-
-        var sub = dir.openDir(entry.name, .{}) catch continue;
-        defer sub.close();
-        const class = readHexSysattr(&sub, "bInterfaceClass");
-        if (class == null) continue;
-        return .{
-            .class = class,
-            .subclass = readHexSysattr(&sub, "bInterfaceSubClass"),
-            .protocol = readHexSysattr(&sub, "bInterfaceProtocol"),
-        };
+    while (true) {
+        const entry = c_dirent.readdir(dir) orelse return null;
+        const name = std.mem.span(entry.name);
+        if (std.mem.indexOfScalar(u8, name, ':') == null) continue;
+        if (readHexSysattrFile(spz, name, "bInterfaceClass")) |class| {
+            return .{
+                .class = class,
+                .subclass = readHexSysattrFile(spz, name, "bInterfaceSubClass"),
+                .protocol = readHexSysattrFile(spz, name, "bInterfaceProtocol"),
+            };
+        }
     }
-    return null;
 }
 
-fn readHexSysattr(dir: *std.fs.Dir, name: []const u8) ?u8 {
+fn readHexSysattrFile(syspath: [:0]const u8, child: []const u8, attr: []const u8) ?u8 {
+    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&pbuf, "{s}/{s}/{s}", .{ syspath, child, attr }) catch return null;
+    const f = c.fopen(path.ptr, "rb") orelse return null;
+    defer _ = c.fclose(f);
     var buf: [32]u8 = undefined;
-    const contents = dir.readFile(name, &buf) catch return null;
-    const trimmed = std.mem.trim(u8, contents, " \t\r\n");
+    const n = c.fread(&buf, 1, buf.len - 1, f);
+    if (n == 0) return null;
+    buf[n] = 0;
+    const trimmed = std.mem.trim(u8, buf[0..n], " \t\r\n");
     return std.fmt.parseInt(u8, trimmed, 16) catch null;
 }
 

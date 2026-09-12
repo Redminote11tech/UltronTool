@@ -84,6 +84,17 @@ pub const Progress = struct {
     label: FixedStr(160) = .{},
 };
 
+pub const ChipInfoEvent = struct {
+    protocol_version: u32 = 0,
+    serial: ?u32 = null,
+    hwid: ?u64 = null,
+    msm_id: u32 = 0,
+    oem_id: u16 = 0,
+    model_id: u16 = 0,
+    /// Hex string of the OEM PK hash ("" when unavailable).
+    pkhash: FixedStr(140) = .{},
+};
+
 pub const Finished = struct {
     success: bool,
     message: FixedStr(512) = .{},
@@ -93,6 +104,7 @@ pub const Event = union(enum) {
     device_added: DeviceInfo,
     device_removed: DeviceKey,
     progress: Progress,
+    chip_info: ChipInfoEvent,
     finished: Finished,
 };
 

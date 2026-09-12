@@ -155,23 +155,25 @@ fn flashInner(
         if (cancel.load(.acquire)) return error.Cancelled;
         exec_ctx.op_idx = i;
 
-        switch (item.op) {
-            .program => |*p| {
-                const fname = p.filename orelse continue; // dropped missing image
-                logger.info("programming {s} (label {s})", .{ fname, p.label orelse "?" });
-                var file = fileio.File.open(fname) catch |e| {
-                    logger.err("unable to open image {s}", .{fname});
-                    return e;
-                };
-                defer file.close();
-                try fhs.program(p, &file);
-            },
-            .erase => |*e| {
-                logger.info("erasing partition {s} ({d} sectors)", .{ e.start_sector, e.num_sectors });
-                try fhs.erase(e);
-            },
-            .patch => |*pt| {
-                try fhs.applyPatch(pt);
+        switch (item) {
+            .op => |op| switch (op.tag) {
+                .program => |*p| {
+                    const fname = p.filename orelse continue; // dropped missing image
+                    logger.info("programming {s} (label {s})", .{ fname, p.label orelse "?" });
+                    var file = fileio.File.open(fname) catch |e| {
+                        logger.err("unable to open image {s}", .{fname});
+                        return e;
+                    };
+                    defer file.close();
+                    try fhs.program(p, &file);
+                },
+                .erase => |*e| {
+                    logger.info("erasing partition {s} ({d} sectors)", .{ e.start_sector, e.num_sectors });
+                    try fhs.erase(e);
+                },
+                .patch => |*pt| {
+                    try fhs.applyPatch(pt);
+                },
             },
             .set_bootable => |part| {
                 try fhs.setBootable(part);

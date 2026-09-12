@@ -180,7 +180,7 @@ fn findInterface(
         const cfg = config.?;
 
         for (0..@intCast(cfg.bNumInterfaces)) |ii| {
-            const libusb_ifc = &cfg.interfaces[ii]; // altsetting array
+            const libusb_ifc = &cfg.interface[ii]; // altsetting array
             for (0..@intCast(libusb_ifc.num_altsetting)) |ai| {
                 const a = &libusb_ifc.altsetting[ai];
                 var eps_buf: [16]EndpointDesc = undefined;
@@ -250,14 +250,19 @@ fn openOnce(policy: *const Policy, serial: ?[]const u8, logger: *log.Logger) Err
     if (c.libusb_init(null) != 0) return Error.Io;
     errdefer c.libusb_exit(null);
 
-    var list: ?[*c]*c.libusb_device = null;
-    const n = c.libusb_get_device_list(null, &list);
+    // libusb_device is opaque to cImport, so carry the list as void pointers
+    // and only cast each element to the opaque device type on use.
+    var list: [*c]?*anyopaque = null;
+    const n = c.libusb_get_device_list(null, @ptrCast(&list));
     if (n < 0) return Error.Io;
-    defer c.libusb_free_device_list(list, 1);
+    defer _ = c.libusb_free_device_list(@ptrCast(list), 1);
 
     var saw_candidate = false;
 
-    for (list.?[0..@intCast(n)]) |dev| {
+    var li: usize = 0;
+    while (li < @as(usize, @intCast(n))) : (li += 1) {
+        const dev_opt = list[li] orelse continue;
+        const dev: *c.libusb_device = @ptrCast(@alignCast(dev_opt));
         var desc: c.libusb_device_descriptor = undefined;
         if (c.libusb_get_device_descriptor(dev, &desc) != 0) continue;
 
