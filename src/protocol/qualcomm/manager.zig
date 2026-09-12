@@ -284,6 +284,16 @@ pub const Manager = struct {
     /// Open a transport and probe what is running.
     fn connect(self: *Manager, programmer: ?[]const u8, storage: firehose.StorageType, skip_storage_init: bool) void {
         if (self.cancel.load(.acquire)) return;
+
+        // Already waiting for a loader with the HELLO preserved: a re-probe
+        // would close the transport and lose the HELLO (the PBL does not
+        // re-send it), so just re-announce the state.
+        if (self.state == .needs_loader and self.t != null) {
+            self.emitState(.needs_loader);
+            pushFinished(self.channel, true, "loader required");
+            return;
+        }
+
         self.teardown();
         self.logger.info("connecting…", .{});
 
@@ -316,19 +326,17 @@ pub const Manager = struct {
             const cmd = std.mem.readInt(u32, buf[0..4], .little);
             const length = std.mem.readInt(u32, buf[4..8], .little);
             if (@as(u32, @intCast(n)) == length and cmd == sahara.HELLO) {
-                // Bare EDL device: a loader is required. Drop the probe
-                // handle — the device re-issues HELLO on the fresh
-                // connection used for the upload.
+                // Bare EDL device: a loader is required. The PBL does NOT
+                // re-send HELLO when the host merely reopens the device, so
+                // the transport stays open and the consumed HELLO is
+                // replayed into the Sahara state machine — the upload then
+                // continues on this very connection, exactly like qdl.
+                self.io.?.pushBack(buf[0..n]);
                 if (programmer) |p| {
                     self.logger.info("device is in EDL mode: uploading the chosen loader", .{});
-                    // Drop the probe handle first: the HELLO was already
-                    // consumed, and the device re-issues it on the fresh
-                    // connection the upload uses.
-                    self.teardown();
                     self.uploadLoader(p, storage, skip_storage_init);
                 } else {
-                    self.logger.info("device is in EDL mode: a firehose loader is required", .{});
-                    self.teardown();
+                    self.logger.info("device is in EDL mode: a firehose loader is required (connection kept open)", .{});
                     self.emitState(.needs_loader);
                     pushFinished(self.channel, true, "loader required");
                 }
@@ -391,7 +399,10 @@ pub const Manager = struct {
             .progress = .{ .ctx = @constCast(@ptrCast(self.channel)), .cb = saharaProgressCb },
         };
         self.logger.info("uploading loader {s} over Sahara", .{programmer});
-        sa.run(.{ .detect_firehose = true }) catch |e| {
+        sa.run(.{ .detect_firehose = false }) catch |e| {
+            if (e == Error.Timeout) {
+                self.logger.err("device did not answer Sahara HELLO — replug the device into EDL mode and retry", .{});
+            }
             self.logger.err("Sahara transfer failed: {s}", .{@errorName(e)});
             self.teardown();
             pushFinished(self.channel, false, @errorName(e));
@@ -875,4 +886,132 @@ test "manager: already-in-firehose connect loads partitions" {
     try std.testing.expectEqual(@as(u32, 2), mgr.num_luns);
     // Final state fired was firehose_ready.
     try std.testing.expectEqual(ev.SessionState.firehose_ready, collector.states.items[collector.states.items.len - 1]);
+}
+
+test "manager: loader upload reuses the probed connection (replayed HELLO)" {
+    const channel = try heap.create(EventChannel);
+    channel.* = .{};
+    defer heap.destroy(channel);
+    var cancel = std.atomic.Value(bool).init(false);
+
+    const logger = try heap.create(log.Logger);
+    logger.* = .{ .mirror_stderr = false };
+
+    // Tiny fake firehose programmer the device will "request" over Sahara.
+    var tmp = try fileio.TmpDir.init();
+    defer tmp.cleanup();
+    const image = "FAKE-PROG-IMG!";
+    try tmp.writeFile("prog.elf", image);
+
+    // Sahara HELLO the device sends on enumeration (mode: image tx).
+    var hello_pkt: [48]u8 = @splat(0);
+    std.mem.writeInt(u32, hello_pkt[0..4], sahara.HELLO, .little);
+    std.mem.writeInt(u32, hello_pkt[4..8], 48, .little);
+    std.mem.writeInt(u32, hello_pkt[8..12], 2, .little);
+    std.mem.writeInt(u32, hello_pkt[12..16], 1, .little);
+    std.mem.writeInt(u32, hello_pkt[16..20], 4096, .little);
+    std.mem.writeInt(u32, hello_pkt[20..24], sahara.MODE_IMAGE_TX_PENDING, .little);
+
+    var read_data: [20]u8 = @splat(0);
+    std.mem.writeInt(u32, read_data[0..4], sahara.READ_DATA, .little);
+    std.mem.writeInt(u32, read_data[4..8], 20, .little);
+    std.mem.writeInt(u32, read_data[8..12], 13, .little); // image id 13
+    std.mem.writeInt(u32, read_data[12..16], 0, .little);
+    std.mem.writeInt(u32, read_data[16..20], image.len, .little);
+
+    var eoi: [16]u8 = @splat(0);
+    std.mem.writeInt(u32, eoi[0..4], sahara.END_OF_IMAGE, .little);
+    std.mem.writeInt(u32, eoi[4..8], 16, .little);
+    std.mem.writeInt(u32, eoi[8..12], 13, .little);
+
+    var done_resp: [12]u8 = @splat(0);
+    std.mem.writeInt(u32, done_resp[0..4], sahara.DONE_RESP, .little);
+    std.mem.writeInt(u32, done_resp[4..8], 12, .little);
+    std.mem.writeInt(u32, done_resp[8..12], 1, .little); // complete
+
+    var gpt_buf: [4096]u8 = undefined;
+    _ = gpt.sampleGpt(512, &gpt_buf);
+    const head = gpt_buf[0..1024];
+    const ents = gpt_buf[1024..1536];
+
+    const steps = [_]SimStep{
+        // connect probe: the device greets with Sahara HELLO (consumed here,
+        // replayed by the manager for the upload)
+        .{ .respond = &hello_pkt },
+        // upload: HELLO_RESP write, then the device requests the image
+        .{ .any_write = {} },
+        .{ .respond = &read_data },
+        .{ .expect_write = image },
+        .{ .respond = &eoi },
+        // DONE write, device confirms complete
+        .{ .any_write = {} },
+        .{ .respond = &done_resp },
+        // configure (skip_storage_init = true)
+        .{ .any_write = {} },
+        .{ .respond = ack },
+        // getstorageinfo
+        .{ .any_write = {} },
+        .{ .respond = storage_info_log },
+        // GPT header read
+        .{ .any_write = {} },
+        .{ .respond = rawmode_ack },
+        .{ .respond = head },
+        .{ .respond = ack },
+        // GPT entries read
+        .{ .any_write = {} },
+        .{ .respond = rawmode_ack },
+        .{ .respond = ents },
+        .{ .respond = ack },
+    };
+
+    var harness = try SimHarness.init(heap, &steps);
+    defer harness.deinit();
+    var opener = SimOpener{ .harness = &harness };
+
+    const mgr = try Manager.init(heap, logger, channel, &cancel, &SimOpener.open, &opener);
+    defer mgr.shutdown();
+    try mgr.start();
+
+    // User flow: Connect (no loader chosen) -> needs_loader -> choose file ->
+    // Upload loader — all on ONE kept-open connection.
+    mgr.enqueue(.{ .connect = .{} });
+
+    var collector = Collector{};
+    defer collector.deinit();
+    var saw_needs_loader = false;
+    var deadline: usize = 0;
+    while (deadline < 200 and !saw_needs_loader) : (deadline += 1) {
+        channel.drain(&collector, Collector.cb);
+        for (collector.states.items) |st| {
+            if (st == .needs_loader) saw_needs_loader = true;
+        }
+        glib.usleep(10 * std.time.us_per_ms);
+    }
+    try std.testing.expect(saw_needs_loader);
+    try std.testing.expect(harness.failure == null);
+
+    var pbuf: [176]u8 = undefined;
+    const prog_path = try tmp.filePath(&pbuf, "prog.elf");
+    mgr.enqueue(.{ .upload_loader = .{ .programmer = prog_path, .skip_storage_init = true } });
+
+    var got_partitions = false;
+    deadline = 0;
+    while (deadline < 300) : (deadline += 1) {
+        channel.drain(&collector, Collector.cb);
+        if (collector.partitions != null) {
+            got_partitions = true;
+            break;
+        }
+        glib.usleep(10 * std.time.us_per_ms);
+    }
+
+    const parts = collector.partitions orelse {
+        for (collector.finished.items) |f| std.debug.print("DBG finished: success={} msg={s}\n", .{ f.success, f.message.slice() });
+        return error.TestExpectedEqual;
+    };
+    try std.testing.expectEqual(@as(u32, 2), parts.count);
+    try std.testing.expectEqualStrings("boot", parts.parts[0].name.slice());
+    try std.testing.expectEqual(@as(u32, 512), mgr.sector_size);
+    // The whole flow ran on the first transport: no reconnect happened.
+    try std.testing.expect(harness.failure == null);
 }

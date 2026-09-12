@@ -615,9 +615,10 @@ fn refreshMainPage(ui: *Ui) void {
     if (ui.loader_section) |w| gtk.Widget.setVisible(w, @intFromBool(has_device and ui.session == .needs_loader));
     if (ui.conn_section) |w| gtk.Widget.setVisible(w, @intFromBool(has_device and ui.session == .firehose_ready));
 
-    // The chip probe only makes sense before a Firehose session exists.
+    // The chip probe and Connect only make sense before a session exists.
     if (ui.dev_chip_label) |l| gtk.Widget.setVisible(l.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
     if (ui.storage_drop) |d| gtk.Widget.setVisible(d.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
+    if (ui.connect_btn) |b| gtk.Widget.setVisible(b.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
 
     if (has_device) {
         const dev = ui.device.?;
