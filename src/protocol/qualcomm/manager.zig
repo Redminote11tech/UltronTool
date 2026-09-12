@@ -311,10 +311,18 @@ pub const Manager = struct {
         };
 
         // Probe: Firehose programmers greet with XML; a bare EDL device sends
-        // a Sahara HELLO immediately. A read timeout is treated as "firehose
-        // already running" (qdl detect_firehose semantics).
+        // a Sahara HELLO immediately. Some PBLs re-broadcast HELLO with a
+        // period longer than a single read timeout, so poll for up to ~3 s
+        // before classifying. A timeout is then treated as "firehose already
+        // running" (qdl detect_firehose semantics).
         var buf: [4096]u8 = undefined;
-        const n = self.io.?.read(&buf, 1000) catch 0;
+        var n: usize = 0;
+        var attempt: u32 = 0;
+        while (attempt < 3) : (attempt += 1) {
+            if (self.cancel.load(.acquire)) return;
+            n = self.io.?.read(&buf, 1000) catch 0;
+            if (n > 0) break;
+        }
 
         if (n >= 5 and std.mem.eql(u8, buf[0..5], "<?xml")) {
             self.logger.info("device already runs a Firehose programmer — skipping loader", .{});
@@ -431,6 +439,9 @@ pub const Manager = struct {
 
         fh.configure(storage, skip_storage_init) catch |e| {
             self.logger.err("Firehose configure failed: {s}", .{@errorName(e)});
+            if (e == Error.Timeout) {
+                self.logger.err("hint: if the device is in EDL mode, unplug it, replug, and Connect again to upload a loader", .{});
+            }
             self.teardown();
             pushFinished(self.channel, false, @errorName(e));
             self.emitState(.disconnected);
@@ -582,13 +593,22 @@ pub const Manager = struct {
         defer self.alloc.free(chunk);
 
         self.logger.info("reading {s} ({d} sectors from LBA {d}) to {s}", .{ label, num_sectors, first_lba, path });
+
+        var jp = JobProgress{ .channel = self.channel };
+        jp.setPrefix("reading {s}", .{label});
+        const saved_progress = fh.progress;
+        fh.progress = .{ .ctx = &jp, .cb = JobProgress.cb };
+        defer fh.progress = saved_progress;
+
         const ok = fh.readSectorsToFile(&op, &file, chunk, label) catch |e| {
             self.sessionError(e);
             return;
         };
         if (ok) {
             self.logger.info("read of {s} finished", .{label});
-            pushFinished(self.channel, true, "read finished");
+            var msg = ev.FixedStr(512){};
+            msg.set(std.fmt.bufPrint(&jp.prefix, "{s}: read finished", .{label}) catch "read finished");
+            self.channel.push(.{ .finished = .{ .success = true, .message = msg } });
         } else {
             self.logger.err("read of {s} failed", .{label});
             pushFinished(self.channel, false, "read failed");
@@ -629,11 +649,20 @@ pub const Manager = struct {
         };
 
         self.logger.info("writing {s} ({d} bytes) to {s} (LBA {d})", .{ path, file_size, label, first_lba });
+
+        var jp = JobProgress{ .channel = self.channel };
+        jp.setPrefix("writing {s}", .{label});
+        const saved_progress = fh.progress;
+        fh.progress = .{ .ctx = &jp, .cb = JobProgress.cb };
+        defer fh.progress = saved_progress;
+
         fh.program(&op, &file) catch |e| {
             self.sessionError(e);
             return;
         };
-        pushFinished(self.channel, true, "write finished");
+        var msg = ev.FixedStr(512){};
+        msg.set(std.fmt.bufPrint(&jp.prefix, "{s}: write finished", .{label}) catch "write finished");
+        self.channel.push(.{ .finished = .{ .success = true, .message = msg } });
     }
 
     fn flashXml(self: *Manager, files: []const []const u8, allow_missing: bool) void {
@@ -754,6 +783,31 @@ const ExecCtx = struct {
     channel: *EventChannel,
     op_idx: usize = 0,
     op_total: usize = 0,
+};
+
+/// Progress hook for single read/write jobs: reports the job's own fraction
+/// with a fixed label ("reading cache", "writing boot", ...).
+const JobProgress = struct {
+    channel: *EventChannel,
+    prefix: [150]u8 = undefined,
+    prefix_len: usize = 0,
+
+    fn setPrefix(self: *JobProgress, comptime fmt: []const u8, args: anytype) void {
+        const text = std.fmt.bufPrint(&self.prefix, fmt, args) catch {
+            self.prefix_len = 0;
+            return;
+        };
+        self.prefix_len = text.len;
+    }
+
+    fn cb(ctx: ?*anyopaque, _: []const u8, done: u64, total: u64) void {
+        const self: *JobProgress = @ptrCast(@alignCast(ctx orelse return));
+        const frac: f32 = if (total == 0) -1.0 else @as(f32, @floatFromInt(done)) / @as(f32, @floatFromInt(total));
+        self.channel.push(.{ .progress = .{
+            .fraction = frac,
+            .label = ev.FixedStr(160).fromSlice(self.prefix[0..self.prefix_len]),
+        } });
+    }
 };
 
 fn saharaProgressCb(ctx: ?*anyopaque, name: []const u8, done: u64, total: u64) void {

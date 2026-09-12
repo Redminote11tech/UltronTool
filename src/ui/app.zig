@@ -401,7 +401,6 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     const chip_row = adw.ActionRow.new();
     rowTitle(chip_row, "Sahara chip identity");
     const probe_btn = gtk.Button.newWithLabel("Read chip info");
-    gtk.Button.setHasFrame(probe_btn, 0);
     _ = gtk.Button.signals.clicked.connect(probe_btn, *Ui, &onProbeClicked, ui, .{});
     adw.ActionRow.addSuffix(chip_row, probe_btn.as(gtk.Widget));
     ui.probe_btn = probe_btn;
@@ -438,7 +437,6 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     rowTitle(loader_row, "Programmer (.mbn/.elf)");
     adw.ActionRow.setSubtitle(loader_row, "None selected");
     const loader_btn = gtk.Button.newWithLabel("Choose…");
-    gtk.Button.setHasFrame(loader_btn, 0);
     _ = gtk.Button.signals.clicked.connect(loader_btn, *Ui, &onPickLoader, ui, .{});
     adw.ActionRow.addSuffix(loader_row, loader_btn.as(gtk.Widget));
     adw.PreferencesGroup.add(loader_group, loader_row.as(gtk.Widget));
@@ -476,7 +474,6 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     const lun_drop = gtk.DropDown.newFromStrings(@ptrCast(&lun_names));
     adw.ActionRow.addSuffix(lun_row, lun_drop.as(gtk.Widget));
     const refresh_btn = gtk.Button.newWithLabel("Refresh");
-    gtk.Button.setHasFrame(refresh_btn, 0);
     _ = gtk.Button.signals.clicked.connect(refresh_btn, *Ui, &onRefreshClicked, ui, .{});
     adw.ActionRow.addSuffix(lun_row, refresh_btn.as(gtk.Widget));
     ui.lun_row = lun_row.as(gtk.Widget);
@@ -501,11 +498,9 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     rowTitle(pending_row, "Queued writes");
     adw.ActionRow.setSubtitle(pending_row, "None — click Write on a partition to queue one");
     const clear_writes_btn = gtk.Button.newWithLabel("Clear");
-    gtk.Button.setHasFrame(clear_writes_btn, 0);
     _ = gtk.Button.signals.clicked.connect(clear_writes_btn, *Ui, &onClearWritesClicked, ui, .{});
     adw.ActionRow.addSuffix(pending_row, clear_writes_btn.as(gtk.Widget));
     const write_all_btn = gtk.Button.newWithLabel("Write");
-    gtk.Button.setHasFrame(write_all_btn, 0);
     gtk.Widget.addCssClass(write_all_btn.as(gtk.Widget), "destructive-action");
     gtk.Widget.setSensitive(write_all_btn.as(gtk.Widget), 0);
     _ = gtk.Button.signals.clicked.connect(write_all_btn, *Ui, &onWriteAllClicked, ui, .{});
@@ -525,11 +520,9 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     rowTitle(xml_row, "Flash layout XML");
     adw.ActionRow.setSubtitle(xml_row, "None selected");
     const xml_add_btn = gtk.Button.newWithLabel("Add…");
-    gtk.Button.setHasFrame(xml_add_btn, 0);
     _ = gtk.Button.signals.clicked.connect(xml_add_btn, *Ui, &onAddXml, ui, .{});
     adw.ActionRow.addSuffix(xml_row, xml_add_btn.as(gtk.Widget));
     const xml_clear_btn = gtk.Button.newWithLabel("Clear");
-    gtk.Button.setHasFrame(xml_clear_btn, 0);
     _ = gtk.Button.signals.clicked.connect(xml_clear_btn, *Ui, &onClearXml, ui, .{});
     adw.ActionRow.addSuffix(xml_row, xml_clear_btn.as(gtk.Widget));
     adw.PreferencesGroup.add(xml_group, xml_row.as(gtk.Widget));
@@ -671,12 +664,10 @@ fn rebuildPartitions(ui: *Ui, parts: *const ev.PartitionsEvent) void {
         setSubtitleZ(action_row, sub);
 
         const read_btn = gtk.Button.newWithLabel("Read");
-        gtk.Button.setHasFrame(read_btn, 0);
         _ = gtk.Button.signals.clicked.connect(read_btn, *RowCtx, &onReadClicked, ctx, .{});
         adw.ActionRow.addSuffix(action_row, read_btn.as(gtk.Widget));
 
         const write_btn = gtk.Button.newWithLabel("Write");
-        gtk.Button.setHasFrame(write_btn, 0);
         gtk.Widget.addCssClass(write_btn.as(gtk.Widget), "destructive-action");
         _ = gtk.Button.signals.clicked.connect(write_btn, *RowCtx, &onWriteClicked, ctx, .{});
         adw.ActionRow.addSuffix(action_row, write_btn.as(gtk.Widget));
@@ -1068,6 +1059,17 @@ fn chipProbeRun(ctx: *WorkerCtx) void {
 fn buildConsolePage(ui: *Ui) *gtk.Widget {
     const page = gtk.Box.new(.vertical, 0);
 
+    const console_header = gtk.Box.new(.horizontal, 8);
+    setMargins(console_header.as(gtk.Widget), 8, 12, 12, 8);
+    const console_title = gtk.Label.new("Protocol console — every exchange with the device");
+    gtk.Widget.setHexpand(console_title.as(gtk.Widget), 1);
+    gtk.Widget.setHalign(console_title.as(gtk.Widget), .start);
+    gtk.Box.append(console_header, console_title.as(gtk.Widget));
+    const copy_btn = gtk.Button.newWithLabel("Copy log");
+    _ = gtk.Button.signals.clicked.connect(copy_btn, *Ui, &onCopyLogClicked, ui, .{});
+    gtk.Box.append(console_header, copy_btn.as(gtk.Widget));
+    gtk.Box.append(page, console_header.as(gtk.Widget));
+
     const scrolled = gtk.ScrolledWindow.new();
     gtk.ScrolledWindow.setPolicy(scrolled, .automatic, .automatic);
     gtk.Widget.setVexpand(scrolled.as(gtk.Widget), 1);
@@ -1091,6 +1093,29 @@ fn buildConsolePage(ui: *Ui) *gtk.Widget {
     _ = gtk.TextBuffer.createTag(buffer, "t-err", "foreground", "red", @as(?*anyopaque, null));
 
     return page.as(gtk.Widget);
+}
+
+fn onCopyLogClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    const view = ui.console_view orelse return;
+    const buffer = gtk.TextView.getBuffer(view);
+    var start: gtk.TextIter = undefined;
+    var end: gtk.TextIter = undefined;
+    gtk.TextBuffer.getStartIter(buffer, &start);
+    gtk.TextBuffer.getEndIter(buffer, &end);
+    const text_c = gtk.TextBuffer.getText(buffer, &start, &end, 0);
+    defer glib.free(text_c);
+    const text = std.mem.span(text_c);
+    if (text.len == 0) {
+        ui.toast("Console is empty");
+        return;
+    }
+    const bytes = glib.Bytes.new(text.ptr, text.len);
+    defer glib.Bytes.unref(bytes);
+    const provider = gdk.ContentProvider.newForBytes("text/plain", bytes);
+    defer provider.unref();
+    const clipboard = gtk.Widget.getClipboard(view.as(gtk.Widget));
+    _ = gdk.Clipboard.setContent(clipboard, provider);
+    ui.toast("Log copied to clipboard");
 }
 
 fn consoleAppend(ui: *Ui, text: []const u8, tag: ?[*:0]const u8) void {
@@ -1200,7 +1225,11 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
 }
 
 fn isNotable(msg: []const u8) bool {
-    const names = [_][]const u8{ "read finished", "write finished", "flash finished", "device reset", "loader required", "disconnected" };
+    const suffixes = [_][]const u8{ "read finished", "write finished", "flash finished" };
+    for (suffixes) |sfx| {
+        if (std.mem.endsWith(u8, msg, sfx)) return true;
+    }
+    const names = [_][]const u8{ "device reset", "loader required", "disconnected", "connected" };
     for (names) |n| {
         if (std.mem.eql(u8, msg, n)) return true;
     }
