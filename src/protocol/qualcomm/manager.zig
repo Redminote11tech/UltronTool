@@ -525,7 +525,7 @@ pub const Manager = struct {
         };
         defer self.alloc.free(parts);
 
-        var event = ev.PartitionsEvent{ .lun = lun };
+        var event = ev.PartitionsEvent{ .lun = lun, .sector_size = sector_size, .luns = self.num_luns };
         for (parts) |p| {
             if (event.count >= ev.max_partition_rows) break;
             event.parts[event.count] = .{

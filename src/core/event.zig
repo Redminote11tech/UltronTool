@@ -118,6 +118,8 @@ pub const max_partition_rows = 128;
 pub const PartitionsEvent = struct {
     lun: u32 = 0,
     count: u32 = 0,
+    sector_size: u32 = 0,
+    luns: u32 = 1,
     parts: [max_partition_rows]PartitionRow = undefined,
 };
 

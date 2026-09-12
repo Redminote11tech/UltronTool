@@ -262,7 +262,7 @@ pub fn chipInfo(
     serial: ?[]const u8,
     wait_ms: u32,
 ) !sahara.ChipInfo {
-    var usb_dev = try usb.open(&usb_ids.policy, serial, wait_ms, logger);
+    var usb_dev = try usb.open(&usb_ids.policy, serial, wait_ms, logger, alloc);
     defer usb_dev.close();
     var io = transport.Io.init(alloc, usb_dev.transport());
     defer io.deinit();
