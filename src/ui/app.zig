@@ -85,7 +85,6 @@ pub const Ui = struct {
     toast_overlay: ?*adw.ToastOverlay = null,
     cancel_button: ?*gtk.Button = null,
     progress: ?*gtk.ProgressBar = null,
-    progress_label: ?*gtk.Label = null,
     console_view: ?*gtk.TextView = null,
 
     // Main page sections.
@@ -104,7 +103,7 @@ pub const Ui = struct {
     upload_btn: ?*gtk.Button = null,
 
     conn_section: ?*gtk.Widget = null,
-    storage_info_label: ?*gtk.Label = null,
+    parts_group: ?*adw.PreferencesGroup = null,
     lun_row: ?*gtk.Widget = null,
     lun_drop: ?*gtk.DropDown = null,
     refresh_btn: ?*gtk.Button = null,
@@ -133,7 +132,10 @@ pub const Ui = struct {
         inline for (.{ self.connect_btn, self.probe_btn, self.upload_btn, self.write_all_btn, self.flash_xml_btn, self.reset_btn, self.disconnect_btn, self.refresh_btn }) |maybe_btn| {
             if (maybe_btn) |b| gtk.Widget.setSensitive(b.as(gtk.Widget), enable);
         }
-        if (self.cancel_button) |b| gtk.Widget.setVisible(b.as(gtk.Widget), @intFromBool(busy_now));
+        if (self.cancel_button) |b| {
+            gtk.Widget.setVisible(b.as(gtk.Widget), @intFromBool(busy_now));
+            gtk.Widget.setSensitive(b.as(gtk.Widget), 1);
+        }
     }
 
     fn busy(self: *Ui) bool {
@@ -154,8 +156,8 @@ pub const Ui = struct {
         if (self.progress) |p| {
             gtk.Widget.setVisible(p.as(gtk.Widget), 1);
             gtk.ProgressBar.setFraction(p, 0);
+            gtk.ProgressBar.setText(p, "working…");
         }
-        if (self.progress_label) |l| gtk.Widget.setVisible(l.as(gtk.Widget), 1);
     }
 
     fn jobDone(self: *Ui) void {
@@ -163,7 +165,6 @@ pub const Ui = struct {
         if (self.outstanding == 0) {
             self.setBusy(false);
             if (self.progress) |p| gtk.Widget.setVisible(p.as(gtk.Widget), 0);
-            if (self.progress_label) |l| gtk.Widget.setVisible(l.as(gtk.Widget), 0);
         }
     }
 };
@@ -291,6 +292,26 @@ fn buildWindow(ui: *Ui, app: *adw.Application) void {
     const header = adw.HeaderBar.new();
     adw.HeaderBar.setTitleWidget(header, switcher.as(gtk.Widget));
 
+    // Live operation strip: progress with label inside + cancel — pinned to
+    // the header so it is visible no matter where the page is scrolled.
+    const progress_box = gtk.Box.new(.horizontal, 8);
+    const progress = gtk.ProgressBar.new();
+    gtk.ProgressBar.setShowText(progress, 1);
+    gtk.ProgressBar.setText(progress, "working…");
+    gtk.Widget.setSizeRequest(progress.as(gtk.Widget), 260, -1);
+    gtk.Widget.setValign(progress.as(gtk.Widget), .center);
+    gtk.Widget.setVisible(progress.as(gtk.Widget), 0);
+    ui.progress = progress;
+    gtk.Box.append(progress_box, progress.as(gtk.Widget));
+
+    const cancel_button = gtk.Button.newWithLabel("Cancel");
+    gtk.Widget.setVisible(cancel_button.as(gtk.Widget), 0);
+    _ = gtk.Button.signals.clicked.connect(cancel_button, *Ui, &onCancelClicked, ui, .{});
+    ui.cancel_button = cancel_button;
+    gtk.Box.append(progress_box, cancel_button.as(gtk.Widget));
+
+    adw.HeaderBar.packEnd(header, progress_box.as(gtk.Widget));
+
     const toolbar = adw.ToolbarView.new();
     adw.ToolbarView.addTopBar(toolbar, header.as(gtk.Widget));
     adw.ToolbarView.setContent(toolbar, overlay.as(gtk.Widget));
@@ -340,7 +361,12 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
 
     const page = gtk.Box.new(.vertical, 18);
     setMargins(page.as(gtk.Widget), 18, 18, 18, 18);
-    gtk.ScrolledWindow.setChild(scrolled, page.as(gtk.Widget));
+
+    // Center the workflow in a readable column on wide windows.
+    const clamp = adw.Clamp.new();
+    adw.Clamp.setMaximumSize(clamp, 760);
+    adw.Clamp.setChild(clamp, page.as(gtk.Widget));
+    gtk.ScrolledWindow.setChild(scrolled, clamp.as(gtk.Widget));
 
     // --- Empty state --------------------------------------------------
     const status = adw.StatusPage.new();
@@ -459,15 +485,10 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     // --- Connected section (firehose_ready) ------------------------------
     const conn = gtk.Box.new(.vertical, 18);
 
-    const storage_label = gtk.Label.new("");
-    gtk.Label.setXalign(storage_label, 0);
-    gtk.Widget.addCssClass(storage_label.as(gtk.Widget), "dim-label");
-    ui.storage_info_label = storage_label;
-    gtk.Box.append(conn, storage_label.as(gtk.Widget));
-
     const parts_group = adw.PreferencesGroup.new();
     adw.PreferencesGroup.setTitle(parts_group, "Partitions");
     adw.PreferencesGroup.setDescription(parts_group, "Read makes a backup; write overwrites the partition after confirmation");
+    ui.parts_group = parts_group;
 
     const lun_row = adw.ActionRow.new();
     rowTitle(lun_row, "Storage LUN");
@@ -564,25 +585,6 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     gtk.Box.append(page, conn.as(gtk.Widget));
     ui.conn_section = conn.as(gtk.Widget);
 
-    // --- Progress + cancel -----------------------------------------------
-    const progress = gtk.ProgressBar.new();
-    gtk.Widget.setVisible(progress.as(gtk.Widget), 0);
-    ui.progress = progress;
-    gtk.Box.append(page, progress.as(gtk.Widget));
-
-    const progress_label = gtk.Label.new("");
-    gtk.Widget.setVisible(progress_label.as(gtk.Widget), 0);
-    ui.progress_label = progress_label;
-    gtk.Box.append(page, progress_label.as(gtk.Widget));
-
-    const cancel_button = gtk.Button.newWithLabel("Cancel (disconnects)");
-    gtk.Widget.addCssClass(cancel_button.as(gtk.Widget), "destructive-action");
-    gtk.Widget.setHalign(cancel_button.as(gtk.Widget), .center);
-    gtk.Widget.setVisible(cancel_button.as(gtk.Widget), 0);
-    _ = gtk.Button.signals.clicked.connect(cancel_button, *Ui, &onCancelClicked, ui, .{});
-    ui.cancel_button = cancel_button;
-    gtk.Box.append(page, cancel_button.as(gtk.Widget));
-
     return scrolled.as(gtk.Widget);
 }
 
@@ -629,9 +631,13 @@ fn rebuildPartitions(ui: *Ui, parts: *const ev.PartitionsEvent) void {
     ui.row_ctxs.clearRetainingCapacity();
     listBoxClear(ui.parts_list.?);
 
-    var info_buf: [160]u8 = undefined;
-    const info = std.fmt.bufPrint(&info_buf, "LUN {d} · sector size {d} B · {d} LUN(s)", .{ parts.lun, parts.sector_size, parts.luns }) catch "";
-    labelTextZ(ui.storage_info_label.?, info);
+    if (ui.parts_group) |g| {
+        var info_buf: [200]u8 = undefined;
+        const info = std.fmt.bufPrint(&info_buf, "LUN {d} · sector {d} B · {d} LUN(s) · Read makes a backup; Write overwrites after confirmation", .{ parts.lun, parts.sector_size, parts.luns }) catch "";
+        var info_z: [220]u8 = undefined;
+        const info_zs = std.fmt.bufPrintZ(&info_z, "{s}", .{info}) catch return;
+        adw.PreferencesGroup.setDescription(g, info_zs.ptr);
+    }
 
     // LUN switcher only matters on multi-LUN devices.
     gtk.Widget.setVisible(ui.lun_row.?, @intFromBool(parts.luns > 1));
@@ -933,6 +939,7 @@ fn onDisconnectClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
 fn onCancelClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     ui.cancel.store(true, .release);
     ui.logger.info("cancel requested — the session will disconnect", .{});
+    if (ui.cancel_button) |b| gtk.Widget.setSensitive(b.as(gtk.Widget), 0);
 }
 
 fn onAddXml(_: *gtk.Button, ui: *Ui) callconv(.c) void {
@@ -1180,11 +1187,18 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
             if (ui.progress) |bar| {
                 if (p.fraction < 0) {
                     gtk.ProgressBar.pulse(bar);
+                    var pz: [200]u8 = undefined;
+                    const z = std.fmt.bufPrintZ(&pz, "{s}", .{p.label.slice()}) catch "working…";
+                    gtk.ProgressBar.setText(bar, z.ptr);
                 } else {
-                    gtk.ProgressBar.setFraction(bar, @min(p.fraction, 1.0));
+                    const f = @min(p.fraction, 1.0);
+                    gtk.ProgressBar.setFraction(bar, f);
+                    const pct: u32 = @intFromFloat(f * 100.0);
+                    var pz: [200]u8 = undefined;
+                    const z = std.fmt.bufPrintZ(&pz, "{s} · {d}%", .{ p.label.slice(), pct }) catch "working…";
+                    gtk.ProgressBar.setText(bar, z.ptr);
                 }
             }
-            if (ui.progress_label) |l| labelTextZ(l, p.label.slice());
         },
         .chip_info => |info| {
             var buf: [512]u8 = undefined;

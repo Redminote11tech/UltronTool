@@ -441,8 +441,11 @@ pub const Session = struct {
             if (got < chunk_bytes) @memset(buf[@intCast(got)..@intCast(chunk_bytes)], 0);
 
             _ = self.io.write(buf[0..@intCast(chunk_bytes)], zlp_timeout) catch |e| {
-                self.logger.err("USB write failed for data chunk", .{});
-                _ = self.readResponse(30000) catch {};
+                // The device stopped consuming (e.g. it NAK'd mid-stream after
+                // a UFS write failure). Drain its response so the reason lands
+                // in the console, then fail fast.
+                self.logger.err("device stopped accepting data — draining its response", .{});
+                _ = self.readResponse(5000) catch {};
                 return e;
             };
 
