@@ -373,39 +373,84 @@ pub const Manager = struct {
             return;
         }
 
-        // Stuck (rawmode data phase or dead): USB reset == clean replug.
-        self.logger.warn("device is not answering in XML — resetting its USB port for a clean EDL state", .{});
+        {
+            const chosen: ?[]const u8 = programmer orelse self.last_programmer;
+            _ = self.tryResetRecover(storage, skip_storage_init, chosen);
+        }
+    }
+
+    /// Recovery for a stuck/wedged programmer, in escalating order:
+    ///   1. USB port reset (software replug) -> fresh PBL -> HELLO -> loader
+    ///      flow; if the programmer comes back parsing commands instead,
+    ///      configure directly.
+    ///   2. Blind <power value="reset"> XML — works when the parser is alive
+    ///      but the session is wedged.
+    ///   3. Give up with the definitive manual procedure. A programmer hung
+    ///      in its own retry loop cannot be reloaded over USB; the device
+    ///      must be power-cycled back into EDL by the user.
+    /// Returns true when a follow-up flow was started (caller just returns).
+    fn tryResetRecover(self: *Manager, storage: firehose.StorageType, skip_storage_init: bool, programmer: ?[]const u8) bool {
+        self.logger.warn("programmer looks stuck — forcing a USB reset to recover to a clean EDL state", .{});
         if (self.t) |tr| tr.reset();
         self.teardown();
-        glib.usleep(1500 * std.time.us_per_ms); // let re-enumeration settle
-        if (!self.openTransport()) return;
-
-        // The re-enumerated device is a fresh EDL target: expect HELLO.
-        var hello_n: usize = 0;
-        var hello_attempt: u32 = 0;
-        while (hello_attempt < 3) : (hello_attempt += 1) {
-            if (self.cancel.load(.acquire)) return;
-            hello_n = self.io.?.read(&buf, 1000) catch 0;
-            if (hello_n > 0) break;
+        glib.usleep(2000 * std.time.us_per_ms); // let re-enumeration settle
+        if (!self.openTransport()) {
+            self.recoverFailed();
+            return false;
         }
-        if (hello_n >= 8) {
+
+        var buf: [4096]u8 = undefined;
+        var n: usize = 0;
+        var attempt: u32 = 0;
+        while (attempt < 5) : (attempt += 1) {
+            if (self.cancel.load(.acquire)) return false;
+            n = self.io.?.read(&buf, 1000) catch 0;
+            if (n > 0) break;
+        }
+
+        if (n >= 5 and std.mem.eql(u8, buf[0..5], "<?xml")) {
+            // Reset kicked the programmer back into a working parser.
+            self.logger.info("programmer recovered after reset — configuring", .{});
+            self.configureNow(storage, skip_storage_init);
+            return true;
+        }
+        if (n >= 8) {
             const cmd = std.mem.readInt(u32, buf[0..4], .little);
             const length = std.mem.readInt(u32, buf[4..8], .little);
-            if (@as(u32, @intCast(hello_n)) == length and cmd == sahara.HELLO) {
-                self.io.?.pushBack(buf[0..hello_n]);
+            if (@as(u32, @intCast(n)) == length and cmd == sahara.HELLO) {
+                self.io.?.pushBack(buf[0..n]);
+                self.logger.info("device recovered to clean EDL state", .{});
                 if (programmer) |p| {
                     self.uploadLoader(p, storage, skip_storage_init);
                 } else {
                     self.emitState(.needs_loader);
                     pushFinished(self.channel, true, "loader required");
                 }
-                return;
+                return true;
             }
         }
 
+        // Still silent: try a blind power-reset XML (parser may be half-alive).
+        self.logger.info("trying a blind <power reset> command", .{});
+        _ = self.io.?.write("<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><power value=\"reset\" DelayInSeconds=\"1\"/></data>", 1000) catch {};
+        const n2 = self.io.?.read(&buf, 1000) catch 0;
+        if (n2 >= 5 and std.mem.eql(u8, buf[0..5], "<?xml")) {
+            self.logger.info("device acknowledged the reset command — it will re-enumerate shortly; Connect again in a few seconds", .{});
+            self.teardown();
+            pushFinished(self.channel, true, "reset command sent");
+            self.emitState(.disconnected);
+            return true;
+        }
+
+        self.recoverFailed();
+        return false;
+    }
+
+    fn recoverFailed(self: *Manager) void {
         self.teardown();
-        self.logger.err("device is still not responding after reset — unplug the USB cable, replug into EDL mode, and retry", .{});
-        pushFinished(self.channel, false, "device not responding");
+        self.logger.err("the firehose programmer is wedged and did not recover from a USB reset", .{});
+        self.logger.err("manual recovery: power the device OFF completely (hold Power ~10 s), then boot it back into EDL (for most devices hold Vol- + Vol+ while plugging USB) and Connect", .{});
+        pushFinished(self.channel, false, "device wedged — power it off, then boot to EDL and Connect");
         self.emitState(.disconnected);
     }
 
@@ -497,7 +542,7 @@ pub const Manager = struct {
             // loader is then re-uploaded automatically.
             if (e == Error.Timeout and !self.reset_used) {
                 self.reset_used = true;
-                self.recoverViaReset(storage, skip_storage_init);
+                _ = self.tryResetRecover(storage, skip_storage_init, self.last_programmer);
                 return;
             }
             self.teardown();
