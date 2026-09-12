@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.redminote11tech.Ultron</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Ultron</name>
+  <summary>Flash and unbrick Qualcomm EDL devices</summary>
+  <description>
+    <p>
+      Ultron is a graphical flashing and unbricking tool for Qualcomm devices in
+      Emergency Download (EDL / 9008) mode. It uploads the device's signed
+      Firehose programmer over the Sahara protocol and flashes images using
+      qdl-compatible rawprogram/patch XML layouts.
+    </p>
+    <p>
+      The protocol implementation is a port of the well-tested open-source qdl
+      tool, cross-checked against the edl and edl-ng projects. Device access is
+      detected live over hot-plug; every protocol exchange is shown in the
+      built-in console.
+    </p>
+    <p>
+      Ultron's architecture is modular: MediaTek (BROM) and Samsung (Odin)
+      protocol modules are planned on top of the same plugin interface.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.redminote11tech.Ultron.desktop</launchable>
+  <url type="homepage">https://github.com/redminote11tech/UltronTool</url>
+  <developer id="io.github.redminote11tech">
+    <name>redminote11tech</name>
+  </developer>
+  <provides>
+    <binary>ultron</binary>
+  </provides>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-09-12">
+      <description>
+        <p>Initial release: Qualcomm EDL flashing with full qdl parity
+        (Sahara programmer upload, Firehose configure/program/erase/patch,
+        set-bootable, reset), device hot-plug detection, chip identity
+        probe, and a live protocol console.</p>
+      </description>
+    </release>
+  </releases>
+</component>

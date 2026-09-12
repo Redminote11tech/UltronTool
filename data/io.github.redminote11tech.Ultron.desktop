@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Ultron
+GenericName=Mobile flashing tool
+Comment=Flash and unbrick Qualcomm EDL (9008) devices
+Exec=ultron
+Icon=io.github.redminote11tech.Ultron
+Terminal=false
+Categories=Development;
+Keywords=qualcomm;edl;9008;firehose;sahara;flash;unbrick;
+StartupNotify=true
+SingleMainWindow=true
+X-KDE-StartupNotify=true

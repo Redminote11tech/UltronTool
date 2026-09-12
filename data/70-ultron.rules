@@ -1,0 +1,41 @@
+# 70-ultron.rules — USB device permissions for the Ultron flashing tool.
+#
+# Install to /usr/lib/udev/rules.d/ and reload:
+#   sudo udevadm control --reload && sudo udevadm trigger
+#
+# Access model:
+#  - TAG+="uaccess"   grants the seated desktop user access via systemd-logind
+#  - GROUP="uucp"     non-graphical fallback (add yourself: usermod -aG uucp $USER)
+#  - ID_MM_DEVICE_IGNORE=1 keeps ModemManager away from download-mode ports
+#
+# Note: fastboot is covered structurally below; ADB device lists are provided
+# by the android-udev package if installed.
+
+# ---------------------------------------------------------------- Qualcomm EDL
+# 05c6:9008 = QDLoader / Emergency Download mode, 05c6:900e = crash dump.
+# ultron opens any 05c6 PID exposing the Sahara vendor-specific interface,
+# so permissions are granted vendor-wide on the usb node (+ tty node).
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="05c6", MODE="0660", GROUP="uucp", TAG+="uaccess"
+ACTION=="add", SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="05c6", MODE="0660", GROUP="uucp", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="05c6", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# ---------------------------------------------------------------- MediaTek
+# BROM (bootrom) and preloader download modes for the future mtk module.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0e8d", ATTR{idProduct}=="0003", MODE="0660", GROUP="uucp", TAG+="uaccess"
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0e8d", ATTR{idProduct}=="2000", MODE="0660", GROUP="uucp", TAG+="uaccess"
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0e8d", ATTR{idProduct}=="2001", MODE="0660", GROUP="uucp", TAG+="uaccess"
+ACTION=="add", SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="0e8d", ATTRS{idProduct}=="0003", MODE="0660", GROUP="uucp", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0e8d", ATTR{idProduct}=="0003", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0e8d", ATTR{idProduct}=="2000", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0e8d", ATTR{idProduct}=="2001", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# ---------------------------------------------------------------- Samsung
+# Download mode (Loke/Odin) PIDs, including the classic odin-mode IDs.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="04e8", ATTR{idProduct}=="685d", MODE="0660", GROUP="uucp", TAG+="uaccess"
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="04e8", ATTR{idProduct}=="6601", MODE="0660", GROUP="uucp", TAG+="uaccess"
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="04e8", ATTR{idProduct}=="68c3", MODE="0660", GROUP="uucp", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="04e8", ATTR{idProduct}=="685d", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# ---------------------------------------------------------------- fastboot
+# Structural match on the Google fastboot interface (class ff/42/03).
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ENV{ID_USB_INTERFACES}=="*:ff4203:*", MODE="0660", GROUP="uucp", TAG+="uaccess"

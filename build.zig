@@ -34,6 +34,13 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("libudev", .{});
     b.installArtifact(exe);
 
+    // Desktop integration files.
+    const app_id = "io.github.redminote11tech.Ultron";
+    b.installFile("data/" ++ app_id ++ ".desktop", "share/applications/" ++ app_id ++ ".desktop",);
+    b.installFile("data/" ++ app_id ++ ".metainfo.xml", "share/metainfo/" ++ app_id ++ ".metainfo.xml",);
+    b.installFile("data/icons/hicolor/scalable/apps/" ++ app_id ++ ".svg", "share/icons/hicolor/scalable/apps/" ++ app_id ++ ".svg",);
+    b.installFile("data/70-ultron.rules", "lib/udev/rules.d/70-ultron.rules",);
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
