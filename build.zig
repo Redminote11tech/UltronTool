@@ -31,6 +31,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("libadwaita-1", .{});
     exe_mod.linkSystemLibrary("libusb-1.0", .{});
     exe_mod.linkSystemLibrary("glib-2.0", .{});
+    exe_mod.linkSystemLibrary("libudev", .{});
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -54,6 +55,7 @@ pub fn build(b: *std.Build) void {
     });
     test_mod.linkSystemLibrary("glib-2.0", .{});
     test_mod.linkSystemLibrary("libusb-1.0", .{});
+    test_mod.linkSystemLibrary("libudev", .{});
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
