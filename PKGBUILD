@@ -7,7 +7,7 @@
 
 pkgname=ultron
 pkgver=0.2.0
-pkgrel=3
+pkgrel=4
 pkgdesc='Qualcomm EDL (9008) flashing tool — graphical successor to qdl'
 arch=(x86_64)
 url='https://github.com/redminote11tech/UltronTool'
@@ -34,7 +34,7 @@ prepare() {
 build() {
   cd "$pkgname-$pkgver"
   export ZIG_GLOBAL_CACHE_DIR="$srcdir/zig-global-cache"
-  zig build --prefix "$pkgdir/usr" -Doptimize=ReleaseFast
+  zig build --prefix "$pkgdir/usr" -Doptimize=ReleaseSafe
 }
 
 package() {

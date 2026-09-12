@@ -119,6 +119,9 @@ pub const Ui = struct {
     disconnect_btn: ?*gtk.Button = null,
 
     chooser: ?ChooserKind = null,
+    /// Set when the window is fully built; event handlers refuse to touch
+    /// widgets before that (belt-and-braces against early events).
+    ready: bool = false,
     log_seq: u64 = 0,
     log_drop_seen: u64 = 0,
 
@@ -303,6 +306,7 @@ fn buildWindow(ui: *Ui, app: *adw.Application) void {
 
     gtk.Window.present(window.as(gtk.Window));
 
+    ui.ready = true;
     // Kick off the pumps.
     _ = glib.timeoutAdd(50, onTick, ui);
     _ = glib.idleAdd(onFirstLogDrain, ui);
@@ -598,25 +602,30 @@ fn rowTitle(row: *adw.ActionRow, title: [:0]const u8) void {
 // ----------------------------------------------------------------------
 
 fn refreshMainPage(ui: *Ui) void {
-    const has_device = ui.device != null;
-    gtk.Widget.setVisible(ui.status_page.?.as(gtk.Widget), @intFromBool(!has_device));
-    gtk.Widget.setVisible(ui.dev_card.?.as(gtk.Widget), @intFromBool(has_device));
+    // Every widget reference is guarded: a null here must never crash the
+    // app (events can only arrive via the main loop after buildWindow, but a
+    // segfault in the UI is unrecoverable and undebuggable in ReleaseFast).
+    const status = ui.status_page orelse return;
+    const dev_card = ui.dev_card orelse return;
 
-    const connected = ui.session == .firehose_ready;
-    gtk.Widget.setVisible(ui.loader_section.?, @intFromBool(has_device and ui.session == .needs_loader));
-    gtk.Widget.setVisible(ui.conn_section.?, @intFromBool(has_device and connected));
+    const has_device = ui.device != null;
+    gtk.Widget.setVisible(status.as(gtk.Widget), @intFromBool(!has_device));
+    gtk.Widget.setVisible(dev_card.as(gtk.Widget), @intFromBool(has_device));
+
+    if (ui.loader_section) |w| gtk.Widget.setVisible(w, @intFromBool(has_device and ui.session == .needs_loader));
+    if (ui.conn_section) |w| gtk.Widget.setVisible(w, @intFromBool(has_device and ui.session == .firehose_ready));
 
     // The chip probe only makes sense before a Firehose session exists.
-    gtk.Widget.setVisible(ui.dev_chip_label.?.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
-    gtk.Widget.setVisible(ui.storage_drop.?.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
+    if (ui.dev_chip_label) |l| gtk.Widget.setVisible(l.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
+    if (ui.storage_drop) |d| gtk.Widget.setVisible(d.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
 
     if (has_device) {
         const dev = ui.device.?;
-        labelTextZ(ui.dev_mode_label.?, dev.mode.displayName());
+        if (ui.dev_mode_label) |l| labelTextZ(l, dev.mode.displayName());
         var buf: [96]u8 = undefined;
         const vp = std.fmt.bufPrint(&buf, "{x:0>4}:{x:0>4}  (bus {d:0>3} device {d:0>3})", .{ dev.vid, dev.pid, dev.bus, dev.devnum }) catch "-";
-        labelTextZ(ui.dev_vidpid_label.?, vp);
-        labelTextZ(ui.dev_path_label.?, dev.key.path.slice());
+        if (ui.dev_vidpid_label) |l| labelTextZ(l, vp);
+        if (ui.dev_path_label) |l| labelTextZ(l, dev.key.path.slice());
     }
 }
 
@@ -740,11 +749,29 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
     const kind = ui.chooser orelse return;
     ui.chooser = null;
     if (response_id != @intFromEnum(gtk.ResponseType.accept)) return;
-    const file = gtk.FileChooser.getFile(chooser.as(gtk.FileChooser)) orelse return;
+    const file = gtk.FileChooser.getFile(chooser.as(gtk.FileChooser)) orelse {
+        ui.logger.err("file chooser returned no file", .{});
+        ui.toast("Could not read the selected file");
+        return;
+    };
     defer file.unref();
-    const path_c = gio.File.getPath(file) orelse return;
-    defer glib.free(path_c);
-    const path = std.mem.span(path_c);
+    // Portal-backed choosers may return URI-backed files without a native
+    // path; fall back to the URI (file:// only).
+    var path: []const u8 = undefined;
+    if (gio.File.getPath(file)) |p| {
+        path = std.mem.span(p);
+    } else {
+        const uri_c = gio.File.getUri(file);
+        defer glib.free(uri_c);
+        const uri = std.mem.span(uri_c);
+        if (std.mem.startsWith(u8, uri, "file://")) {
+            path = uri["file://".len..];
+        } else {
+            ui.logger.err("selected file URI is not file://: {s}", .{uri});
+            ui.toast("Unsupported file location");
+            return;
+        }
+    }
 
     switch (kind) {
         .loader => {
@@ -1089,6 +1116,7 @@ fn consoleAppend(ui: *Ui, text: []const u8, tag: ?[*:0]const u8) void {
 
 fn onTick(ud: ?*anyopaque) callconv(.c) c_int {
     const ui: *Ui = @ptrCast(@alignCast(ud orelse return 0));
+    if (!ui.ready) return 1;
     ui.channel.drain(ui, handleEvent);
     drainLogs(ui);
     return 1; // G_SOURCE_CONTINUE

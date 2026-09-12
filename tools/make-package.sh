@@ -14,13 +14,13 @@ cd "$(dirname "$0")/.."
 
 PKGNAME=ultron
 PKGVER=0.2.0
-PKGREL=3
+PKGREL=4
 ARCH=$(uname -m)
 STAGE="${STAGE:-$(mktemp -d)}"
 
 echo "==> Building (ReleaseFast) into $STAGE"
 ZIG_GLOBAL_CACHE_DIR="${ZIG_GLOBAL_CACHE_DIR:-$STAGE/zig-cache}" \
-  zig build --prefix "$STAGE/usr" -Doptimize=ReleaseFast
+  zig build --prefix "$STAGE/usr" -Doptimize=ReleaseSafe
 
 echo "==> Installing LICENSE"
 install -Dm644 LICENSE "$STAGE/usr/share/licenses/$PKGNAME/LICENSE"

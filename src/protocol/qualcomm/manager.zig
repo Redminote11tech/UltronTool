@@ -321,6 +321,10 @@ pub const Manager = struct {
                 // connection used for the upload.
                 if (programmer) |p| {
                     self.logger.info("device is in EDL mode: uploading the chosen loader", .{});
+                    // Drop the probe handle first: the HELLO was already
+                    // consumed, and the device re-issues it on the fresh
+                    // connection the upload uses.
+                    self.teardown();
                     self.uploadLoader(p, storage, skip_storage_init);
                 } else {
                     self.logger.info("device is in EDL mode: a firehose loader is required", .{});
