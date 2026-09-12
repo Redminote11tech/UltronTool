@@ -171,21 +171,32 @@ pub fn Channel(comptime T: type, comptime capacity: usize) type {
         }
 
         /// Pop all pending events, calling `cb(ctx, event)` for each in order.
-        /// The mutex is released around each callback so the callback may push
-        /// back into the channel.
+        /// The snapshot is consumed under the lock BEFORE callbacks run, so
+        /// events pushed by producers during a callback are retained for the
+        /// next drain (dropping a `finished` would wedge the UI busy forever).
         pub fn drain(self: *Self, ctx: anytype, comptime cb: fn (@TypeOf(ctx), T) void) void {
             self.mutex.lock();
             const n = self.len;
             const base = (self.head + capacity - n) % capacity;
-            var i: usize = 0;
-            while (i < n) : (i += 1) {
-                const ev = self.ring[(base + i) % capacity];
-                self.mutex.unlock();
-                cb(ctx, ev);
-                self.mutex.lock();
-            }
-            self.len = 0;
+            const scratch = std.heap.page_allocator.alloc(T, n) catch {
+                // OOM: fall back to oldest-first per-event copies without a
+                // snapshot (still cannot lose producer events mid-callback).
+                var i: usize = 0;
+                while (i < n) : (i += 1) {
+                    self.mutex.lock();
+                    const ev = self.ring[(base + i) % capacity];
+                    self.len -= 1;
+                    self.mutex.unlock();
+                    cb(ctx, ev);
+                }
+                return;
+            };
+            for (0..n) |i| scratch[i] = self.ring[(base + i) % capacity];
+            self.len = 0; // consumed while locked
             self.mutex.unlock();
+
+            for (0..n) |i| cb(ctx, scratch[i]);
+            std.heap.page_allocator.free(scratch);
         }
 
         pub fn takeDropped(self: *Self) u64 {

@@ -104,10 +104,22 @@ pub const File = struct {
         return total;
     }
 
-    /// fwrite the entire buffer; returns bytes written (short on error).
+    /// fwrite loop; returns bytes written (short only on stream error —
+    /// check errorMessage()).
     pub fn writeAll(self: *File, buf: []const u8) !usize {
-        const n = c.fwrite(buf.ptr, 1, buf.len, self.handle);
-        return n;
+        var total: usize = 0;
+        while (total < buf.len) {
+            const n = c.fwrite(buf.ptr + total, 1, buf.len - total, self.handle);
+            if (n == 0) break;
+            total += n;
+        }
+        return total;
+    }
+
+    /// Flush stdio buffers to the OS; a failure here means data the caller
+    /// believed written is lost (e.g. ENOSPC surfacing at flush time).
+    pub fn flush(self: *File) !void {
+        if (c.fflush(self.handle) != 0) return error.FlushFailed;
     }
 };
 

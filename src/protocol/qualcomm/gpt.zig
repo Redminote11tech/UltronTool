@@ -46,14 +46,16 @@ pub const Error = error{ NotGpt, BadCrc, Truncated, OutOfMemory };
 /// Parse and verify the GPT header found at LBA 1 (`bytes` covers LBA 0..1,
 /// i.e. at least 2 × sector_size bytes).
 pub fn parseHeader(bytes: []const u8, sector_size: u32) Error!Header {
-    if (sector_size == 0 or bytes.len < 2 * sector_size) return error.Truncated;
+    // The header window is fixed at 92 bytes from LBA 1; sector_size must be
+    // large enough that LBA 0 and LBA 1 do not overlap the header read.
+    if (sector_size < 92 or bytes.len < 2 * sector_size) return error.Truncated;
     const hdr = bytes[sector_size .. sector_size + 92];
 
     if (!std.mem.eql(u8, hdr[0..8], "EFI PART")) return error.NotGpt;
 
     const header_size = std.mem.readInt(u32, hdr[12..16], .little);
     const stored_crc = std.mem.readInt(u32, hdr[16..20], .little);
-    if (header_size < 92 or @as(usize, header_size) > hdr.len + 40) return error.Truncated;
+    if (header_size < 92 or @as(usize, header_size) > hdr.len) return error.Truncated;
     var crc_buf: [92 + 40]u8 = undefined;
     const h = crc_buf[0..header_size];
     @memcpy(h, hdr[0..header_size]);

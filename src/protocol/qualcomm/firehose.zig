@@ -125,10 +125,11 @@ pub const Session = struct {
                 },
             };
 
-            if (n == 0) {
-                if (monoNow() >= deadline) return Response{ .kind = .timeout };
-                continue;
+            if (monoNow() >= deadline) {
+                if (have_resp) return resp;
+                return Response{ .kind = .timeout };
             }
+            if (n == 0) continue;
 
             self.logger.debug("FIREHOSE READ: {s}", .{buf[0..n]});
 
@@ -157,7 +158,7 @@ pub const Session = struct {
                 }
                 if (resp.kind == .ack or resp.kind == .nak) have_resp = true;
 
-                cursor = start + chunk_end;
+                cursor = chunk_end;
 
                 if (resp.rawmode) {
                     // The response switched us to raw mode; push back any
@@ -229,7 +230,7 @@ pub const Session = struct {
             for (elems.items) |*elem| {
                 if (try self.consumeElement(elem, &resp)) resp.rawmode = true;
             }
-            cursor = start + chunk_end;
+            cursor = chunk_end;
             if (resp.rawmode) {
                 if (cursor < n) self.io.pushBack(buf[cursor..n]);
                 break;
@@ -311,12 +312,15 @@ pub const Session = struct {
 
     fn writeRequest(self: *Session, req: []const u8) Error!void {
         self.logger.debug("FIREHOSE WRITE: {s}", .{req});
+        var retries: u32 = 0;
         while (true) {
             if (self.cancelled()) return Error.Cancelled;
             _ = self.io.write(req, 1000) catch |e| switch (e) {
                 Error.Timeout => {
                     // Some programmers send <response> + <log> entries and
                     // refuse writes until drained; read pending data, retry.
+                    retries += 1;
+                    if (retries > 30) return Error.Timeout;
                     _ = self.readResponse(100) catch {};
                     continue;
                 },
@@ -439,6 +443,10 @@ pub const Session = struct {
         const sector_size: u64 = if (op.sector_size != 0) op.sector_size else self.sector_size;
         if (sector_size == 0) {
             self.logger.err("unable to determine sector size for {s}", .{fname});
+            return Error.Io;
+        }
+        if (sector_size > self.max_payload_size) {
+            self.logger.err("sector size {d} exceeds negotiated payload {d} — aborting", .{ sector_size, self.max_payload_size });
             return Error.Io;
         }
 
@@ -696,6 +704,10 @@ pub const Session = struct {
         }
 
         const final = try self.readResponse(10000);
+        file.flush() catch {
+            self.logger.err("failed flushing {s} to disk (data may be incomplete)", .{label});
+            return Error.Io;
+        };
         if (final.isAck() and got != need) {
             self.logger.warn("read of {s} ended early ({d}/{d} bytes)", .{ label, got, need });
         }
@@ -736,11 +748,9 @@ pub const Session = struct {
         const deadline = monoNow() + 30 * std.time.us_per_s;
         while (true) {
             if (self.cancelled()) return Error.Cancelled;
+            if (monoNow() >= deadline) return Error.Timeout;
             const n = self.io.read(&buf, 100) catch |e| switch (e) {
-                Error.Timeout => {
-                    if (monoNow() >= deadline) return Error.Timeout;
-                    continue;
-                },
+                Error.Timeout => continue,
                 else => return Error.Io,
             };
             if (n == 0) continue;

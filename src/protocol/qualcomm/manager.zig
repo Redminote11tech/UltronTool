@@ -285,12 +285,16 @@ pub const Manager = struct {
             return null;
         };
         io.* = transport.Io.init(self.alloc, t);
+        io.logger = self.logger;
         return io;
     }
 
     /// Open a transport and probe what is running.
     fn connect(self: *Manager, programmer: ?[]const u8, storage: firehose.StorageType, skip_storage_init: bool) void {
-        if (self.cancel.load(.acquire)) return;
+        if (self.cancel.load(.acquire)) {
+            pushFinished(self.channel, false, "Cancelled");
+            return;
+        }
         self.reset_used = false;
         self.storage = storage;
 
@@ -477,7 +481,10 @@ pub const Manager = struct {
     }
 
     fn uploadLoader(self: *Manager, programmer: []const u8, storage: firehose.StorageType, skip_storage_init: bool) void {
-        if (self.cancel.load(.acquire)) return;
+        if (self.cancel.load(.acquire)) {
+            pushFinished(self.channel, false, "Cancelled");
+            return;
+        }
         self.skip_saved = skip_storage_init;
         self.rememberLoader(programmer);
 
@@ -561,7 +568,7 @@ pub const Manager = struct {
         // Storage info: LUN count for the dropdown and a sector-size fallback
         // when the probe could not run.
         if (fh.getStorageInfo(0)) |info| {
-            if (self.sector_size == 0 and info.sector_size > 0) self.sector_size = @intCast(info.sector_size);
+            if (self.sector_size == 0 and info.sector_size > 0 and info.sector_size <= std.math.maxInt(u32)) self.sector_size = @intCast(info.sector_size);
             if (info.num_physical > 0) self.num_luns = @intCast(@min(info.num_physical, 16));
             self.logger.info("storage: {d} blocks × {d} bytes ({s}/{s}), {d} LUN(s)", .{
                 info.num_sectors,
@@ -576,10 +583,6 @@ pub const Manager = struct {
         self.emitState(.firehose_ready);
         pushFinished(self.channel, true, "connected");
         self.listPartitions(0);
-    }
-
-    fn msg_arr() [512]u8 {
-        return @splat(0);
     }
 
     fn rememberLoader(self: *Manager, programmer: []const u8) void {
@@ -668,7 +671,10 @@ pub const Manager = struct {
         }
 
         // 1. LBA 0..1: protective MBR + GPT header.
-        const head_buf = self.alloc.alloc(u8, 2 * sector_size) catch return;
+        const head_buf = self.alloc.alloc(u8, 2 * sector_size) catch {
+            pushFinished(self.channel, false, "OutOfMemory");
+            return;
+        };
         defer self.alloc.free(head_buf);
         const head_op = rawprogram.Program{
             .sector_size = sector_size,
@@ -693,7 +699,10 @@ pub const Manager = struct {
 
         // 2. Entry array.
         const entry_sectors = header.entrySectors(sector_size);
-        const ent_buf = self.alloc.alloc(u8, @intCast(entry_sectors * sector_size)) catch return;
+        const ent_buf = self.alloc.alloc(u8, @intCast(entry_sectors * sector_size)) catch {
+            pushFinished(self.channel, false, "OutOfMemory");
+            return;
+        };
         defer self.alloc.free(ent_buf);
         var start_buf: [32]u8 = undefined;
         const ent_op = rawprogram.Program{
@@ -741,6 +750,10 @@ pub const Manager = struct {
             pushFinished(self.channel, false, "sector size unknown");
             return;
         }
+        if (num_sectors > std.math.maxInt(u32)) {
+            pushFinished(self.channel, false, "partition too large");
+            return;
+        }
 
         var file = fileio.File.create(path) catch |e| {
             self.logger.err("unable to create {s}: {s}", .{ path, @errorName(e) });
@@ -756,7 +769,10 @@ pub const Manager = struct {
             .partition = lun,
             .start_sector = std.fmt.bufPrint(&start_buf, "{d}", .{first_lba}) catch "0",
         };
-        const chunk = self.alloc.alloc(u8, 1024 * 1024) catch return;
+        const chunk = self.alloc.alloc(u8, 1024 * 1024) catch {
+            pushFinished(self.channel, false, "OutOfMemory");
+            return;
+        };
         defer self.alloc.free(chunk);
 
         self.logger.info("reading {s} ({d} sectors from LBA {d}) to {s}", .{ label, num_sectors, first_lba, path });
@@ -765,9 +781,10 @@ pub const Manager = struct {
         jp.setPrefix("reading {s}", .{label});
         const saved_progress = fh.progress;
         fh.progress = .{ .ctx = &jp, .cb = JobProgress.cb };
-        defer fh.progress = saved_progress;
 
-        const ok = fh.readSectorsToFile(&op, &file, chunk, label) catch |e| {
+        const ok_result = fh.readSectorsToFile(&op, &file, chunk, label);
+        fh.progress = saved_progress; // restore BEFORE any teardown (fh dies there)
+        const ok = if (ok_result) |v| v else |e| {
             self.sessionError(e);
             return;
         };
@@ -797,6 +814,10 @@ pub const Manager = struct {
         };
         defer file.close();
 
+        if (max_sectors > std.math.maxInt(u32)) {
+            pushFinished(self.channel, false, "partition too large");
+            return;
+        }
         const file_size = file.size() catch 0;
         const needed: u64 = (file_size + sector_size - 1) / sector_size;
         if (needed > max_sectors) {
@@ -821,9 +842,10 @@ pub const Manager = struct {
         jp.setPrefix("writing {s}", .{label});
         const saved_progress = fh.progress;
         fh.progress = .{ .ctx = &jp, .cb = JobProgress.cb };
-        defer fh.progress = saved_progress;
 
-        if (fh.program(&op, &file)) |_| {
+        const program_result = fh.program(&op, &file);
+        fh.progress = saved_progress; // restore BEFORE any teardown (fh dies there)
+        if (program_result) |_| {
             var msg = ev.FixedStr(512){};
             msg.set(std.fmt.bufPrint(&jp.prefix, "{s}: write finished", .{label}) catch "write finished");
             self.channel.push(.{ .finished = .{ .success = true, .message = msg } });
@@ -873,7 +895,11 @@ pub const Manager = struct {
         var ectx = ExecCtx{ .channel = self.channel, .op_total = op_list.items.len };
         const saved_progress = fh.progress;
         fh.progress = .{ .ctx = &ectx, .cb = firehoseProgressCb };
-        defer fh.progress = saved_progress;
+        // Guarded restore: after sessionError→teardown, self.fh is null (the
+        // session was destroyed) and writing the hook would be a UAF.
+        defer if (self.fh) |f| {
+            if (f == fh) f.progress = saved_progress;
+        };
 
         for (op_list.items, 0..) |item, i| {
             if (self.cancel.load(.acquire)) {

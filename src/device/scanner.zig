@@ -277,32 +277,6 @@ const InterfaceInfo = struct {
     protocol: ?u8,
 };
 
-/// Read the first child interface's class attributes straight from sysfs
-/// (children of a usb_device node are named like "1-2:1.0"). libc-based so
-/// it works from the scanner thread without the new Io handle.
-fn readFirstInterface(syspath: []const u8) ?InterfaceInfo {
-    const c_dirent = @cImport({
-        @cInclude("dirent.h");
-    });
-    var spbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const spz = std.fmt.bufPrintZ(&spbuf, "{s}", .{syspath}) catch return null;
-    const dir = c_dirent.opendir(spz.ptr) orelse return null;
-    defer _ = c_dirent.closedir(dir);
-
-    while (true) {
-        const entry = c_dirent.readdir(dir) orelse return null;
-        const name = std.mem.span(entry.name);
-        if (std.mem.indexOfScalar(u8, name, ':') == null) continue;
-        if (readHexSysattrFile(spz, name, "bInterfaceClass")) |class| {
-            return .{
-                .class = class,
-                .subclass = readHexSysattrFile(spz, name, "bInterfaceSubClass"),
-                .protocol = readHexSysattrFile(spz, name, "bInterfaceProtocol"),
-            };
-        }
-    }
-}
-
 fn readHexSysattrFile(syspath: [:0]const u8, child: []const u8, attr: []const u8) ?u8 {
     var pbuf: [std.fs.max_path_bytes]u8 = undefined;
     const path = std.fmt.bufPrintZ(&pbuf, "{s}/{s}/{s}", .{ syspath, child, attr }) catch return null;

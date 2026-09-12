@@ -274,7 +274,7 @@ pub fn mainRun(init: std.process.Init) !void {
     alloc.destroy(channel);
     alloc.destroy(logger);
 
-    std.process.exit(@intCast(status));
+    std.process.exit(@intCast(@mod(status, 256)));
 }
 
 fn onActivate(app: *adw.Application, ud: *Ui) callconv(.c) void {
@@ -751,11 +751,13 @@ fn listBoxClear(list: *gtk.ListBox) void {
 }
 
 fn refreshPendingWrites(ui: *Ui) void {
+    const row = ui.pending_row orelse return;
+    const btn = ui.write_all_btn orelse return;
     const n = ui.pending_writes.items.len;
     if (n == 0) {
-        adw.ActionRow.setSubtitle(ui.pending_row.?, "None — click Write on a partition to queue one");
-        gtk.Button.setLabel(ui.write_all_btn.?, "Write");
-        gtk.Widget.setSensitive(ui.write_all_btn.?.as(gtk.Widget), 0);
+        adw.ActionRow.setSubtitle(row, "None — click Write on a partition to queue one");
+        gtk.Button.setLabel(btn, "Write");
+        gtk.Widget.setSensitive(btn.as(gtk.Widget), 0);
         return;
     }
     var buf: [512]u8 = undefined;
@@ -772,11 +774,11 @@ fn refreshPendingWrites(ui: *Ui) void {
             break;
         }
     }
-    setSubtitleZ(ui.pending_row.?, buf[0..len]);
+    setSubtitleZ(row, buf[0..len]);
     var label_buf: [32]u8 = undefined;
     const lbl = std.fmt.bufPrintZ(&label_buf, "Write {d}…", .{n}) catch "Write…";
-    gtk.Button.setLabel(ui.write_all_btn.?, lbl.ptr);
-    gtk.Widget.setSensitive(ui.write_all_btn.?.as(gtk.Widget), @intFromBool(!ui.busy()));
+    gtk.Button.setLabel(btn, lbl.ptr);
+    gtk.Widget.setSensitive(btn.as(gtk.Widget), @intFromBool(!ui.busy()));
 }
 
 fn clearPendingWrites(ui: *Ui) void {
@@ -790,6 +792,7 @@ fn clearPendingWrites(ui: *Ui) void {
 // ----------------------------------------------------------------------
 
 fn openChooser(ui: *Ui, kind: ChooserKind, title: [:0]const u8, save: bool, suggested: ?[:0]const u8) void {
+    if (ui.chooser != null) return; // a chooser is already pending
     const window = ui.window orelse return;
     const chooser = gtk.FileChooserNative.new(
         title.ptr,
@@ -921,8 +924,12 @@ fn onUploadLoaderClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
 
 fn onProbeClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     if (ui.busy() or ui.device == null) return;
-    spawnChipProbe(ui) catch ui.toast("Failed to start worker thread");
-    ui.setBusy(true);
+    ui.startJob();
+    spawnChipProbe(ui) catch {
+        ui.jobDone();
+        ui.toast("Failed to start worker thread");
+        return;
+    };
     labelTextZ(ui.dev_chip_label.?, "Reading chip identity…");
 }
 
@@ -956,15 +963,24 @@ fn onWriteAllClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
 
     var body_buf: [1400]u8 = undefined;
     var len: usize = 0;
+    var fit = true;
     for (ui.pending_writes.items) |pw| {
         var size_buf: [32]u8 = undefined;
         const size_txt = util.formatBytes(&size_buf, pw.row.sectors() * sectorSizeOf(ui));
-        const line = std.fmt.bufPrint(body_buf[len..], "• {s} ({s}) ← {s}\n", .{
+        if (std.fmt.bufPrint(body_buf[len..], "• {s} ({s}) ← {s}\n", .{
             pw.row.name.slice(),
             size_txt,
             std.fs.path.basename(pw.path),
-        }) catch break;
-        len += line.len;
+        })) |line| {
+            len += line.len;
+        } else |_| {
+            fit = false;
+            break;
+        }
+    }
+    if (!fit) {
+        ui.toast("Too many queued writes to display — apply them in smaller batches");
+        return;
     }
     _ = std.fmt.bufPrint(body_buf[len..], "\nOverwriting a partition is IRREVERSIBLE and can hard-brick your device if the wrong image is flashed. Double-check every target.", .{}) catch {};
 

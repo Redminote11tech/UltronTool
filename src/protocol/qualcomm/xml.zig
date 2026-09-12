@@ -53,7 +53,7 @@ pub fn parse(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Document {
 
     var p = Parser{ .a = a, .bytes = bytes, .pos = 0 };
     p.skipMisc(); // leading whitespace, XML declaration, comments
-    const root = try p.parseElement();
+    const root = try p.parseElementDepth(0);
     // Trailing content after the root element: allow whitespace and comments.
     p.skipMisc();
     if (p.pos != bytes.len) return error.Malformed;
@@ -93,7 +93,14 @@ const Parser = struct {
         }
     }
 
-    fn parseElement(self: *Parser) ParseError!*Element {
+    fn parseElementDepth(self: *Parser, depth: u32) ParseError!*Element {
+        // Device data and user-selected XML files are untrusted: a deeply
+        // nested document would otherwise overflow the stack by recursion.
+        if (depth > 64) return error.Malformed;
+        return self.parseElementInner(depth);
+    }
+
+    fn parseElementInner(self: *Parser, depth: u32) ParseError!*Element {
         try self.expect('<');
         if (self.pos >= self.bytes.len or self.bytes[self.pos] == '?' or self.bytes[self.pos] == '!')
             return error.Malformed;
@@ -162,7 +169,7 @@ const Parser = struct {
                 self.pos = end + 3;
                 continue;
             }
-            const child_elem = try self.parseElement();
+            const child_elem = try self.parseElementDepth(depth + 1);
             try children.append(self.a, child_elem);
         }
     }

@@ -194,6 +194,10 @@ pub const Session = struct {
                 READ_DATA64 => try self.handleRead(&buf, true),
                 END_OF_IMAGE => try self.handleEoi(&buf),
                 DONE_RESP => {
+                    if (length < DONE_RESP_LENGTH) {
+                        self.logger.err("Sahara: short DONE_RESP packet", .{});
+                        return Error.Io;
+                    }
                     const status = std.mem.readInt(u32, buf[8..12], .little);
                     // 0 == PENDING (device expects more images), 1 == COMPLETE.
                     done = status != 0;
@@ -322,6 +326,10 @@ pub const Session = struct {
             return Error.Io;
         }
 
+        if (n < 0x24) {
+            self.logger.err("Sahara: short HELLO packet ({d} bytes)", .{n});
+            return Error.Io;
+        }
         const version = std.mem.readInt(u32, buf[8..12], .little);
         const mode = std.mem.readInt(u32, buf[20..24], .little);
         self.logger.debug("Sahara HELLO version {d} mode {d}", .{ version, mode });
