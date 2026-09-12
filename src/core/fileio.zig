@@ -11,6 +11,7 @@ const std = @import("std");
 const c = @cImport({
     @cInclude("stdio.h");
     @cInclude("stdlib.h");
+    @cInclude("string.h");
     @cInclude("unistd.h");
 });
 
@@ -52,6 +53,25 @@ pub const File = struct {
         const pathz = std.fmt.bufPrintZ(&pathz_buf, "{s}", .{path}) catch return error.NameTooLong;
         const f = c.fopen(pathz.ptr, "rb") orelse return error.FileNotFound;
         return .{ .handle = f };
+    }
+
+    /// Open (or truncate) a file for writing.
+    pub fn create(path: []const u8) !File {
+        var pathz_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const pathz = std.fmt.bufPrintZ(&pathz_buf, "{s}", .{path}) catch return error.NameTooLong;
+        const f = c.fopen(pathz.ptr, "wb") orelse return error.FileNotFound;
+        return .{ .handle = f };
+    }
+
+    /// Message for the last stdio error on this stream ("no error" otherwise).
+    /// glibc's strerror string stays valid until the next call on this
+    /// thread, which is fine for immediate logging.
+    pub fn errorMessage(self: *File, buf: []u8) []const u8 {
+        _ = buf;
+        if (c.ferror(self.handle) == 0) return "no error";
+        const msg = c.strerror(std.c._errno().*);
+        if (msg == null) return "unknown error";
+        return std.mem.span(msg.?);
     }
 
     pub fn close(self: *File) void {

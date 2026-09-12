@@ -564,8 +564,8 @@ pub const Manager = struct {
             return;
         }
 
-        var file = fileio.File.open(path) catch |e| {
-            self.logger.err("unable to create {s}", .{path});
+        var file = fileio.File.create(path) catch |e| {
+            self.logger.err("unable to create {s}: {s}", .{ path, @errorName(e) });
             pushFinished(self.channel, false, @errorName(e));
             return;
         };

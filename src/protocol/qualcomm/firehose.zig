@@ -585,11 +585,13 @@ pub const Session = struct {
             const n = try self.io.read(chunk, 30000);
             if (n == 0) break; // ZLP-delimited end of data
             const written = file.writeAll(chunk[0..n]) catch {
-                self.logger.err("failed writing to the output file", .{});
+                var ebuf: [128]u8 = undefined;
+                self.logger.err("failed writing to {s}: {s}", .{ label, file.errorMessage(&ebuf) });
                 return Error.Io;
             };
             if (written != n) {
-                self.logger.err("output file write truncated", .{});
+                var ebuf: [128]u8 = undefined;
+                self.logger.err("write to {s} truncated after {d}/{d} bytes: {s}", .{ label, written, n, file.errorMessage(&ebuf) });
                 return Error.Io;
             }
             got += n;
