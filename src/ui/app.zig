@@ -34,7 +34,7 @@ const usb_ids = @import("../protocol/qualcomm/usb_ids.zig");
 const style = @import("style.zig");
 
 pub const app_id = "io.github.redminote11tech.Ultron";
-pub const version = "0.1.0";
+pub const version = "0.2.0";
 
 const EventChannel = ev.Channel(ev.Event, 256);
 const storage_names: [6]?[*:0]const u8 = .{ "ufs", "emmc", "spinor", "nand", "nvme", null };

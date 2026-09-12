@@ -18,17 +18,22 @@ written in Zig with GTK4/libadwaita.
 - **Live device detection** — udev hot-plug monitoring recognizes Qualcomm EDL
   (`05c6:9008`), crash-dump mode (`05c6:900e`), and any Qualcomm PID exposing
   the Sahara vendor-specific interface
-- **Firehose programmer upload** over Sahara (`.mbn` / `.elf`), with
-  auto-detection of an already-running programmer
-- **Full qdl-parity flashing** via `rawprogram*.xml` + `patch*.xml`,
-  including sector-size probing, payload-size negotiation, set-bootable
-  (`xbl`/`xbl_a`/`sbl1`) and the final reset
+- **One workflow page**: Connect → (if the device is a bare EDL target, choose
+  your signed firehose programmer and upload it over Sahara — devices already
+  running a programmer skip this automatically) → the live partition table
+- **Partition browser** — GPT per LUN (LUN switcher on multi-LUN UFS devices),
+  each partition with **Read** (stream a backup to a file) and **Write**
+  (queues the image; one destructive confirmation dialog lists the whole
+  batch before anything touches the device)
+- **rawprogram flashing** — qdl-compatible `rawprogram*.xml` + `patch*.xml`
+  with the same confirm-first flow, including sector-size probing,
+  payload-size negotiation and set-bootable (`xbl`/`xbl_a`/`sbl1`)
+- **Persistent session** — the Firehose connection stays open across
+  operations; explicit Reset device / Disconnect; cancel aborts and
+  disconnects safely
 - **Chip identity probe** — serial number, HW ID (MSM/OEM/Model), OEM PK hash
   over Sahara command mode (v2 and v3 targets)
-- **Erase** partitions (ranged or full physical partition)
-- **Live protocol console** — every XML exchange and device log line is shown,
-  with full session logs; start/stop anytime
-- **Cancel** between transfers
+- **Live protocol console** — every XML exchange and device log line is shown
 - Storage types: UFS, eMMC, Spinor, NAND, NVMe
 
 ## Requirements

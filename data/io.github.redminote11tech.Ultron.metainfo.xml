@@ -33,6 +33,15 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.2.0" date="2026-09-12">
+      <description>
+        <p>Unified single-page workflow: connect, upload the firehose loader
+        (skipped automatically when a programmer is already running), browse
+        the device partition table per LUN, back partitions up (Read) or
+        flash images to them (Write) with a queued batch and a single
+        destructive confirmation. rawprogram/patch XML support retained.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-09-12">
       <description>
         <p>Initial release: Qualcomm EDL flashing with full qdl parity
