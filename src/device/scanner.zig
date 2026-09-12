@@ -7,6 +7,7 @@
 //! can miss. All state lives on the scanner thread; the UI only sees events.
 
 const std = @import("std");
+const glib = @import("glib");
 const c = @cImport({
     @cInclude("libudev.h");
     @cInclude("stdio.h");
@@ -30,6 +31,7 @@ pub const Scanner = struct {
     /// Interface descriptors seen on usb_interface events, keyed by the
     /// parent usb_device sysfs path.
     ifaces: std.StringHashMapUnmanaged(InterfaceInfo) = .empty,
+    want_scan: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn init(allocator: std.mem.Allocator, logger: *log.Logger, channel: *EventChannel) !*Scanner {
         const self = try allocator.create(Scanner);
@@ -38,10 +40,29 @@ pub const Scanner = struct {
         const udev = c.udev_new() orelse return error.UdevInitFailed;
         errdefer _ = c.udev_unref(udev);
 
-        const monitor = c.udev_monitor_new_from_netlink(udev, "udev") orelse return error.UdevMonitorFailed;
-        errdefer _ = c.udev_monitor_unref(monitor);
-        _ = c.udev_monitor_filter_add_match_subsystem_devtype(monitor, "usb", "usb_device");
-        _ = c.udev_monitor_enable_receiving(monitor);
+        // The netlink monitor is optional: if it cannot be created (restricted
+        // sessions, containers), the periodic re-enumeration sweep still
+        // detects every device. Detection must never depend on it.
+        const monitor = c.udev_monitor_new_from_netlink(udev, "udev");
+        var monitor_fd: std.posix.fd_t = -1;
+        if (monitor) |m| {
+            _ = c.udev_monitor_filter_add_match_subsystem_devtype(m, "usb", "usb_device");
+            if (c.udev_monitor_enable_receiving(m) == 0) {
+                monitor_fd = c.udev_monitor_get_fd(m);
+            } else {
+                logger.warn("scanner: udev monitor unavailable (will rescan every 500 ms)", .{});
+                _ = c.udev_monitor_unref(m);
+                self.* = .{
+                    .allocator = allocator,
+                    .logger = logger,
+                    .channel = channel,
+                    .udev = udev,
+                };
+                return self;
+            }
+        } else {
+            logger.warn("scanner: udev monitor creation failed (will rescan every 500 ms)", .{});
+        }
 
         self.* = .{
             .allocator = allocator,
@@ -49,9 +70,14 @@ pub const Scanner = struct {
             .channel = channel,
             .udev = udev,
             .monitor = monitor,
-            .monitor_fd = c.udev_monitor_get_fd(monitor),
+            .monitor_fd = monitor_fd,
         };
         return self;
+    }
+
+    /// Force an immediate re-enumeration from any thread.
+    pub fn requestScan(self: *Scanner) void {
+        self.want_scan.store(true, .release);
     }
 
     pub fn start(self: *Scanner) !void {
@@ -85,17 +111,24 @@ pub const Scanner = struct {
         }};
 
         while (!self.stopping.load(.acquire)) {
-            const ready = std.posix.poll(&fds, 300) catch 0;
-            if (ready > 0) {
-                while (true) {
-                    const dev = c.udev_monitor_receive_device(self.monitor) orelse break;
-                    defer _ = c.udev_device_unref(dev);
-                    self.handleDevice(dev);
+            if (self.monitor != null) {
+                const ready = std.posix.poll(&fds, 300) catch 0;
+                if (ready > 0) {
+                    while (true) {
+                        const dev = c.udev_monitor_receive_device(self.monitor) orelse break;
+                        defer _ = c.udev_device_unref(dev);
+                        self.handleDevice(dev);
+                    }
                 }
+            } else {
+                glib.usleep(50 * std.time.us_per_ms);
             }
-            // Periodic re-enumeration to cover missed/racy events.
+
+            // Periodic re-enumeration: the safety net that makes detection
+            // independent of the monitor. 500 ms keeps hot-plug snappy.
+            const force = self.want_scan.swap(false, .acq_rel);
             const now = glibMonoNow();
-            if (now - last_enum > 2 * std.time.us_per_s) {
+            if (force or now - last_enum > 500 * std.time.us_per_ms) {
                 last_enum = now;
                 self.enumerate();
             }
@@ -107,7 +140,10 @@ pub const Scanner = struct {
         const e = c.udev_enumerate_new(self.udev) orelse return;
         defer _ = c.udev_enumerate_unref(e);
         _ = c.udev_enumerate_add_match_subsystem(e, "usb");
-        if (c.udev_enumerate_scan_devices(e) != 0) return;
+        if (c.udev_enumerate_scan_devices(e) != 0) {
+            self.logger.warn("scanner: udev enumeration failed", .{});
+            return;
+        }
 
         var it = c.udev_enumerate_get_list_entry(e);
         while (it != null) : (it = c.udev_list_entry_get_next(it)) {
@@ -296,7 +332,6 @@ fn parseDecU8(s: ?[]const u8) ?u8 {
 }
 
 fn glibMonoNow() i64 {
-    const glib = @import("glib");
     return glib.getMonotonicTime();
 }
 

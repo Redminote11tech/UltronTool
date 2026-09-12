@@ -342,7 +342,16 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     const status = adw.StatusPage.new();
     adw.StatusPage.setIconName(status, "usb-plug-symbolic");
     adw.StatusPage.setTitle(status, "No device detected");
-    adw.StatusPage.setDescription(status, "Connect your device in EDL (download) mode.\nOn Qualcomm devices this is 9008 mode — usually holding volume keys while plugging in USB.");
+    adw.StatusPage.setDescription(status, "Connect your device in EDL (download) mode.\nOn Qualcomm devices this is 9008 mode — usually holding volume keys while plugging in USB.\nUltron rescans every 500 ms.");
+    ui.status_page = status;
+
+    const rescan_btn = gtk.Button.newWithLabel("Rescan");
+    gtk.Widget.addCssClass(rescan_btn.as(gtk.Widget), "suggested-action");
+    gtk.Widget.addCssClass(rescan_btn.as(gtk.Widget), "pill");
+    gtk.Widget.setHalign(rescan_btn.as(gtk.Widget), .center);
+    _ = gtk.Button.signals.clicked.connect(rescan_btn, *Ui, &onRescanClicked, ui, .{});
+    adw.StatusPage.setChild(status, rescan_btn.as(gtk.Widget));
+
     ui.status_page = status;
     gtk.Box.append(page, status.as(gtk.Widget));
 
@@ -798,6 +807,11 @@ fn currentLun(ui: *Ui) u32 {
 fn sectorSizeOf(ui: *Ui) u32 {
     if (ui.parts) |p| return if (p.sector_size != 0) p.sector_size else 512;
     return 512;
+}
+
+fn onRescanClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (ui.scanner) |sc| sc.requestScan();
+    ui.logger.info("manual rescan requested", .{});
 }
 
 fn onConnectClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
