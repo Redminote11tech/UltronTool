@@ -89,6 +89,12 @@ pub const File = struct {
         return @intCast(end);
     }
 
+    pub fn tell(self: *File) u64 {
+        const pos = c.ftell(self.handle);
+        if (pos < 0) return 0;
+        return @intCast(pos);
+    }
+
     pub fn seekTo(self: *File, pos: u64) !void {
         if (c.fseek(self.handle, @intCast(pos), c.SEEK_SET) != 0) return error.Unexpected;
     }

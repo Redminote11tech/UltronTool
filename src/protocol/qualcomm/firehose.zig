@@ -636,6 +636,26 @@ pub const Session = struct {
         self.logger.info("partition {d} is now bootable", .{part});
     }
 
+    /// Port of firehose_getsha256digest: ask the programmer for the SHA-256
+    /// of a storage range. The hex digest arrives inside a <log> line (the
+    /// response parser extracts it). Returns false when no digest came back.
+    pub fn getSha256Digest(self: *Session, op: *const rawprogram.Program, out: *[64]u8) Error!bool {
+        var esc_buf: [128]u8 = undefined;
+        var xml_buf: [8192]u8 = undefined;
+        const req = std.fmt.bufPrint(&xml_buf, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><getsha256digest SECTOR_SIZE_IN_BYTES=\"{d}\" num_partition_sectors=\"{d}\" physical_partition_number=\"{d}\" start_sector=\"{s}\"/></data>", .{
+            op.sector_size,
+            op.num_sectors,
+            op.partition,
+            xml.escapeAttr(&esc_buf, op.start_sector),
+        }) catch return Error.Io;
+
+        try self.writeRequest(req);
+        const resp = try self.readResponse(30000);
+        if (resp.digest_len != 64) return false;
+        @memcpy(out, resp.digest[0..64]);
+        return true;
+    }
+
     /// Port of firehose_reset: <power value="reset" DelayInSeconds="10"/>,
     /// then drain remaining log messages.
     pub fn reset(self: *Session) Error!void {

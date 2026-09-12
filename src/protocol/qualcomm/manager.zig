@@ -14,6 +14,7 @@
 //! and returns to `disconnected`.
 
 const std = @import("std");
+const Sha256 = std.crypto.hash.sha2.Sha256;
 const glib = @import("glib");
 const transport = @import("../../transport/transport.zig");
 const log = @import("../../core/log.zig");

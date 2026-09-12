@@ -158,7 +158,25 @@ against an overall deadline; concatenated XML docs split on `<?xml` / `</data>`;
 4. Append RESET unless disabled.
 5. Run: Sahara (programmer upload, device-driven) → Firehose (configure → ops → reset).
 
-## 5. Detection table (Ultron device scanner)
+## 5. Ultron support matrix & roadmap
+
+| Feature | Status | Notes |
+|---|---|---|
+| Sahara loader upload (v1/v2/v3 devices) | ✅ | Host replies version 2 / compatible 1 with the device's requested mode — qdl's policy, works for all versions; chip identity adapts (HW_ID pre-v3, CHIP_ID_V3 v3+) |
+| Firehose configure negotiation | ✅ | 1 MiB offer; ACK-with-Supported and NAK-with-Bytes size hints both renegotiated once |
+| Sector-size probing | ✅ | 512 → 4096 trial reads, storage-info fallback |
+| rawprogram/patch flashing | ✅ | qdl op-list order, set-bootable, allow-missing |
+| Partition browser + per-partition read/write | ✅ | GPT per LUN, CRC-verified |
+| Write verification (getsha256digest) | ✅ | Local SHA-256 of the streamed image vs device digest |
+| Drain-to-complete on refused writes | ✅ | Protected partitions fail cleanly; session survives |
+| Stuck-programmer recovery | ✅ | nop probe → USB reset → fresh EDL → auto loader re-upload |
+| Multi-image Sahara archives (zip / id:file) | ⏳ planned | qdl decode_programmer |
+| RAM dump / Memory Debug (900E crash dumps) | ⏳ planned | MEM_DEBUG64 region table + dumps |
+| UFS provisioning (<ufs> XML) | ⏳ planned | destructive; bConfigDescrLock gates |
+| VIP (Verified Image Programming) | ❌ n/a | vendor-signed digest tables; requires programmer support + keys |
+| Streaming (nandprg/enandprg), Diag | ❌ n/a | NAND-target legacy paths |
+
+## 6. Detection table (Ultron device scanner)
 
 | VID:PID | Meaning | Module (v1 / future) |
 |---|---|---|
