@@ -113,10 +113,19 @@ pub const Usb = struct {
     pub fn read(self: *Usb, buf: []u8, timeout_ms: u32) Error!usize {
         if (buf.len == 0) return 0;
         var actual: c_int = 0;
-        const ret = c.libusb_bulk_transfer(self.handle, self.in_ep, buf.ptr, @intCast(buf.len), &actual, @intCast(timeout_ms));
+        var ret = c.libusb_bulk_transfer(self.handle, self.in_ep, buf.ptr, @intCast(buf.len), &actual, @intCast(timeout_ms));
+
+        // A stalled IN endpoint (LIBUSB_ERROR_PIPE) is recoverable: clear the
+        // halt and retry once. Without this a single stall kills the session.
+        if (ret == c.LIBUSB_ERROR_PIPE) {
+            self.logger.warn("USB: bulk IN stalled — clearing halt and retrying", .{});
+            _ = c.libusb_clear_halt(self.handle, self.in_ep);
+            ret = c.libusb_bulk_transfer(self.handle, self.in_ep, buf.ptr, @intCast(buf.len), &actual, @intCast(timeout_ms));
+        }
+
         if (ret != 0 and ret != c.LIBUSB_ERROR_TIMEOUT) {
-            self.logger.debug("USB bulk read failed: {s}", .{errName(ret)});
-            return Error.Io;
+            self.logger.err("USB bulk read failed: {s} (ep 0x{x})", .{ errName(ret), self.in_ep });
+            return if (ret == c.LIBUSB_ERROR_NO_DEVICE) Error.Gone else Error.Io;
         }
         if (ret == c.LIBUSB_ERROR_TIMEOUT and actual == 0) return Error.Timeout;
 
@@ -138,10 +147,15 @@ pub const Usb = struct {
         while (data.len > 0) {
             const xfer = @min(data.len, self.out_chunk_size);
             var actual: c_int = 0;
-            const ret = c.libusb_bulk_transfer(self.handle, self.out_ep, @constCast(@ptrCast(data.ptr)), @intCast(xfer), &actual, @intCast(timeout_ms));
+            var ret = c.libusb_bulk_transfer(self.handle, self.out_ep, @constCast(@ptrCast(data.ptr)), @intCast(xfer), &actual, @intCast(timeout_ms));
+            if (ret == c.LIBUSB_ERROR_PIPE) {
+                self.logger.warn("USB: bulk OUT stalled — clearing halt and retrying", .{});
+                _ = c.libusb_clear_halt(self.handle, self.out_ep);
+                ret = c.libusb_bulk_transfer(self.handle, self.out_ep, @constCast(@ptrCast(data.ptr)), @intCast(xfer), &actual, @intCast(timeout_ms));
+            }
             if (ret != 0 and ret != c.LIBUSB_ERROR_TIMEOUT) {
-                self.logger.debug("USB bulk write failed: {s}", .{errName(ret)});
-                return Error.Io;
+                self.logger.err("USB bulk write failed: {s} (ep 0x{x})", .{ errName(ret), self.out_ep });
+                return if (ret == c.LIBUSB_ERROR_NO_DEVICE) Error.Gone else Error.Io;
             }
             if (ret == c.LIBUSB_ERROR_TIMEOUT and actual == 0) return Error.Timeout;
 

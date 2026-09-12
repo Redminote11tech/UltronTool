@@ -584,8 +584,14 @@ pub const Session = struct {
             if (self.cancelled()) return Error.Cancelled;
             const n = try self.io.read(chunk, 30000);
             if (n == 0) break; // ZLP-delimited end of data
-            const written = file.writeAll(chunk[0..n]) catch return Error.Io;
-            if (written != n) return Error.Io;
+            const written = file.writeAll(chunk[0..n]) catch {
+                self.logger.err("failed writing to the output file", .{});
+                return Error.Io;
+            };
+            if (written != n) {
+                self.logger.err("output file write truncated", .{});
+                return Error.Io;
+            }
             got += n;
             self.progress.report(label, got, need);
         }
