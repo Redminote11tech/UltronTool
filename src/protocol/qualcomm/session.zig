@@ -272,6 +272,7 @@ pub fn chipInfo(
 test "flash session end-to-end over sim transport" {
     // The sim backend is protocol-agnostic; here we drive the inner pieces
     // against a scripted firehose programmer (sahara skipped: no programmer).
+const SimHarness = @import("../../transport/sim.zig").Harness;
 const SimStep = @import("../../transport/sim.zig").Step;
 
     // Exactly 2 sectors of 32 bytes, so ceil(size/sector) == num_partition_sectors.
@@ -301,7 +302,7 @@ const SimStep = @import("../../transport/sim.zig").Step;
     var xbuf: [176]u8 = undefined;
     const xml_path = try tmp.filePath(&xbuf, "rawprogram0.xml");
 
-    var h = try H.init(std.testing.allocator, &steps);
+    var h = try SimHarness.init(std.testing.allocator, &steps);
     defer h.deinit();
     var io = transport.Io.init(std.testing.allocator, h.transport());
     defer io.deinit();
