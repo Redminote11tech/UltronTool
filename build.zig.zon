@@ -1,0 +1,13 @@
+.{
+    .name = .ultron,
+    .version = "0.1.0",
+    .fingerprint = 0x4da8175f571c388e, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .paths = .{""},
+    .dependencies = .{
+        .gobject = .{
+            .url = "https://github.com/ianprime0509/zig-gobject/releases/download/v0.3.2/bindings-gnome50.tar.zst",
+            .hash = "gobject-0.3.2-Skun7LD1fwF1wmLVmZnH0Qx_Bhkmfau25skjhPLoljHj",
+        },
+    },
+}

@@ -1,0 +1,22 @@
+# Zig build artifacts
+zig-out/
+.zig-cache/
+
+# makepkg artifacts
+*.pkg.tar.zst
+pkg/
+src-*/
+v*.tar.gz
+
+# Reference source clones (protocol study only, not part of the build)
+refs/
+
+# Local misc
+dist/
+*.log
+
+# Unpacked dependency cache created by the build
+zig-pkg/
+
+# Agent session metadata
+.zcode/
