@@ -320,6 +320,11 @@ pub const Session = struct {
         while (true) {
             if (self.cancelled()) return Error.Cancelled;
             resp = try self.sendConfigure(self.max_payload_size, skip_storage_init);
+            // A NAK that carries MaxPayloadSizeToTargetInBytes is the
+            // programmer proposing a size it can handle (e.g. 16 KiB) — qdl's
+            // configure parser accepts it and renegotiates below. Only a NAK
+            // without any size attribute is a hard failure.
+            if (resp.max_payload_size != null) break;
             if (resp.isAck()) break;
             if (resp.kind == .nak) {
                 self.logger.err("configure request failed", .{});
@@ -333,7 +338,8 @@ pub const Session = struct {
             }
         }
 
-        // Retry once if the remote proposed a different payload size.
+        // Re-configure once when the remote proposed a different payload size
+        // (ACK: MaxPayloadSizeToTargetInBytesSupported, NAK: the Bytes attr).
         if (resp.max_payload_size) |size| {
             if (size != self.max_payload_size and size > 0) {
                 self.logger.info("firehose: target negotiated max payload size {d} -> {d}", .{ self.max_payload_size, size });
@@ -773,6 +779,27 @@ test "configure with payload renegotiation and sector probe" {
     try env.sess.configure(.ufs, false);
     try std.testing.expectEqual(@as(usize, 262144), env.sess.max_payload_size);
     try std.testing.expectEqual(@as(u32, 512), env.sess.sector_size);
+}
+
+test "configure accepts NAK size hint and renegotiates once" {
+    // Mirrors the nv9_firehose programmer: 1 MiB offered -> NAK proposing
+    // 16384 -> re-configure with 16384 -> ACK. Sector probe skipped.
+    const nak_size = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><log value=\"WARN: NAK: MaxPayloadSizeToTargetInBytes sent by host 1048576 larger than supported 16384\"/><response value=\"NAK\" MaxPayloadSizeToTargetInBytes=\"16384\"/></data>";
+    const ack_16k = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><response value=\"ACK\" MaxPayloadSizeToTargetInBytes=\"16384\"/></data>";
+
+    const steps = [_]SimStep{
+        .{ .expect_write = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><configure MemoryName=\"ufs\" MaxPayloadSizeToTargetInBytes=\"1048576\" Verbose=\"0\" ZlpAwareHost=\"1\" SkipStorageInit=\"1\" /></data>" },
+        .{ .respond = nak_size },
+        .{ .expect_write = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><configure MemoryName=\"ufs\" MaxPayloadSizeToTargetInBytes=\"16384\" Verbose=\"0\" ZlpAwareHost=\"1\" SkipStorageInit=\"1\" /></data>" },
+        .{ .respond = ack_16k },
+    };
+
+    const env = try TestEnv.init(std.testing.allocator, &steps);
+    defer env.deinit(std.testing.allocator);
+
+    try env.sess.configure(.ufs, true);
+    try std.testing.expectEqual(@as(usize, 16384), env.sess.max_payload_size);
+    try std.testing.expect(env.h.failure == null);
 }
 
 test "configure retries on timeout until programmer answers" {
