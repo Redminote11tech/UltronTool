@@ -52,9 +52,15 @@ zig build test      # unit tests (Sahara/Firehose/XML over a simulated device)
 
 ## Packaging (Arch / CachyOS)
 
+Two equivalent ways to build the installable package:
+
 ```
-git archive --prefix="ultron-0.1.0/" -o ultron-0.1.0.tar.gz v0.1.0
+# with makepkg (creates pkg/ staging, then installs):
 makepkg -sri
+
+# or with the standalone script (no pkg/ staging needed):
+./tools/make-package.sh
+sudo pacman -U ultron-0.1.0-1-x86_64.pkg.tar.zst
 ```
 
 The package installs the binary, desktop entry, AppStream metainfo, icon and
