@@ -1,44 +1,82 @@
 # Ultron
 
-A beautiful, native Linux GUI flashing/unbricking tool for Qualcomm EDL (9008) devices —
-the graphical successor to [`qdl`](https://github.com/linux-msm/qdl), written in Zig with
-GTK4/libadwaita.
+<p align="center">
+  <img src="data/icons/hicolor/scalable/apps/io.github.redminote11tech.Ultron.svg" width="96" alt="Ultron icon"/>
+</p>
 
-> Status: early development. Protocol modules are plugin-based: Qualcomm EDL (Sahara +
-> Firehose) first, with MediaTek (BROM) and Samsung (Odin) modules planned.
+A beautiful, native Linux GUI flashing/unbricking tool for Qualcomm EDL (9008)
+devices — the graphical successor to [`qdl`](https://github.com/linux-msm/qdl),
+written in Zig with GTK4/libadwaita.
 
-## Features (v1, Qualcomm EDL)
+> **Status: v0.1.0** — Qualcomm EDL is fully working (full qdl parity). The
+> architecture is plugin-based: **MediaTek (BROM/mtkclient-style)** and
+> **Samsung (Odin/Heimdall-style)** protocol modules are planned on top of the
+> same protocol registry.
 
-- Automatic detection of EDL-mode devices (Qualcomm VID `05c6`, incl. `9008` / `900e`)
-- Firehose programmer upload over Sahara (`.mbn` / `.elf`)
-- Flashing via qdl-compatible `rawprogram*.xml` + `patch*.xml`
-- Partition erase, storage info, device reset
-- Live console with full protocol logs, progress, and cancel
+## Features
+
+- **Live device detection** — udev hot-plug monitoring recognizes Qualcomm EDL
+  (`05c6:9008`), crash-dump mode (`05c6:900e`), and any Qualcomm PID exposing
+  the Sahara vendor-specific interface
+- **Firehose programmer upload** over Sahara (`.mbn` / `.elf`), with
+  auto-detection of an already-running programmer
+- **Full qdl-parity flashing** via `rawprogram*.xml` + `patch*.xml`,
+  including sector-size probing, payload-size negotiation, set-bootable
+  (`xbl`/`xbl_a`/`sbl1`) and the final reset
+- **Chip identity probe** — serial number, HW ID (MSM/OEM/Model), OEM PK hash
+  over Sahara command mode (v2 and v3 targets)
+- **Erase** partitions (ranged or full physical partition)
+- **Live protocol console** — every XML exchange and device log line is shown,
+  with full session logs; start/stop anytime
+- **Cancel** between transfers
+- Storage types: UFS, eMMC, Spinor, NAND, NVMe
 
 ## Requirements
 
-- Linux with libusb 1.0 and GTK4 + libadwaita
-- USB access to the device in EDL mode — udev rules are shipped as
-  `data/70-ultron.rules` (install to `/usr/lib/udev/rules.d/`, then
-  `sudo udevadm control --reload && sudo udevadm trigger`)
-- Your device's own signed **programmer** (firehose) file and flashing XMLs —
-  these are vendor-specific and not included
+- Linux with libusb 1.0, GTK4 + libadwaita, libudev
+- USB access to the device in EDL mode — udev rules ship with the package
+  (`/usr/lib/udev/rules.d/70-ultron.rules`, installed by the PKGBUILD). On
+  other distros copy it manually, then:
+  `sudo udevadm control --reload && sudo udevadm trigger`
+- Your device's own signed **programmer** (firehose) file and flash-layout XML
+  files — these are vendor-specific and **not included**
 
 ## Building
 
+Requires **Zig 0.16.x** (the GUI uses zig-gobject v0.3.2, GNOME 50 bindings).
+
 ```
 zig build --release=fast
+zig build test      # unit tests (Sahara/Firehose/XML over a simulated device)
 ```
 
-## Packaging (Arch/CachyOS)
+## Packaging (Arch / CachyOS)
 
 ```
+git archive --prefix="ultron-0.1.0/" -o ultron-0.1.0.tar.gz v0.1.0
 makepkg -sri
 ```
 
-See `PKGBUILD`.
+The package installs the binary, desktop entry, AppStream metainfo, icon and
+udev rules, then reloads udev.
+
+## Architecture
+
+```
+src/
+├── core/       logging ring, event channel, libc file helpers
+├── transport/  Transport vtable · libusb backend (qdl ZLP semantics) · sim backend
+├── device/     libudev hot-plug scanner
+├── protocol/   Protocol vtable + registry (the plugin point)
+│   └── qualcomm/  sahara · firehose · xml · rawprogram · session
+└── ui/         libadwaita app (device / flash / console pages)
+```
+
+Protocol logic is ported line-by-line from the reference implementations;
+see [docs/PROTOCOL.md](docs/PROTOCOL.md) for the full spec and sources.
 
 ## License
 
-GPL-3.0 — see [LICENSE](LICENSE). Protocol logic is ported from linux-msm/qdl (BSD-3-Clause)
-and cross-checked against bkerler/edl and strongtz/edl-ng; see `docs/PROTOCOL.md`.
+GPL-3.0-or-later — see [LICENSE](LICENSE). Protocol logic is ported from
+linux-msm/qdl (BSD-3-Clause) and cross-checked against bkerler/edl and
+strongtz/edl-ng.
