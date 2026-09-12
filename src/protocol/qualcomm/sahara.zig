@@ -102,6 +102,7 @@ pub const Session = struct {
     images: []const Image,
     progress: ProgressHook = .{},
     cancel: ?*const std.atomic.Value(bool) = null,
+    protocol_version: u32 = 0,
 
     fn cancelled(self: *Session) bool {
         return self.cancel != null and self.cancel.?.load(.acquire);
@@ -135,6 +136,13 @@ pub const Session = struct {
     fn sendDone(self: *Session) void {
         var buf: [8]u8 = undefined;
         putHeader(&buf, DONE, DONE_LENGTH);
+        _ = self.io.write(&buf, cmd_timeout_ms) catch {};
+    }
+
+    fn sendSwitchMode(self: *Session, mode: u32) void {
+        var buf: [SWITCH_MODE_LENGTH]u8 = @splat(0);
+        putHeader(&buf, SWITCH_MODE, SWITCH_MODE_LENGTH);
+        std.mem.writeInt(u32, buf[8..12], mode, .little);
         _ = self.io.write(&buf, cmd_timeout_ms) catch {};
     }
 
@@ -224,8 +232,6 @@ pub const Session = struct {
         self.sendHelloResp(VERSION, mode);
     }
 
-    protocol_version: u32 = 0,
-
     fn handleRead(self: *Session, buf: []const u8, wide: bool) Error!void {
         const expect_len: u32 = if (wide) READ_DATA64_LENGTH else READ_DATA_LENGTH;
         if (std.mem.readInt(u32, buf[4..8], .little) != expect_len) {
@@ -291,6 +297,57 @@ pub const Session = struct {
             return Error.Io;
         }
         self.sendDone();
+    }
+
+    /// Port of sahara_chipinfo: answer the HELLO requesting COMMAND mode,
+    /// wait for CMD_READY, read the chip identity, then switch back to
+    /// image-transfer mode so the device re-issues its HELLO and stays
+    /// usable for a subsequent flash without a reset.
+    pub fn chipInfoSession(self: *Session) Error!ChipInfo {
+        var buf: [4096]u8 = undefined;
+
+        const n = try self.io.read(&buf, cmd_timeout_ms);
+        if (n >= 5 and std.mem.eql(u8, buf[0..5], "<?xml")) {
+            self.logger.err("device is already in Firehose mode; chip info is only available via Sahara", .{});
+            return Error.Io;
+        }
+        if (n < 8) {
+            self.logger.err("failed to read Sahara HELLO from device", .{});
+            return Error.Timeout;
+        }
+        const cmd = std.mem.readInt(u32, buf[0..4], .little);
+        const length = std.mem.readInt(u32, buf[4..8], .little);
+        if (@as(u32, @intCast(n)) != length or cmd != HELLO) {
+            self.logger.err("unexpected Sahara packet 0x{x} while waiting for HELLO", .{cmd});
+            return Error.Io;
+        }
+
+        const version = std.mem.readInt(u32, buf[8..12], .little);
+        const mode = std.mem.readInt(u32, buf[20..24], .little);
+        self.logger.debug("Sahara HELLO version {d} mode {d}", .{ version, mode });
+        self.protocol_version = version;
+        self.sendHelloResp(version, MODE_COMMAND);
+
+        errdefer self.sendSwitchMode(MODE_IMAGE_TX_PENDING);
+
+        const n2 = self.io.read(&buf, cmd_timeout_ms) catch {
+            self.logger.err("no Sahara CMD_READY received; device may not support command mode", .{});
+            return Error.Timeout;
+        };
+        if (n2 < 8) return Error.Io;
+        const cmd2 = std.mem.readInt(u32, buf[0..4], .little);
+        if (cmd2 == END_OF_IMAGE) {
+            self.logger.err("device rejected command mode (end-of-image status {d})", .{std.mem.readInt(u32, buf[12..16], .little)});
+            return Error.Io;
+        }
+        if (cmd2 != CMD_READY) {
+            self.logger.err("unexpected Sahara packet 0x{x} while entering command mode", .{cmd2});
+            return Error.Io;
+        }
+
+        const info = try self.commandInfo();
+        self.sendSwitchMode(MODE_IMAGE_TX_PENDING);
+        return info;
     }
 
     // ------------------------------------------------------------------
@@ -487,9 +544,19 @@ test "run: full transfer with dynamic hello response check" {
 }
 
 test "pkhashTrim snaps to digest sizes" {
-    var buf: [64]u8 = @splat(0);
-    for (0..32) |i| buf[i] = @intCast(0xA0 + i);
-    try std.testing.expectEqual(@as(usize, 32), pkhashTrim(buf[0..40]).len);
-    try std.testing.expectEqual(@as(usize, 32), pkhashTrim(buf[0..20]).len);
-    try std.testing.expectEqual(@as(usize, 48), pkhashTrim(buf[40..49]).len);
+    var buf: [80]u8 = undefined;
+    for (&buf, 0..) |*b, i| b.* = @truncate(0xA0 + i);
+    // Exactly 32 distinct bytes → digest size 32.
+    try std.testing.expectEqual(@as(usize, 32), pkhashTrim(buf[0..32]).len);
+    // Shorter than the smallest digest: no snapping possible.
+    try std.testing.expectEqual(@as(usize, 20), pkhashTrim(buf[0..20]).len);
+    // Exactly 48 distinct bytes → 48.
+    try std.testing.expectEqual(@as(usize, 48), pkhashTrim(buf[0..48]).len);
+    // No snap when longer than every digest.
+    try std.testing.expectEqual(@as(usize, 64), pkhashTrim(buf[0..64]).len);
+
+    // 32 distinct bytes + trailing zeros → collapsed to 32.
+    var zbuf: [80]u8 = @splat(0);
+    for (0..32) |i| zbuf[i] = @truncate(0xA0 + i);
+    try std.testing.expectEqual(@as(usize, 32), pkhashTrim(zbuf[0..40]).len);
 }

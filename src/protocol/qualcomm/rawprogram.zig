@@ -10,6 +10,7 @@
 const std = @import("std");
 const xml = @import("xml.zig");
 const log = @import("../../core/log.zig");
+const fileio = @import("../../core/fileio.zig");
 
 pub const Loader = struct {
     arena: std.heap.ArenaAllocator,
@@ -31,11 +32,11 @@ pub const Loader = struct {
     /// Load one rawprogram or patch XML file (type detected from root).
     pub fn loadFile(self: *Loader, path: []const u8, allow_missing: bool, logger: *log.Logger) !void {
         const a = self.arena.allocator();
-        const contents = std.fs.cwd().readFileAlloc(a, path, 16 * 1024 * 1024) catch |e| {
+        const contents = fileio.readFileAlloc(a, path, 16 * 1024 * 1024) catch |e| {
             logger.err("unable to read {s}: {s}", .{ path, @errorName(e) });
             return e;
         };
-        var doc = xml.parse(a, contents) catch {
+        const doc = xml.parse(a, contents) catch {
             logger.err("failed to parse XML file {s}", .{path});
             return error.Malformed;
         };
@@ -69,7 +70,7 @@ pub const Loader = struct {
                 if (filename) |fname| {
                     p.filename = try self.resolvePath(xml_dir, fname);
                     // Missing image handling, mirroring qdl load_program_tag.
-                    std.fs.cwd().access(p.filename.?, .{}) catch {
+                    if (!fileio.exists(p.filename.?)) {
                         logger.info("unable to open {s}", .{p.filename.?});
                         if (!allow_missing) {
                             logger.info("...failing", .{});
@@ -77,7 +78,7 @@ pub const Loader = struct {
                         }
                         logger.info("...ignoring", .{});
                         p.filename = null;
-                    };
+                    }
                 }
                 _ = a;
                 try self.ops.append(self.arena.child_allocator, op);
@@ -187,19 +188,20 @@ fn attrU32(node: *xml.Element, name: []const u8) ?u32 {
 }
 
 test "load rawprogram and patch files from fixture" {
-    const tmp = std.testing.tmpDir(.{});
+    var tmp = try fileio.TmpDir.init();
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "rawprogram0.xml", .data =
+    try tmp.writeFile("rawprogram0.xml",
         \\<?xml version="1.0" ?><data>
         \\<program SECTOR_SIZE_IN_BYTES="512" file_sector_offset="0" filename="boot.img" label="boot" num_partition_sectors="16384" physical_partition_number="0" start_sector="8192"/>
         \\<erase SECTOR_SIZE_IN_BYTES="512" num_partition_sectors="64" physical_partition_number="0" start_sector="2048"/>
         \\</data>
-    });
-    try tmp.dir.writeFile(.{ .sub_path = "patch0.xml", .data =
+    );
+    try tmp.writeFile("patch0.xml",
         \\<?xml version="1.0" ?><patches>
         \\  <patch SECTOR_SIZE_IN_BYTES="512" byte_offset="72" filename="DISK" physical_partition_number="0" size_in_bytes="8" start_sector="1" value="0x99" what="primary GPT header backup location"/>
         \\</patches>
-    });
+    );
+    try tmp.writeFile("boot.img", "x");
 
     const logger = try std.testing.allocator.create(log.Logger);
     defer std.testing.allocator.destroy(logger);
@@ -208,8 +210,8 @@ test "load rawprogram and patch files from fixture" {
     var loader = Loader.init(std.testing.allocator);
     defer loader.deinit();
 
-    const xml_path = try tmp.dir.realpathAlloc(std.testing.allocator, "rawprogram0.xml");
-    defer std.testing.allocator.free(xml_path);
+    var pbuf: [176]u8 = undefined;
+    const xml_path = try tmp.filePath(&pbuf, "rawprogram0.xml");
     try loader.loadFile(xml_path, false, logger);
 
     const ops = loader.opsSlice();
@@ -218,7 +220,7 @@ test "load rawprogram and patch files from fixture" {
         .program => |p| {
             try std.testing.expectEqual(@as(u32, 512), p.sector_size);
             try std.testing.expectEqual(@as(u32, 16384), p.num_sectors);
-            try std.testing.expectEqualStrings("boot.img", p.filename.?);
+            try std.testing.expect(std.mem.endsWith(u8, p.filename.?, "boot.img"));
             try std.testing.expectEqualStrings("boot", p.label.?);
         },
         else => return error.TestUnexpectedResult,
@@ -230,8 +232,8 @@ test "load rawprogram and patch files from fixture" {
 
     var ploader = Loader.init(std.testing.allocator);
     defer ploader.deinit();
-    const patch_path = try tmp.dir.realpathAlloc(std.testing.allocator, "patch0.xml");
-    defer std.testing.allocator.free(patch_path);
+    var ppbuf: [176]u8 = undefined;
+    const patch_path = try tmp.filePath(&ppbuf, "patch0.xml");
     try ploader.loadFile(patch_path, false, logger);
     try std.testing.expectEqual(@as(usize, 1), ploader.opsSlice().len);
     switch (ploader.opsSlice()[0].tag) {
@@ -241,15 +243,15 @@ test "load rawprogram and patch files from fixture" {
 }
 
 test "allow_missing drops programs with absent images" {
-    const tmp = std.testing.tmpDir(.{});
+    var tmp = try fileio.TmpDir.init();
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "rawprogram1.xml", .data =
+    try tmp.writeFile("rawprogram1.xml",
         \\<?xml version="1.0" ?><data>
         \\<program SECTOR_SIZE_IN_BYTES="512" filename="exists.img" label="a" num_partition_sectors="1" physical_partition_number="0" start_sector="1"/>
         \\<program SECTOR_SIZE_IN_BYTES="512" filename="nope.img" label="b" num_partition_sectors="1" physical_partition_number="0" start_sector="2"/>
         \\</data>
-    });
-    try tmp.dir.writeFile(.{ .sub_path = "exists.img", .data = "x" });
+    );
+    try tmp.writeFile("exists.img", "x");
 
     const logger = try std.testing.allocator.create(log.Logger);
     defer std.testing.allocator.destroy(logger);
@@ -257,8 +259,8 @@ test "allow_missing drops programs with absent images" {
 
     var loader = Loader.init(std.testing.allocator);
     defer loader.deinit();
-    const xml_path = try tmp.dir.realpathAlloc(std.testing.allocator, "rawprogram1.xml");
-    defer std.testing.allocator.free(xml_path);
+    var pbuf: [176]u8 = undefined;
+    const xml_path = try tmp.filePath(&pbuf, "rawprogram1.xml");
     try loader.loadFile(xml_path, true, logger);
     const ops = loader.opsSlice();
     try std.testing.expectEqual(@as(usize, 2), ops.len);

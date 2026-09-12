@@ -75,7 +75,24 @@ pub const Harness = struct {
     fn readVt(ptr: *anyopaque, buf: []u8, timeout_ms: u32) Error!usize {
         _ = timeout_ms;
         const self: *Harness = @ptrCast(@alignCast(ptr));
-        if (self.queue.items.len == 0) return Error.Timeout;
+        if (self.queue.items.len == 0) {
+            // Consume any scheduled timeouts before giving up.
+            while (self.step_idx < self.steps.len) {
+                switch (self.steps[self.step_idx]) {
+                    .read_timeout => {
+                        self.step_idx += 1;
+                        self.advance();
+                        if (self.queue.items.len > 0) return self.serve(buf);
+                    },
+                    else => break,
+                }
+            }
+            return Error.Timeout;
+        }
+        return self.serve(buf);
+    }
+
+    fn serve(self: *Harness, buf: []u8) usize {
         const n = @min(buf.len, self.queue.items.len);
         @memcpy(buf[0..n], self.queue.items[0..n]);
         std.mem.copyForwards(u8, self.queue.items[0 .. self.queue.items.len - n], self.queue.items[n..]);

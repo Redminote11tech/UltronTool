@@ -11,6 +11,7 @@ const transport = @import("../../transport/transport.zig");
 const log = @import("../../core/log.zig");
 const xml = @import("xml.zig");
 const rawprogram = @import("rawprogram.zig");
+const fileio = @import("../../core/fileio.zig");
 
 const Io = transport.Io;
 const Error = transport.Error;
@@ -54,6 +55,7 @@ pub const StorageInfo = struct {
     sector_size: u64 = 0,
     num_sectors: u64 = 0,
     page_size: u64 = 0,
+    num_physical: u64 = 0,
     mem_type: [64]u8 = undefined,
     mem_type_len: usize = 0,
     prod_name: [64]u8 = undefined,
@@ -143,12 +145,16 @@ pub const Session = struct {
                     chunk_end = n; // truncated; let the parser report the error
                 }
 
-                var elem = self.parseResponseElement(buf[start..chunk_end]) catch {
+                var elems = std.ArrayList(xml.Element).empty;
+                defer elems.deinit(self.alloc);
+                self.parseResponseElements(buf[start..chunk_end], &elems) catch {
                     self.logger.err("failed to parse firehose response", .{});
                     return Response{ .kind = .io };
                 };
 
-                if (try self.consumeElement(&elem, &resp)) resp.rawmode = true;
+                for (elems.items) |*elem| {
+                    if (try self.consumeElement(elem, &resp)) resp.rawmode = true;
+                }
                 if (resp.kind == .ack or resp.kind == .nak) have_resp = true;
 
                 cursor = start + chunk_end;
@@ -167,25 +173,27 @@ pub const Session = struct {
         return resp;
     }
 
-    /// Parse one response document and copy its first <data> child element
-    /// into self-owned memory (the parse arena dies on return).
-    fn parseResponseElement(self: *Session, bytes: []const u8) !xml.Element {
+    /// Parse one response document and copy ALL <data> child elements into
+    /// self-owned memory (the parse arena dies on return). Devices commonly
+    /// bundle <log> lines and the <response> in a single document.
+    fn parseResponseElements(self: *Session, bytes: []const u8, out: *std.ArrayList(xml.Element)) !void {
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         defer arena.deinit();
-        var doc = try xml.parse(arena.allocator(), bytes);
-        const root = &doc.root;
+        const doc = try xml.parse(arena.allocator(), bytes);
+        const root = doc.root;
         if (!std.mem.eql(u8, root.name, "data")) return error.Malformed;
         if (root.children.len == 0) return error.EmptyResponse;
-        const el = root.children[0];
 
-        var out = xml.Element{ .name = "", .attrs = &.{}, .children = &.{} };
-        out.name = try self.alloc.dupe(u8, el.name);
-        const attrs = try self.alloc.alloc(xml.Attr, el.attrs.len);
-        for (el.attrs, 0..) |a, i| {
-            attrs[i] = .{ .name = try self.alloc.dupe(u8, a.name), .value = try self.alloc.dupe(u8, a.value) };
+        for (root.children) |el| {
+            var copy = xml.Element{ .name = "", .attrs = &.{}, .children = &.{} };
+            copy.name = try self.alloc.dupe(u8, el.name);
+            const attrs = try self.alloc.alloc(xml.Attr, el.attrs.len);
+            for (el.attrs, 0..) |a, k| {
+                attrs[k] = .{ .name = try self.alloc.dupe(u8, a.name), .value = try self.alloc.dupe(u8, a.value) };
+            }
+            copy.attrs = attrs;
+            try out.append(self.alloc, copy);
         }
-        out.attrs = attrs;
-        return out;
     }
 
     /// Port of firehose_generic_parser + attribute collection.
@@ -374,7 +382,7 @@ pub const Session = struct {
     /// Port of firehose_program: send <program>, stream the file in
     /// max_payload_size chunks (zero-padded to sector boundaries), consume
     /// the final ACK.
-    pub fn program(self: *Session, op: *const rawprogram.Program, file: std.fs.File) Error!void {
+    pub fn program(self: *Session, op: *const rawprogram.Program, file: *fileio.File) Error!void {
         const fname = op.filename orelse return;
         var zlp_timeout: u32 = 10000;
         // ZLP has been measured to take up to 15 seconds on SPINOR devices.
@@ -386,7 +394,7 @@ pub const Session = struct {
             return Error.Io;
         }
 
-        const file_size = file.getEndPos() catch return Error.Io;
+        const file_size = file.size() catch return Error.Io;
         var num_sectors: u64 = (file_size + sector_size - 1) / sector_size;
         if (op.num_sectors != 0 and num_sectors > op.num_sectors) {
             self.logger.err("{s} too big for {s}, truncated to {d} bytes", .{ fname, op.label orelse "?", @as(u64, op.num_sectors) * sector_size });
@@ -570,14 +578,12 @@ pub const Session = struct {
     // ------------------------------------------------------------------
 
     /// Port of firehose_getstorageinfo: the storage details arrive as a JSON
-    /// blob inside a <log> line.
+    /// blob inside a <log> line (entity-escaped on the wire).
     pub fn getStorageInfo(self: *Session, lun: u32) Error!StorageInfo {
         var xml_buf: [512]u8 = undefined;
         const req = std.fmt.bufPrint(&xml_buf, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><getstorageinfo physical_partition_number=\"{d}\"/></data>", .{lun}) catch return Error.Io;
         try self.writeRequest(req);
 
-        // Read messages, capturing the log line with the JSON blob; stop at
-        // the <response>.
         var info = StorageInfo{};
         var buf: [read_buf_size]u8 = undefined;
         const deadline = monoNow() + 30 * std.time.us_per_s;
@@ -591,19 +597,34 @@ pub const Session = struct {
                 else => return Error.Io,
             };
             if (n == 0) continue;
-            const text = buf[0..n];
-            if (std.mem.indexOf(u8, text, "\"total_blocks\":")) |_| {
-                self.logger.info("LOG: {s}", .{text});
-                parseStorageJson(text, &info);
-                continue;
-            }
-            if (std.mem.indexOf(u8, text, "value=\"ACK\"") != null) break;
-            if (std.mem.indexOf(u8, text, "value=\"NAK\"") != null) break;
-            if (std.mem.indexOf(u8, text, "<log")) |_| {
-                self.logger.info("LOG: {s}", .{text});
+
+            var elems = std.ArrayList(xml.Element).empty;
+            defer elems.deinit(self.alloc);
+            self.parseResponseElements(buf[0..n], &elems) catch continue;
+
+            for (elems.items) |*elem| {
+                const value = elem.attr("value") orelse {
+                    self.freeElement(elem);
+                    continue;
+                };
+                if (std.mem.eql(u8, elem.name, "log")) {
+                    self.logger.info("LOG: {s}", .{value});
+                    if (std.mem.indexOf(u8, value, "\"total_blocks\":") != null) {
+                        parseStorageJson(value, &info);
+                    }
+                    self.freeElement(elem);
+                    continue;
+                }
+                if (std.mem.eql(u8, elem.name, "response")) {
+                    const is_ack = std.mem.eql(u8, value, "ACK");
+                    self.freeElement(elem);
+                    if (is_ack) return info;
+                    self.logger.err("getstorageinfo failed", .{});
+                    return Error.Io;
+                }
+                self.freeElement(elem);
             }
         }
-        return info;
     }
 };
 
@@ -645,7 +666,7 @@ fn extractJsonNumber(s: []const u8, key: []const u8) ?u64 {
     defer std.heap.page_allocator.free(needle);
     const idx = std.mem.indexOf(u8, s, needle) orelse return null;
     var rest = s[idx + needle.len ..];
-    rest = std.mem.trimLeft(u8, rest, " ");
+    rest = std.mem.trim(u8, rest, " ");
     var end: usize = 0;
     while (end < rest.len and (std.ascii.isDigit(rest[end]) or rest[end] == '-')) end += 1;
     return std.fmt.parseInt(u64, rest[0..end], 10) catch null;
@@ -656,7 +677,7 @@ fn extractJsonString(s: []const u8, key: []const u8) ?[]const u8 {
     defer std.heap.page_allocator.free(needle);
     const idx = std.mem.indexOf(u8, s, needle) orelse return null;
     var rest = s[idx + needle.len ..];
-    rest = std.mem.trimLeft(u8, rest, " ");
+    rest = std.mem.trim(u8, rest, " ");
     if (rest.len < 2 or rest[0] != '"') return null;
     const end = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse return null;
     return rest[1..end];
@@ -667,6 +688,7 @@ fn extractJsonString(s: []const u8, key: []const u8) ?[]const u8 {
 // ----------------------------------------------------------------------
 
 const Harness = @import("../../transport/sim.zig").Harness;
+const SimStep = @import("../../transport/sim.zig").Step;
 
 const TestEnv = struct {
     h: Harness,
@@ -674,7 +696,7 @@ const TestEnv = struct {
     logger: *log.Logger,
     sess: Session,
 
-    fn init(alloc: std.mem.Allocator, steps: []const Harness.Step) !*TestEnv {
+    fn init(alloc: std.mem.Allocator, steps: []const SimStep) !*TestEnv {
         const env = try alloc.create(TestEnv);
         errdefer alloc.destroy(env);
         env.h = try Harness.init(alloc, steps);
@@ -696,7 +718,7 @@ const TestEnv = struct {
 test "configure with payload renegotiation and sector probe" {
     var probe_data: [512]u8 = @splat(0xAB);
 
-    const steps = [_]Harness.Step{
+    const steps = [_]SimStep{
         .{ .expect_write = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><configure MemoryName=\"ufs\" MaxPayloadSizeToTargetInBytes=\"1048576\" Verbose=\"0\" ZlpAwareHost=\"1\" SkipStorageInit=\"0\" /></data>" },
         .{ .respond = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><log value=\"INFO: Calling handler for configure\"/><response value=\"ACK\" MaxPayloadSizeToTargetInBytes=\"1048576\" MaxPayloadSizeToTargetInBytesSupported=\"262144\" Version=\"1\"/></data>" },
         .{ .expect_write = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><configure MemoryName=\"ufs\" MaxPayloadSizeToTargetInBytes=\"262144\" Verbose=\"0\" ZlpAwareHost=\"1\" SkipStorageInit=\"0\" /></data>" },
@@ -710,6 +732,7 @@ test "configure with payload renegotiation and sector probe" {
 
     const env = try TestEnv.init(std.testing.allocator, &steps);
     defer env.deinit(std.testing.allocator);
+    errdefer if (env.h.failure) |f| std.debug.print("SIM MISMATCH: expected vs got: {s}\n", .{f});
 
     try env.sess.configure(.ufs, false);
     try std.testing.expectEqual(@as(usize, 262144), env.sess.max_payload_size);
@@ -718,12 +741,10 @@ test "configure with payload renegotiation and sector probe" {
 
 test "configure retries on timeout until programmer answers" {
     const ack = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><response value=\"ACK\" MaxPayloadSizeToTargetInBytes=\"1048576\"/></data>";
-    const steps = [_]Harness.Step{
+    const steps = [_]SimStep{
         .{ .read_timeout = {} },
         .{ .respond = ack },
-        .{ .expect_write_len = 0 }, // no more expectations; writes are free
     };
-    steps[2] = .{ .respond = "" };
 
     const env = try TestEnv.init(std.testing.allocator, &steps);
     defer env.deinit(std.testing.allocator);
@@ -744,8 +765,17 @@ test "program streams file chunks and consumes final ack" {
     const ack = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><response value=\"ACK\"/></data>";
     const setup = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><log value=\"Startprogramming\"/><response value=\"ACK\" rawmode=\"false\"/></data>";
 
-    const steps = [_]Harness.Step{
-        .{ .expect_write = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><program SECTOR_SIZE_IN_BYTES=\"512\" num_partition_sectors=\"2\" physical_partition_number=\"0\" start_sector=\"8192\" filename=\"boot.img\"/></data>" },
+    var tmp_dir = try fileio.TmpDir.init();
+    defer tmp_dir.cleanup();
+    try tmp_dir.writeFile("boot.img", image);
+    var pbuf: [176]u8 = undefined;
+    const path = try tmp_dir.filePath(&pbuf, "boot.img");
+
+    const expected_setup = try std.fmt.allocPrint(std.testing.allocator, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><program SECTOR_SIZE_IN_BYTES=\"{d}\" num_partition_sectors=\"{d}\" physical_partition_number=\"{d}\" start_sector=\"{s}\" filename=\"{s}\"/></data>", .{ 512, 2, 0, "8192", path });
+    defer std.testing.allocator.free(expected_setup);
+
+    const steps = [_]SimStep{
+        .{ .expect_write = expected_setup },
         .{ .respond = setup },
         .{ .expect_write = padded[0..1024] },
         .{ .respond = ack },
@@ -756,12 +786,7 @@ test "program streams file chunks and consumes final ack" {
     env.sess.max_payload_size = 1024; // chunk = 2 sectors exactly
     env.sess.sector_size = 512;
 
-    const tmp_dir = std.testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
-    try tmp_dir.dir.writeFile(.{ .sub_path = "boot.img", .data = image });
-    const path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, "boot.img");
-    defer std.testing.allocator.free(path);
-    const file = try std.fs.cwd().openFile(path, .{});
+    var file = try fileio.File.open(path);
     defer file.close();
 
     const op = rawprogram.Program{
@@ -772,13 +797,13 @@ test "program streams file chunks and consumes final ack" {
         .filename = path,
         .label = "boot",
     };
-    try env.sess.program(&op, file);
+    try env.sess.program(&op, &file);
     try std.testing.expect(env.h.failure == null);
 }
 
 test "erase full partition and ranged erase" {
     const ack = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><response value=\"ACK\"/></data>";
-    const steps = [_]Harness.Step{
+    const steps = [_]SimStep{
         .{ .expect_write = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><erase SECTOR_SIZE_IN_BYTES=\"4096\" physical_partition_number=\"0\" num_partition_sectors=\"32\" start_sector=\"8128\"/></data>" },
         .{ .respond = ack },
     };
@@ -795,7 +820,7 @@ test "erase full partition and ranged erase" {
 }
 
 test "reset sends power with delay and drains logs" {
-    const steps = [_]Harness.Step{
+    const steps = [_]SimStep{
         .{ .expect_write = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><power value=\"reset\" DelayInSeconds=\"10\"/></data>" },
         .{ .respond = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><log value=\"Requesting reset\"/><response value=\"ACK\"/></data>" },
         .{ .respond = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><log value=\"Powering off in 10s\"/></data>" },
@@ -806,9 +831,9 @@ test "reset sends power with delay and drains logs" {
 }
 
 test "storage info parses json from log line" {
-    const steps = [_]Harness.Step{
+    const steps = [_]SimStep{
         .{ .expect_write = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><getstorageinfo physical_partition_number=\"0\"/></data>" },
-        .{ .respond = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><log value=\"{ \\\"storage_info\\\": { \\\"storage_type\\\": \\\"UFS\\\", \\\"total_blocks\\\": 30777343, \\\"num_physical\\\": 6, \\\"block_size\\\": 4096, \\\"page_size\\\": 4096, \\\"mem_type\\\": \\\"ufs\\\", \\\"prod_name\\\": \\\"THGAF8G9T43BAIR\\\" }, \\\"card_error\\\": false }\"/><response value=\"ACK\"/></data>" },
+        .{ .respond = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><log value=\"{ &quot;storage_info&quot;: { &quot;storage_type&quot;: &quot;UFS&quot;, &quot;total_blocks&quot;: 30777343, &quot;num_physical&quot;: 6, &quot;block_size&quot;: 4096, &quot;page_size&quot;: 4096, &quot;mem_type&quot;: &quot;ufs&quot;, &quot;prod_name&quot;: &quot;THGAF8G9T43BAIR&quot; }, &quot;card_error&quot;: false }\"/><response value=\"ACK\"/></data>" },
     };
     const env = try TestEnv.init(std.testing.allocator, &steps);
     defer env.deinit(std.testing.allocator);

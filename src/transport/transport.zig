@@ -8,6 +8,8 @@ const std = @import("std");
 const log = @import("../core/log.zig");
 
 pub const Error = error{
+    /// Operation aborted by a cancellation request.
+    Cancelled,
     /// Timed out with zero bytes transferred.
     Timeout,
     /// Device detached mid-transfer.

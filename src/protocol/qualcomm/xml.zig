@@ -52,6 +52,7 @@ pub fn parse(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Document {
     const a = arena.allocator();
 
     var p = Parser{ .a = a, .bytes = bytes, .pos = 0 };
+    p.skipMisc(); // leading whitespace, XML declaration, comments
     const root = try p.parseElement();
     // Trailing content after the root element: allow whitespace and comments.
     p.skipMisc();
