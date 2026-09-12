@@ -45,6 +45,9 @@ pub const Transport = struct {
         /// Free the backend object itself (after close); null for backends
         /// that live outside the transport abstraction (e.g. the sim harness).
         destroy: ?*const fn (ptr: *anyopaque) void = null,
+        /// USB-level device reset (re-enumerates; like a replug). Null for
+        /// backends without reset support.
+        reset: ?*const fn (ptr: *anyopaque) void = null,
     };
 
     pub fn read(self: Transport, buf: []u8, timeout_ms: u32) Error!usize {
@@ -66,6 +69,12 @@ pub const Transport = struct {
     /// Free the backend object (call after close); no-op when unsupported.
     pub fn destroy(self: Transport) void {
         if (self.vtable.destroy) |d| d(self.ptr);
+    }
+
+    /// Reset the USB device (re-enumerates, like a replug); no-op when
+    /// unsupported.
+    pub fn reset(self: Transport) void {
+        if (self.vtable.reset) |r| r(self.ptr);
     }
 };
 

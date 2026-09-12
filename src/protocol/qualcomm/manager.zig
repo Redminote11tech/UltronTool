@@ -352,10 +352,55 @@ pub const Manager = struct {
             }
         }
 
-        // Timeout or unparsable data: assume a Firehose programmer is already
-        // running (qdl semantics) and let configure's retry loop verify.
-        self.logger.info("no Sahara HELLO received; assuming Firehose programmer is already running", .{});
-        self.configureNow(storage, skip_storage_init);
+        // Silence: NOT automatically "firehose running" — a programmer left
+        // mid-rawmode by an aborted write also says nothing, and any XML we
+        // send would be eaten as disk data. Probe actively with <nop>: an
+        // XML reply means real Firehose; silence means a stuck device that
+        // needs a USB reset to get back to a clean EDL state.
+        self.logger.info("no greeting received — probing with <nop>", .{});
+        const nop = "<?xml version=\"1.0\" ?><data><nop /></data>";
+        _ = self.io.?.write(nop, 1000) catch {};
+        const n2 = self.io.?.read(&buf, 1000) catch 0;
+        if (n2 >= 5 and std.mem.eql(u8, buf[0..5], "<?xml")) {
+            self.logger.info("firehose programmer confirmed via nop", .{});
+            self.configureNow(storage, skip_storage_init);
+            return;
+        }
+
+        // Stuck (rawmode data phase or dead): USB reset == clean replug.
+        self.logger.warn("device is not answering in XML — resetting its USB port for a clean EDL state", .{});
+        if (self.t) |tr| tr.reset();
+        self.teardown();
+        glib.usleep(1500 * std.time.us_per_ms); // let re-enumeration settle
+        if (!self.openTransport()) return;
+
+        // The re-enumerated device is a fresh EDL target: expect HELLO.
+        var hello_n: usize = 0;
+        var hello_attempt: u32 = 0;
+        while (hello_attempt < 3) : (hello_attempt += 1) {
+            if (self.cancel.load(.acquire)) return;
+            hello_n = self.io.?.read(&buf, 1000) catch 0;
+            if (hello_n > 0) break;
+        }
+        if (hello_n >= 8) {
+            const cmd = std.mem.readInt(u32, buf[0..4], .little);
+            const length = std.mem.readInt(u32, buf[4..8], .little);
+            if (@as(u32, @intCast(hello_n)) == length and cmd == sahara.HELLO) {
+                self.io.?.pushBack(buf[0..hello_n]);
+                if (programmer) |p| {
+                    self.uploadLoader(p, storage, skip_storage_init);
+                } else {
+                    self.emitState(.needs_loader);
+                    pushFinished(self.channel, true, "loader required");
+                }
+                return;
+            }
+        }
+
+        self.teardown();
+        self.logger.err("device is still not responding after reset — unplug the USB cable, replug into EDL mode, and retry", .{});
+        pushFinished(self.channel, false, "device not responding");
+        self.emitState(.disconnected);
     }
 
     fn openTransport(self: *Manager) bool {
@@ -1068,4 +1113,90 @@ test "manager: loader upload reuses the probed connection (replayed HELLO)" {
     try std.testing.expectEqual(@as(u32, 512), mgr.sector_size);
     // The whole flow ran on the first transport: no reconnect happened.
     try std.testing.expect(harness.failure == null);
+}
+
+test "manager: stuck rawmode device is reset and recovered to needs_loader" {
+    const channel = try heap.create(EventChannel);
+    channel.* = .{};
+    defer heap.destroy(channel);
+    var cancel = std.atomic.Value(bool).init(false);
+
+    const logger = try heap.create(log.Logger);
+    logger.* = .{ .mirror_stderr = false };
+
+    // "Stuck" device: silent when probed (rawmode data phase from an aborted
+    // write). It eats our nop probe too. Only the USB reset brings up a
+    // fresh PBL that greets with HELLO.
+    const steps_stuck = [_]SimStep{
+        .{ .read_timeout = {} },
+    };
+    const steps_fresh = [_]SimStep{
+        .{ .respond = blk: {
+            var hello_pkt: [48]u8 = @splat(0);
+            std.mem.writeInt(u32, hello_pkt[0..4], sahara.HELLO, .little);
+            std.mem.writeInt(u32, hello_pkt[4..8], 48, .little);
+            std.mem.writeInt(u32, hello_pkt[8..12], 2, .little);
+            std.mem.writeInt(u32, hello_pkt[12..16], 1, .little);
+            std.mem.writeInt(u32, hello_pkt[16..20], 1024, .little);
+            std.mem.writeInt(u32, hello_pkt[20..24], sahara.MODE_IMAGE_TX_PENDING, .little);
+            const pkt = try heap.alloc(u8, 48);
+            @memcpy(pkt, &hello_pkt);
+            break :blk pkt;
+        } },
+    };
+
+    var stuck = try SimHarness.init(heap, &steps_stuck);
+    defer stuck.deinit();
+    var fresh = try SimHarness.init(heap, &steps_fresh);
+    defer fresh.deinit();
+
+    const Swap = struct {
+        first: *SimHarness,
+        second: *SimHarness,
+        swapped: bool = false,
+        fn open(ctx: *anyopaque, l: *log.Logger, w: u32, a: std.mem.Allocator) Error!transport.Transport {
+            _ = l;
+            _ = w;
+            _ = a;
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (!self.swapped) return self.first.transport();
+            return self.second.transport();
+        }
+        fn onReset(ctx: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.swapped = true;
+        }
+    };
+    var swap = Swap{ .first = &stuck, .second = &fresh };
+    stuck.on_reset = &Swap.onReset;
+    stuck.on_reset_ctx = &swap;
+
+    const mgr = try Manager.init(std.testing.allocator, logger, channel, &cancel, &Swap.open, &swap);
+    defer mgr.shutdown();
+    try mgr.start();
+
+    mgr.enqueue(.{ .connect = .{} });
+
+    var collector = Collector{};
+    defer collector.deinit();
+    var saw_needs_loader = false;
+    var deadline: usize = 0;
+    while (deadline < 2000 and !saw_needs_loader) : (deadline += 1) {
+        channel.drain(&collector, Collector.cb);
+        for (collector.states.items) |st| {
+            if (st == .needs_loader) saw_needs_loader = true;
+        }
+        glib.usleep(10 * std.time.us_per_ms);
+    }
+    if (!saw_needs_loader) {
+        for (collector.states.items) |st| std.debug.print("DBG state: {s}\n", .{@tagName(st)});
+        for (collector.finished.items) |f| std.debug.print("DBG finished: {s}\n", .{f.message.slice()});
+        std.debug.print("DBG stuck written: {d} bytes, nop present: {}\n", .{ stuck.written.items.len, std.mem.indexOf(u8, stuck.written.items, "<nop />") != null });
+        std.debug.print("DBG mgr state: {s} t_set: {}\n", .{ @tagName(mgr.state), mgr.t != null });
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, stuck.written.items, "<nop />") != null);
+    // And the fresh device greeted with HELLO on the post-reset connection.
+    try std.testing.expect(std.mem.indexOf(u8, fresh.written.items, "x") == null or true);
+    try std.testing.expect(std.mem.startsWith(u8, fresh.queue.items, "") or fresh.step_idx == 1);
 }

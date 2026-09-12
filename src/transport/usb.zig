@@ -109,6 +109,12 @@ pub const Usb = struct {
         self.allocator.destroy(self);
     }
 
+    fn resetVt(ptr: *anyopaque) void {
+        const self: *Usb = @ptrCast(@alignCast(ptr));
+        self.logger.info("USB: resetting device (forces a clean EDL re-enumeration)", .{});
+        _ = c.libusb_reset_device(self.handle);
+    }
+
     /// Port of usb_read().
     pub fn read(self: *Usb, buf: []u8, timeout_ms: u32) Error!usize {
         if (buf.len == 0) return 0;

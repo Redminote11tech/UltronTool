@@ -33,6 +33,9 @@ pub const Harness = struct {
     queue: std.ArrayList(u8) = .empty,
     written: std.ArrayList(u8) = .empty,
     failure: ?[]u8 = null, // first mismatch message (owned)
+    /// Optional hook fired on transport reset (tests swap device state here).
+    on_reset_ctx: ?*anyopaque = null,
+    on_reset: ?*const fn (?*anyopaque) void = null,
 
     pub fn init(alloc: std.mem.Allocator, steps: []const Step) !Harness {
         var h = Harness{ .allocator = alloc, .steps = steps };
@@ -50,12 +53,28 @@ pub const Harness = struct {
         return .{ .ptr = self, .vtable = &vtable };
     }
 
+    /// Restart the script from `reset_step` and drop queued bytes (stands in
+    /// for a USB reset / device re-enumeration).
+    pub fn resetScript(self: *Harness) void {
+        self.step_idx = self.reset_step;
+        self.queue.clearRetainingCapacity();
+        self.advance();
+    }
+
     const vtable = Transport.VTable{
         .read = readVt,
         .write = writeVt,
         .close = closeVt,
         .packetSizes = packetSizesVt,
+        .reset = resetVt,
     };
+
+    fn resetVt(ptr: *anyopaque) void {
+        const self: *Harness = @ptrCast(@alignCast(ptr));
+        self.queue.clearRetainingCapacity();
+        if (self.on_reset) |f| f(self.on_reset_ctx);
+    }
+
 
     /// Consume any immediately-reachable respond steps into the read queue.
     fn advance(self: *Harness) void {
