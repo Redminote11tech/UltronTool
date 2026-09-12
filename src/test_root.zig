@@ -13,5 +13,7 @@ test {
     _ = @import("protocol/qualcomm/sahara.zig");
     _ = @import("protocol/qualcomm/firehose.zig");
     _ = @import("protocol/qualcomm/session.zig");
+    _ = @import("protocol/qualcomm/gpt.zig");
+    _ = @import("protocol/qualcomm/manager.zig");
     _ = @import("device/scanner.zig");
 }

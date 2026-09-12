@@ -100,12 +100,45 @@ pub const Finished = struct {
     message: FixedStr(512) = .{},
 };
 
+/// One GPT partition entry as shown in the UI.
+pub const PartitionRow = struct {
+    index: u32 = 0,
+    first_lba: u64 = 0,
+    last_lba: u64 = 0,
+    name: FixedStr(72) = .{},
+
+    pub fn sectors(self: *const PartitionRow) u64 {
+        if (self.last_lba < self.first_lba) return 0;
+        return self.last_lba - self.first_lba + 1;
+    }
+};
+
+pub const max_partition_rows = 128;
+
+pub const PartitionsEvent = struct {
+    lun: u32 = 0,
+    count: u32 = 0,
+    parts: [max_partition_rows]PartitionRow = undefined,
+};
+
+/// Lifecycle of the persistent Firehose session owned by the manager.
+pub const SessionState = enum {
+    /// No transport open (initial state, or after disconnect/reset/error).
+    disconnected,
+    /// Device answered Sahara HELLO: a firehose programmer must be uploaded.
+    needs_loader,
+    /// Firehose programmer is alive and configured: partitions available.
+    firehose_ready,
+};
+
 pub const Event = union(enum) {
     device_added: DeviceInfo,
     device_removed: DeviceKey,
     progress: Progress,
     chip_info: ChipInfoEvent,
     finished: Finished,
+    session_state: SessionState,
+    partitions: PartitionsEvent,
 };
 
 /// Overwriting ring channel. Single producer, single consumer (the UI drains

@@ -83,6 +83,12 @@ pub const File = struct {
         }
         return total;
     }
+
+    /// fwrite the entire buffer; returns bytes written (short on error).
+    pub fn writeAll(self: *File, buf: []const u8) !usize {
+        const n = c.fwrite(buf.ptr, 1, buf.len, self.handle);
+        return n;
+    }
 };
 
 /// Minimal temp-dir helper for tests (mkdtemp-based, files unlinked on cleanup).

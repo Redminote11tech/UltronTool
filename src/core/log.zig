@@ -54,10 +54,10 @@ pub const Logger = struct {
         if (@intFromEnum(level) < @intFromEnum(self.min_level)) return;
 
         var buf: [max_text_len]u8 = undefined;
-        const text = blk: {
-            break :blk std.fmt.bufPrint(&buf, fmt, args) catch {
-                break :blk std.fmt.bufPrint(&buf, "{s}…", .{buf[0 .. buf.len - 3]}) catch buf[0..0];
-            };
+        const text = std.fmt.bufPrint(&buf, fmt, args) catch blk: {
+            // Overflowed: never re-format from the same buffer (aliasing);
+            // write a marker instead.
+            break :blk std.fmt.bufPrint(&buf, "<log message truncated>", .{}) catch buf[0..0];
         };
         self.push(level, text);
     }

@@ -42,6 +42,9 @@ pub const Transport = struct {
         write: *const fn (ptr: *anyopaque, buf: []const u8, timeout_ms: u32) Error!usize,
         close: *const fn (ptr: *anyopaque) void,
         packetSizes: *const fn (ptr: *anyopaque) PacketSizes,
+        /// Free the backend object itself (after close); null for backends
+        /// that live outside the transport abstraction (e.g. the sim harness).
+        destroy: ?*const fn (ptr: *anyopaque) void = null,
     };
 
     pub fn read(self: Transport, buf: []u8, timeout_ms: u32) Error!usize {
@@ -58,6 +61,11 @@ pub const Transport = struct {
 
     pub fn packetSizes(self: Transport) PacketSizes {
         return self.vtable.packetSizes(self.ptr);
+    }
+
+    /// Free the backend object (call after close); no-op when unsupported.
+    pub fn destroy(self: Transport) void {
+        if (self.vtable.destroy) |d| d(self.ptr);
     }
 };
 

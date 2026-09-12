@@ -545,7 +545,55 @@ pub const Session = struct {
 
     /// Port of firehose_issue_read: send <read>, consume the ACK signaling
     /// rawmode, stream the binary data, then consume the final ACK.
+    /// Reads into `out` (must fit num_sectors × sector_size).
     pub fn readSectors(self: *Session, op: *const rawprogram.Program, out: []u8) Error!bool {
+        const rx = try self.issueRead(op);
+        if (!rx) return false;
+
+        const need: u64 = @as(u64, op.num_sectors) * op.sector_size;
+        if (out.len < need) return Error.Io;
+        var got: u64 = 0;
+        while (got < need) {
+            if (self.cancelled()) return Error.Cancelled;
+            const n = try self.io.read(out[@intCast(got)..@intCast(need)], 30000);
+            got += n;
+            if (n == 0) break; // ZLP-delimited end of data
+        }
+        self.progress.report("read", got, need);
+
+        const final = try self.readResponse(10000);
+        return final.isAck();
+    }
+
+    /// Same exchange, streaming into a file — used for partition reads
+    /// (backups), which can be far larger than a buffer we want to hold.
+    /// `chunk` is scratch space of any reasonable size (e.g. 1 MiB).
+    pub fn readSectorsToFile(self: *Session, op: *const rawprogram.Program, file: *fileio.File, chunk: []u8, label: []const u8) Error!bool {
+        const rx = try self.issueRead(op);
+        if (!rx) return false;
+
+        const need: u64 = @as(u64, op.num_sectors) * op.sector_size;
+        var got: u64 = 0;
+        while (got < need) {
+            if (self.cancelled()) return Error.Cancelled;
+            const n = try self.io.read(chunk, 30000);
+            if (n == 0) break; // ZLP-delimited end of data
+            const written = file.writeAll(chunk[0..n]) catch return Error.Io;
+            if (written != n) return Error.Io;
+            got += n;
+            self.progress.report(label, got, need);
+        }
+
+        const final = try self.readResponse(10000);
+        if (final.isAck() and got != need) {
+            self.logger.warn("read of {s} ended early ({d}/{d} bytes)", .{ label, got, need });
+        }
+        return final.isAck();
+    }
+
+    /// Send the <read> request and consume the setup ACK. Returns false when
+    /// the target did not signal rawmode (read refused).
+    fn issueRead(self: *Session, op: *const rawprogram.Program) Error!bool {
         var esc_buf: [128]u8 = undefined;
         var xml_buf: [8192]u8 = undefined;
         const req = std.fmt.bufPrint(&xml_buf, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><read SECTOR_SIZE_IN_BYTES=\"{d}\" num_partition_sectors=\"{d}\" physical_partition_number=\"{d}\" start_sector=\"{s}\"/></data>", .{
@@ -558,19 +606,7 @@ pub const Session = struct {
         try self.writeRequest(req);
         const setup = try self.readResponse(10000);
         if (!setup.isAck() or !setup.rawmode) return false;
-
-        const need: u64 = @as(u64, op.num_sectors) * op.sector_size;
-        if (out.len < need) return Error.Io;
-        var got: u64 = 0;
-        while (got < need) {
-            if (self.cancelled()) return Error.Cancelled;
-            const n = try self.io.read(out[@intCast(got)..@intCast(need)], 30000);
-            got += n;
-            if (n == 0) break; // ZLP-delimited end of data
-        }
-
-        const final = try self.readResponse(10000);
-        return final.isAck();
+        return true;
     }
 
     // ------------------------------------------------------------------

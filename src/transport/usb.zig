@@ -71,6 +71,7 @@ pub const Usb = struct {
     out_chunk_size: usize = default_out_chunk_size,
     logger: *log.Logger,
     interface_number: u8,
+    allocator: std.mem.Allocator,
 
     pub fn transport(self: *Usb) Transport {
         return .{ .ptr = self, .vtable = &vtable };
@@ -101,6 +102,11 @@ pub const Usb = struct {
     fn packetSizesVt(ptr: *anyopaque) PacketSizes {
         const self: *Usb = @ptrCast(@alignCast(ptr));
         return .{ .in_max = self.in_maxpktsize, .out_max = self.out_maxpktsize };
+    }
+
+    fn destroyVt(ptr: *anyopaque) void {
+        const self: *Usb = @ptrCast(@alignCast(ptr));
+        self.allocator.destroy(self);
     }
 
     /// Port of usb_read().
@@ -232,11 +238,12 @@ pub fn open(
     serial: ?[]const u8,
     wait_ms: u32,
     logger: *log.Logger,
+    alloc: std.mem.Allocator,
 ) Error!Usb {
     const glib = @import("glib");
     const deadline = glib.getMonotonicTime() + @as(i64, wait_ms) * std.time.us_per_ms;
     while (true) {
-        if (openOnce(policy, serial, logger)) |usb| return usb else |err| {
+        if (openOnce(policy, serial, logger, alloc)) |usb| return usb else |err| {
             if (err != Error.NoDevice and err != Error.Busy) return err;
             if (glib.getMonotonicTime() >= deadline) return err;
             glib.usleep(250 * std.time.us_per_ms);
@@ -246,7 +253,7 @@ pub fn open(
 
 /// Port of usb_open_once(): one enumeration pass. NoDevice when nothing
 /// matched, Busy when a candidate was visible but unopenable.
-fn openOnce(policy: *const Policy, serial: ?[]const u8, logger: *log.Logger) Error!Usb {
+fn openOnce(policy: *const Policy, serial: ?[]const u8, logger: *log.Logger, alloc: std.mem.Allocator) Error!Usb {
     if (c.libusb_init(null) != 0) return Error.Io;
     errdefer c.libusb_exit(null);
 
@@ -271,7 +278,7 @@ fn openOnce(policy: *const Policy, serial: ?[]const u8, logger: *log.Logger) Err
 
         saw_candidate = true;
 
-        if (tryOpenCandidate(dev, &desc, policy, serial, logger)) |usb| return usb;
+        if (tryOpenCandidate(dev, &desc, policy, serial, logger, alloc)) |usb| return usb;
     }
 
     return if (saw_candidate) Error.Busy else Error.NoDevice;
@@ -285,6 +292,7 @@ fn tryOpenCandidate(
     policy: *const Policy,
     serial: ?[]const u8,
     logger: *log.Logger,
+    alloc: std.mem.Allocator,
 ) ?Usb {
     var handle: ?*c.libusb_device_handle = null;
     if (c.libusb_open(dev, &handle) != 0) {
@@ -330,6 +338,7 @@ fn tryOpenCandidate(
         .out_maxpktsize = pair.out_max,
         .interface_number = pair.interface_number,
         .logger = logger,
+        .allocator = alloc,
     };
     if (usb.out_chunk_size % usb.out_maxpktsize != 0) {
         logger.warn("out-chunk-size must be a multiple of wMaxPacketSize {d}; using {d}", .{ usb.out_maxpktsize, usb.out_maxpktsize });

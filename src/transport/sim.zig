@@ -21,6 +21,9 @@ pub const Step = union(enum) {
     respond: []const u8,
     /// Next host reads time out until a later respond step is reached.
     read_timeout: void,
+    /// A write of any content advances the script (paces respond steps that
+    /// belong to the command issued by that write).
+    any_write: void,
 };
 
 pub const Harness = struct {
@@ -107,6 +110,10 @@ pub const Harness = struct {
 
         if (self.step_idx < self.steps.len) {
             switch (self.steps[self.step_idx]) {
+                .any_write => {
+                    self.step_idx += 1;
+                    self.advance();
+                },
                 .expect_write => |expect| {
                     if (!std.mem.eql(u8, buf, expect)) {
                         self.fail("expected write {s}, got {s}", .{ expect, buf });
