@@ -82,6 +82,9 @@ pub const Progress = struct {
     /// 0..1; a negative value means "indeterminate".
     fraction: f32 = -1.0,
     label: FixedStr(160) = .{},
+    /// Raw progress counters for throughput display.
+    done: u64 = 0,
+    total: u64 = 0,
 };
 
 pub const ChipInfoEvent = struct {

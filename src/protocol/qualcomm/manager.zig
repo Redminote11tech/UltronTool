@@ -572,6 +572,7 @@ pub const Manager = struct {
             });
         } else |_| {}
 
+        self.logger.info("✓ loader uploaded — Firehose ready", .{});
         self.emitState(.firehose_ready);
         pushFinished(self.channel, true, "connected");
         self.listPartitions(0);
@@ -728,7 +729,7 @@ pub const Manager = struct {
             };
             event.count += 1;
         }
-        self.logger.info("LUN {d}: {d} partitions", .{ lun, event.count });
+        self.logger.info("✓ partition table loaded: {d} partitions on LUN {d}", .{ event.count, lun });
         self.channel.push(.{ .partitions = event });
         pushFinished(self.channel, true, "partitions loaded");
     }
@@ -994,6 +995,8 @@ const JobProgress = struct {
         self.channel.push(.{ .progress = .{
             .fraction = frac,
             .label = ev.FixedStr(160).fromSlice(self.prefix[0..self.prefix_len]),
+            .done = done,
+            .total = total,
         } });
     }
 };

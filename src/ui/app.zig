@@ -110,6 +110,7 @@ pub const Ui = struct {
     lun_drop: ?*gtk.DropDown = null,
     refresh_btn: ?*gtk.Button = null,
     parts_list: ?*gtk.ListBox = null,
+    parts_search: ?*gtk.SearchEntry = null,
     parts_empty: ?*gtk.Label = null,
     pending_row: ?*adw.ActionRow = null,
     write_all_btn: ?*gtk.Button = null,
@@ -120,6 +121,9 @@ pub const Ui = struct {
     disconnect_btn: ?*gtk.Button = null,
 
     chooser: ?ChooserKind = null,
+    speed_scratch: [32]u8 = undefined,
+    prog_last_ms: i64 = 0,
+    prog_last_done: u64 = 0,
     /// Set when the window is fully built; event handlers refuse to touch
     /// widgets before that (belt-and-braces against early events).
     ready: bool = false,
@@ -186,6 +190,7 @@ const WorkerCtx = struct {
 const RowCtx = struct {
     ui: *Ui,
     row: ev.PartitionRow,
+    row_widget: ?*gtk.Widget = null,
 };
 
 const ConfirmCtx = struct {
@@ -530,6 +535,12 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     ui.refresh_btn = refresh_btn;
     adw.PreferencesGroup.add(parts_group, lun_row.as(gtk.Widget));
 
+    const search = gtk.SearchEntry.new();
+    gtk.Widget.setVisible(search.as(gtk.Widget), 0); // shown once >15 partitions
+    ui.parts_search = search;
+    _ = gtk.SearchEntry.signals.search_changed.connect(search, *Ui, &onSearchChanged, ui, .{});
+    adw.PreferencesGroup.add(parts_group, search.as(gtk.Widget));
+
     const parts_list = gtk.ListBox.new();
     gtk.ListBox.setSelectionMode(parts_list, .none);
     gtk.Widget.addCssClass(parts_list.as(gtk.Widget), "boxed-list");
@@ -706,7 +717,29 @@ fn rebuildPartitions(ui: *Ui, parts: *const ev.PartitionsEvent) void {
         _ = gtk.Button.signals.clicked.connect(write_btn, *RowCtx, &onWriteClicked, ctx, .{});
         adw.ActionRow.addSuffix(action_row, write_btn.as(gtk.Widget));
 
+        ctx.row_widget = action_row.as(gtk.Widget);
         gtk.ListBox.append(ui.parts_list.?, action_row.as(gtk.Widget));
+    }
+
+    // Filter appears once the list is long enough to matter.
+    gtk.Widget.setVisible(ui.parts_search.?.as(gtk.Widget), @intFromBool(parts.count > 15));
+    gtk.Editable.setText(@ptrCast(ui.parts_search.?), "");
+    applyPartFilter(ui);
+}
+
+fn onSearchChanged(search: *gtk.SearchEntry, ui: *Ui) callconv(.c) void {
+    _ = search;
+    applyPartFilter(ui);
+}
+
+fn applyPartFilter(ui: *Ui) void {
+    const query_raw = if (ui.parts_search) |se| gtk.Editable.getText(@ptrCast(se)) else return;
+    const query = std.mem.span(query_raw);
+    for (ui.row_ctxs.items) |ctx| {
+        if (ctx.row_widget) |w| {
+            const match = query.len == 0 or std.mem.indexOf(u8, ctx.row.name.slice(), query) != null;
+            gtk.Widget.setVisible(w, @intFromBool(match));
+        }
     }
 }
 
@@ -1227,8 +1260,32 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
                     const f = @min(p.fraction, 1.0);
                     gtk.ProgressBar.setFraction(bar, f);
                     const pct: u32 = @intFromFloat(f * 100.0);
-                    var pz: [200]u8 = undefined;
-                    const z = std.fmt.bufPrintZ(&pz, "{s} · {d}%", .{ p.label.slice(), pct }) catch "working…";
+
+                    // Throughput: MiB/s over the last progress event (>=250 ms apart).
+                    var speed: []const u8 = "";
+                    const now = glib.getMonotonicTime();
+                    if (p.total > 0 and ui.prog_last_ms != 0 and now > ui.prog_last_ms) {
+                        const dt_us = now - ui.prog_last_ms;
+                        if (dt_us > 250 * std.time.us_per_ms and p.done >= ui.prog_last_done) {
+                            const bytes: f64 = @floatFromInt(p.done - ui.prog_last_done);
+                            const mibs = bytes / (f64_from_us(dt_us) * 1024.0 * 1024.0);
+                            var sb: [32]u8 = undefined;
+                            speed = std.fmt.bufPrint(&sb, "{d:.1} MiB/s", .{mibs}) catch "";
+                            // keep the string alive by copying into a static scratch
+                            @memcpy(ui.speed_scratch[0..speed.len], speed);
+                            speed = ui.speed_scratch[0..speed.len];
+                        }
+                    }
+                    if (p.done != ui.prog_last_done) {
+                        ui.prog_last_ms = now;
+                        ui.prog_last_done = p.done;
+                    }
+
+                    var pz: [220]u8 = undefined;
+                    const z = if (speed.len > 0)
+                        std.fmt.bufPrintZ(&pz, "{s} · {d}% · {s}", .{ p.label.slice(), pct, speed }) catch "working…"
+                    else
+                        std.fmt.bufPrintZ(&pz, "{s} · {d}%", .{ p.label.slice(), pct }) catch "working…";
                     gtk.ProgressBar.setText(bar, z.ptr);
                 }
             }
@@ -1286,6 +1343,10 @@ fn isNotable(msg: []const u8) bool {
 // ----------------------------------------------------------------------
 // Small helpers
 // ----------------------------------------------------------------------
+
+fn f64_from_us(us: i64) f64 {
+    return @as(f64, @floatFromInt(us)) / 1_000_000.0;
+}
 
 fn appendFmt(buf: []u8, len: *usize, comptime fmt: []const u8, args: anytype) void {
     const out = std.fmt.bufPrint(buf[len.*..], fmt, args) catch return;
