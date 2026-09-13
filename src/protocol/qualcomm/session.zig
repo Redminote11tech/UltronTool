@@ -1,12 +1,8 @@
-//! Flash-session orchestration — port of the qdl op-list design
-//! (linux-msm/qdl src/qdl.c, BSD-3-Clause).
-//!
-//! A session runs on a worker thread: it opens the USB transport, uploads the
-//! firehose programmer over Sahara, configures Firehose, executes the ops
-//! built from the user's rawprogram/patch XML files in the order given,
-//! appends SET_BOOTABLE when an xbl/xbl_a/sbl1 partition was written, and
-//! finishes with a device reset. Progress and the final result are pushed to
-//! the UI event channel; cancellation is checked between transfers.
+//! One-shot Sahara helpers that manage their own transport: the chip-identity
+//! probe and the Memory-Debug RAM dump (both ported from linux-msm/qdl,
+//! BSD-3-Clause). Each opens its own USB device, runs one Sahara exchange and
+//! closes it — they are used pre-connect (probe) and for crash-dump devices.
+//! The persistent Firehose session orchestration lives in manager.zig.
 
 const std = @import("std");
 const transport = @import("../../transport/transport.zig");

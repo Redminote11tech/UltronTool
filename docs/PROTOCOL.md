@@ -155,7 +155,7 @@ against an overall deadline; concatenated XML docs split on `<?xml` / `</data>`;
 2. Prepend CONFIGURE op if any ops need one.
 3. Append SET_BOOTABLE if a boot partition was programmed.
 4. Append RESET unless disabled.
-5. Run: Sahara (programmer upload, device-driven) → Firehose (configure → ops → reset).
+5. Run: Sahara (programmer upload, device-driven) → Firehose (configure → ops). The persistent session stays open for further jobs; the device resets only when the user asks (Reset button) or a job needs recovery.
 
 ## 5. VIP — Vendor Image Programming (digest-table auth)
 
@@ -198,9 +198,9 @@ Generation (GUI → loader stage → "Create VIP digest tables") replays the
 flash plan offline against an auto-ACK loopback device (`digestgen.zig`) while
 hashing every packet — exactly the packets a real run
 sends. The table is therefore bound to the plan: same XML files, same images,
-same order, same storage type, same payload size **with no renegotiation** (set
-`--payload-size` to the programmer's advertised size, e.g. 16384), same
-SkipStorageInit setting. GUI runs pick the folder as "VIP digest tables" on the
+same order, same storage type, same payload size **with no renegotiation** (pick it in the loader
+stage's digest payload dropdown, e.g. 16 KiB, matching what the real run
+negotiates), same SkipStorageInit setting. GUI runs pick the folder as "VIP digest tables" on the
 loader stage; VIP requires the fresh-boot loader-upload flow.
 
 ## 6. Ultron support matrix & roadmap
@@ -237,7 +237,7 @@ loader stage; VIP requires the fresh-boot loader-upload flow.
 ## 8. Huawei UPDATE.APP (firmware container)
 
 Reference: the classic `splitupdate`/`split_updata.pl` community tools and
-`echo-devim/huextract` (see refs/). The file is a flat sequence of chunks;
+the `echo-devim/huextract` layout description. The file is a flat sequence of chunks;
 each starts with the magic bytes `55 AA 5A A5` and a variable-length header
 (little-endian):
 

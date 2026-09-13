@@ -43,18 +43,18 @@ pub const css =
     \\  background: rgba(229, 165, 10, 0.20);
     \\  color: #e5a50a;
     \\}
-    \\\\
-    \\\\.state-chip.dim {
-    \\\\  background: rgba(127, 127, 127, 0.15);
-    \\\\}
-    \\\\
-    \\\\.ultron-progress trough {
-    \\\\  border-radius: 999px;
-    \\\\}
-    \\\\
-    \\\\.ultron-progress progress {
-    \\\\  border-radius: 999px;
-    \\\\  background: linear-gradient(to right, #3584e4, #1c71d8);
-    \\\\  box-shadow: 0 0 8px rgba(53, 132, 228, 0.55);
-    \\\\}
+    \\
+    \\.state-chip.dim {
+    \\  background: rgba(127, 127, 127, 0.15);
+    \\}
+    \\
+    \\.ultron-progress trough {
+    \\  border-radius: 999px;
+    \\}
+    \\
+    \\.ultron-progress progress {
+    \\  border-radius: 999px;
+    \\  background: linear-gradient(to right, #3584e4, #1c71d8);
+    \\  box-shadow: 0 0 8px rgba(53, 132, 228, 0.55);
+    \\}
     ;

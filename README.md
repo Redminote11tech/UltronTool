@@ -18,7 +18,7 @@ GPL-3.0 · Zig 0.16 · GTK4/libadwaita · Linux (Wayland/X11)
 
 ---
 
-> **Status: v0.2.0** — Qualcomm EDL is fully usable. The architecture is
+> **Status: v0.4.0** — Qualcomm EDL is fully usable. The architecture is
 > plugin-based: **MediaTek (BROM/mtkclient-style)** and **Samsung
 > (Odin/Heimdall-style)** protocol modules are planned on top of the same
 > protocol registry.
@@ -123,7 +123,7 @@ makepkg -sri
 
 # or with the standalone script (no pkg/ staging needed):
 ./tools/make-package.sh
-sudo pacman -U ultron-0.2.0-1-x86_64.pkg.tar.zst
+sudo pacman -U ultron-0.4.0-1-x86_64.pkg.tar.zst
 ```
 
 The package installs the binary, desktop entry, AppStream metainfo, icon and

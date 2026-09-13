@@ -30,9 +30,8 @@ pub const Options = struct {
     /// renegotiation — it changes the chunk layout, hence every digest.
     payload_size: usize = firehose.default_max_payload_size,
     storage: firehose.StorageType = .ufs,
-    /// Must match the flashing run's SkipStorageInit setting. The GUI
-    /// connect flow always sends SkipStorageInit="0", so the GUI generation
-    /// flow hard-codes false here; the field stays for tests.
+    /// Must match the flashing run's SkipStorageInit setting — the GUI passes
+    /// the device card's "Skip storage init" switch state to both flows.
     skip_storage_init: bool = false,
 };
 
