@@ -54,6 +54,7 @@ const ChooserKind = union(enum) {
     xml_add: void,
     digest_xml_add: void,
     digest_out_dir: void,
+    ramdump_dir: void,
     read_partition: ev.PartitionRow,
     write_partition: ev.PartitionRow,
 };
@@ -123,6 +124,12 @@ pub const Ui = struct {
     digest_dir_row: ?*adw.ActionRow = null,
     digest_payload_drop: ?*gtk.DropDown = null,
     digest_btn: ?*gtk.Button = null,
+
+    ramdump_section: ?*gtk.Widget = null,
+    ramdump_dir_row: ?*adw.ActionRow = null,
+    ramdump_filter_entry: ?*gtk.Entry = null,
+    ramdump_btn: ?*gtk.Button = null,
+    ramdump_dir: ?[]u8 = null,
 
     conn_section: ?*gtk.Widget = null,
     parts_group: ?*adw.PreferencesGroup = null,
@@ -297,6 +304,7 @@ pub fn mainRun(init: std.process.Init) !void {
     ui.xml_paths.deinit(alloc);
     if (ui.programmer_path) |p| alloc.free(p);
     if (ui.vip_dir) |p| alloc.free(p);
+    if (ui.ramdump_dir) |p| alloc.free(p);
     for (ui.digest_xmls.items) |p| alloc.free(p);
     ui.digest_xmls.deinit(alloc);
     if (ui.digest_dir) |p| alloc.free(p);
@@ -516,6 +524,47 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
 
     gtk.Widget.setVisible(dev_card.as(gtk.Widget), 0);
     gtk.Box.append(page, dev_card.as(gtk.Widget));
+
+    // --- RAM dump section (crash-dump devices only) ----------------------
+    const ramdump_box = gtk.Box.new(.vertical, 12);
+
+    const ramdump_group = adw.PreferencesGroup.new();
+    adw.PreferencesGroup.setTitle(ramdump_group, "RAM dump");
+    adw.PreferencesGroup.setDescription(ramdump_group, "This device is in crash-dump mode: download its memory regions over Sahara Memory Debug");
+
+    const ramdump_dir_row = adw.ActionRow.new();
+    rowTitle(ramdump_dir_row, "Output folder");
+    adw.ActionRow.setSubtitle(ramdump_dir_row, "None selected — one file per memory region");
+    const ramdump_dir_btn = gtk.Button.newWithLabel("Choose…");
+    _ = gtk.Button.signals.clicked.connect(ramdump_dir_btn, *Ui, &onRamdumpPickDir, ui, .{});
+    adw.ActionRow.addSuffix(ramdump_dir_row, ramdump_dir_btn.as(gtk.Widget));
+    adw.PreferencesGroup.add(ramdump_group, ramdump_dir_row.as(gtk.Widget));
+    ui.ramdump_dir_row = ramdump_dir_row;
+
+    const ramdump_filter_row = adw.ActionRow.new();
+    rowTitle(ramdump_filter_row, "Segment filter (optional)");
+    adw.ActionRow.setSubtitle(ramdump_filter_row, "Comma-separated, * and ? wildcards — empty dumps everything");
+    const ramdump_filter_entry = gtk.Entry.new();
+    gtk.Widget.setHexpand(ramdump_filter_entry.as(gtk.Widget), 1);
+    gtk.Widget.setValign(ramdump_filter_entry.as(gtk.Widget), .center);
+    gtk.Entry.setPlaceholderText(ramdump_filter_entry, "OCIMEM,CODERAM");
+    adw.ActionRow.addSuffix(ramdump_filter_row, ramdump_filter_entry.as(gtk.Widget));
+    adw.PreferencesGroup.add(ramdump_group, ramdump_filter_row.as(gtk.Widget));
+    ui.ramdump_filter_entry = ramdump_filter_entry;
+
+    const ramdump_btn = gtk.Button.newWithLabel("Dump RAM…");
+    gtk.Widget.addCssClass(ramdump_btn.as(gtk.Widget), "suggested-action");
+    gtk.Widget.addCssClass(ramdump_btn.as(gtk.Widget), "big-start");
+    gtk.Widget.setHalign(ramdump_btn.as(gtk.Widget), .center);
+    gtk.Widget.setSensitive(ramdump_btn.as(gtk.Widget), 0);
+    _ = gtk.Button.signals.clicked.connect(ramdump_btn, *Ui, &onRamdumpClicked, ui, .{});
+    ui.ramdump_btn = ramdump_btn;
+
+    adw.PreferencesGroup.add(ramdump_group, ramdump_btn.as(gtk.Widget));
+    gtk.Box.append(ramdump_box, ramdump_group.as(gtk.Widget));
+    gtk.Widget.setVisible(ramdump_box.as(gtk.Widget), 0);
+    gtk.Box.append(page, ramdump_box.as(gtk.Widget));
+    ui.ramdump_section = ramdump_box.as(gtk.Widget);
 
     // --- Loader section (needs_loader) ----------------------------------
     const loader_box = gtk.Box.new(.vertical, 12);
@@ -737,6 +786,10 @@ fn refreshMainPage(ui: *Ui) void {
 
     if (ui.loader_section) |w| gtk.Widget.setVisible(w, @intFromBool(has_device and ui.session == .needs_loader));
     if (ui.conn_section) |w| gtk.Widget.setVisible(w, @intFromBool(has_device and ui.session == .firehose_ready));
+    if (ui.ramdump_section) |w| {
+        const is_crash = has_device and ui.device.?.mode == .qualcomm_crash;
+        gtk.Widget.setVisible(w, @intFromBool(is_crash));
+    }
 
     // The chip probe and Connect only make sense before a session exists.
     if (ui.dev_chip_label) |l| gtk.Widget.setVisible(l.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
@@ -968,6 +1021,14 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
             ui.digest_dir = ui.alloc.dupe(u8, path) catch null;
             if (ui.digest_dir) |p| setSubtitleZ(ui.digest_dir_row.?, p);
             refreshDigestRow(ui);
+        },
+        .ramdump_dir => {
+            if (ui.ramdump_dir) |old| ui.alloc.free(old);
+            ui.ramdump_dir = ui.alloc.dupe(u8, path) catch null;
+            if (ui.ramdump_dir) |p| {
+                setSubtitleZ(ui.ramdump_dir_row.?, p);
+                gtk.Widget.setSensitive(ui.ramdump_btn.?.as(gtk.Widget), @intFromBool(!ui.busy()));
+            }
         },
         .xml_add => {
             const dup = ui.alloc.dupe(u8, path) catch return;
@@ -1383,6 +1444,101 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
 }
 
 // ----------------------------------------------------------------------
+// RAM dump (crash-dump devices, Sahara Memory Debug)
+// ----------------------------------------------------------------------
+
+fn onRamdumpPickDir(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    openChooserFull(ui, .ramdump_dir, "Select RAM dump output folder", false, null, true);
+}
+
+const RamdumpCtx = struct {
+    ui: *Ui,
+    dir: []u8,
+    filter: ?[]u8,
+};
+
+fn ramdumpCtxFree(ctx: *RamdumpCtx) void {
+    const alloc = ctx.ui.alloc;
+    alloc.free(ctx.dir);
+    if (ctx.filter) |f| alloc.free(f);
+    alloc.destroy(ctx);
+}
+
+fn ramdumpProgressCb(ctx: ?*anyopaque, name: []const u8, done: u64, total: u64) void {
+    const channel: *EventChannel = @ptrCast(@alignCast(ctx orelse return));
+    const frac: f32 = if (total == 0) -1.0 else @as(f32, @floatFromInt(done)) / @as(f32, @floatFromInt(total));
+    var buf: [160]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "dumping {s}", .{name}) catch name;
+    channel.push(.{ .progress = .{ .fraction = frac, .label = ev.FixedStr(160).fromSlice(text), .done = done, .total = total } });
+}
+
+fn ramdumpRun(ctx: *RamdumpCtx) void {
+    const ui = ctx.ui;
+    defer ramdumpCtxFree(ctx);
+
+    var filter_text: [128]u8 = undefined;
+    var filter: ?[]const u8 = null;
+    if (ui.ramdump_filter_entry) |entry| {
+        const raw = gtk.Editable.getText(@ptrCast(entry));
+        const t = std.mem.trim(u8, std.mem.span(raw), " ");
+        if (t.len > 0) {
+            const n = @min(t.len, filter_text.len);
+            @memcpy(filter_text[0..n], t[0..n]);
+            filter = filter_text[0..n];
+        }
+    }
+
+    const count = session_mod.ramDump(
+        ui.alloc,
+        ui.logger,
+        &ui.cancel,
+        .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &ramdumpProgressCb },
+        null,
+        8000,
+        ctx.dir,
+        filter,
+    ) catch |e| {
+        var mbuf: [256]u8 = undefined;
+        var m = ev.FixedStr(512){};
+        m.set(std.fmt.bufPrint(&mbuf, "RAM dump failed: {s}", .{@errorName(e)}) catch "RAM dump failed");
+        ui.channel.push(.{ .finished = .{ .success = false, .message = m } });
+        return;
+    };
+
+    var mbuf: [128]u8 = undefined;
+    var m = ev.FixedStr(512){};
+    m.set(std.fmt.bufPrint(&mbuf, "ramdump finished ({d} region(s))", .{count}) catch "ramdump finished");
+    ui.channel.push(.{ .finished = .{ .success = true, .message = m } });
+}
+
+fn onRamdumpClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (ui.busy()) {
+        ui.toast("Another operation is running — wait for it to finish");
+        return;
+    }
+    const dir = ui.ramdump_dir orelse {
+        ui.toast("Choose an output folder for the dump first");
+        return;
+    };
+
+    const ctx = ui.alloc.create(RamdumpCtx) catch return;
+    ctx.* = .{ .ui = ui, .dir = undefined, .filter = null };
+    ctx.dir = ui.alloc.dupe(u8, dir) catch {
+        ui.alloc.destroy(ctx);
+        return;
+    };
+
+    ui.startJob();
+    const thread = std.Thread.spawn(.{}, ramdumpRun, .{ctx}) catch {
+        ui.jobDone();
+        ramdumpCtxFree(ctx);
+        ui.toast("Failed to start worker thread");
+        return;
+    };
+    thread.detach();
+}
+
+// ----------------------------------------------------------------------
 // Chip identity probe (one-shot worker, pre-connect only)
 // ----------------------------------------------------------------------
 
@@ -1630,7 +1786,7 @@ fn isNotable(msg: []const u8) bool {
     for (suffixes) |sfx| {
         if (std.mem.endsWith(u8, msg, sfx)) return true;
     }
-    const names = [_][]const u8{ "device reset", "loader required", "disconnected", "connected", "digest tables created" };
+    const names = [_][]const u8{ "device reset", "loader required", "disconnected", "connected", "digest tables created", "ramdump finished" };
     for (names) |n| {
         if (std.mem.eql(u8, msg, n)) return true;
     }

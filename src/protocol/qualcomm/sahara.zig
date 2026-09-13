@@ -9,6 +9,7 @@
 const std = @import("std");
 const transport = @import("../../transport/transport.zig");
 const log = @import("../../core/log.zig");
+const fileio = @import("../../core/fileio.zig");
 
 const Io = transport.Io;
 const Error = transport.Error;
@@ -52,6 +53,12 @@ const DONE_RESP_LENGTH: u32 = 0x0c;
 const RESET_LENGTH: u32 = 0x08;
 const EXECUTE_LENGTH: u32 = 0x0c;
 const SWITCH_MODE_LENGTH: u32 = 0x0c;
+const MEM_DEBUG64_LENGTH: u32 = 0x18;
+const MEM_READ64_LENGTH: u32 = 0x18;
+/// Maximum region-table fetch (qdl's DEBUG64 table length cap).
+const DEBUG_TABLE_MAX: u64 = 64 * 1024;
+/// Per-request data chunk (qdl's DEBUG_BLOCK_SIZE).
+const DEBUG_BLOCK_SIZE: u64 = 512 * 1024;
 
 // Command-mode client commands, carried by EXECUTE
 pub const EXEC_CMD_SERIAL_NUM_READ: u32 = 0x01;
@@ -444,7 +451,244 @@ pub const Session = struct {
 
         return info;
     }
+
+    // ------------------------------------------------------------------
+    // RAM dump — Sahara Memory Debug mode (port of sahara_debug64)
+    // ------------------------------------------------------------------
+
+    /// One entry of the device's crash-dump region table (64 bytes on the
+    /// wire: three u64 fields then two NUL-padded 20-byte names).
+    pub const DebugRegion64 = struct {
+        type: u64,
+        addr: u64,
+        length: u64,
+        region: [20]u8,
+        filename: [20]u8,
+
+        pub fn filenameSlice(self: *const DebugRegion64) []const u8 {
+            const len = std.mem.indexOfScalar(u8, &self.filename, 0) orelse self.filename.len;
+            return self.filename[0..len];
+        }
+    };
+
+    pub const RamDumpOpts = struct {
+        /// Directory receiving one file per dumped region.
+        dir: []const u8,
+        /// Optional comma-separated glob filter ('*' / '?'), matched against
+        /// region filenames and their stems (qdl's segment filter).
+        filter: ?[]const u8 = null,
+    };
+
+    /// Full crash-dump flow: expect the Sahara HELLO of a memory-debug PBL,
+    /// answer it, receive the region table via MEM_DEBUG64/MEM_READ64,
+    /// stream every (filtered) region to files, then reset the device.
+    /// Returns the number of regions dumped.
+    pub fn ramDump(self: *Session, alloc: std.mem.Allocator, opts: RamDumpOpts) Error!u32 {
+        // 1. HELLO handshake. Crash-dump PBLs announce mode = memory debug.
+        var buf: [0x30]u8 = undefined;
+        var hello: ?u32 = null;
+        var attempt: u32 = 0;
+        while (attempt < 3) : (attempt += 1) {
+            if (self.cancelled()) return Error.Cancelled;
+            const n = self.io.read(&buf, cmd_timeout_ms) catch 0;
+            if (n >= 8) {
+                const cmd = std.mem.readInt(u32, buf[0..4], .little);
+                const length = std.mem.readInt(u32, buf[4..8], .little);
+                if (cmd == HELLO and @as(u32, @intCast(n)) == length) {
+                    hello = std.mem.readInt(u32, buf[20..24], .little);
+                    self.protocol_version = std.mem.readInt(u32, buf[8..12], .little);
+                    break;
+                }
+            }
+        }
+        const mode = hello orelse {
+            self.logger.err("RAM dump: device did not greet with Sahara HELLO — replug into crash-dump mode", .{});
+            return Error.Timeout;
+        };
+        self.logger.info("RAM dump: HELLO mode {d} (memory debug = 2)", .{mode});
+        self.sendHelloResp(self.protocol_version, mode);
+
+        // 2. The device announces where its region table lives.
+        while (true) {
+            if (self.cancelled()) return Error.Cancelled;
+            const n = try self.io.read(&buf, cmd_timeout_ms);
+            if (n < 8) continue;
+            const cmd = std.mem.readInt(u32, buf[0..4], .little);
+            const length = std.mem.readInt(u32, buf[4..8], .little);
+            if (cmd == MEM_DEBUG64 and length == MEM_DEBUG64_LENGTH and n >= 0x18) {
+                const table_addr = std.mem.readInt(u64, buf[8..16], .little);
+                const table_len = std.mem.readInt(u64, buf[16..24], .little);
+                const regions = try self.fetchRegionTable(alloc, table_addr, table_len);
+                defer alloc.free(regions);
+                return self.dumpRegions(alloc, regions, opts);
+            }
+            if (cmd == READ_DATA or cmd == READ_DATA64) {
+                self.logger.err("RAM dump: device requested an image — it is in loader mode, not crash-dump mode", .{});
+                return Error.Io;
+            }
+            self.logger.warn("RAM dump: ignoring unexpected packet cmd {x}", .{cmd});
+        }
+    }
+
+    fn memRead64Req(self: *Session, addr: u64, length: u64) Error!void {
+        var req: [MEM_READ64_LENGTH]u8 = @splat(0);
+        putHeader(&req, MEM_READ64, MEM_READ64_LENGTH);
+        std.mem.writeInt(u64, req[8..16], addr, .little);
+        std.mem.writeInt(u64, req[16..24], length, .little);
+        _ = self.io.write(&req, cmd_timeout_ms) catch |e| {
+            self.logger.err("RAM dump: failed to send the read request", .{});
+            return e;
+        };
+    }
+
+    fn fetchRegionTable(self: *Session, alloc: std.mem.Allocator, addr: u64, length: u64) Error![]DebugRegion64 {
+        if (length == 0 or length > DEBUG_TABLE_MAX) {
+            self.logger.err("RAM dump: region table length {d} exceeds the {d}-byte limit", .{ length, DEBUG_TABLE_MAX });
+            return Error.Io;
+        }
+        try self.memRead64Req(addr, length);
+
+        const bytes = alloc.alloc(u8, @intCast(length)) catch return Error.OutOfMemory;
+        defer alloc.free(bytes);
+        var got: usize = 0;
+        while (got < bytes.len) {
+            if (self.cancelled()) return Error.Cancelled;
+            const n = try self.io.read(bytes[got..], cmd_timeout_ms);
+            got += n;
+            if (n == 0) {
+                self.logger.err("RAM dump: region table truncated ({d}/{d} bytes)", .{ got, bytes.len });
+                return Error.Timeout;
+            }
+        }
+
+        const count: usize = bytes.len / 64;
+        const regions = alloc.alloc(DebugRegion64, count) catch return Error.OutOfMemory;
+        for (0..count) |i| {
+            const e = bytes[i * 64 ..][0..64];
+            regions[i] = .{
+                .type = std.mem.readInt(u64, e[0..8], .little),
+                .addr = std.mem.readInt(u64, e[8..16], .little),
+                .length = std.mem.readInt(u64, e[16..24], .little),
+                .region = e[24..44].*,
+                .filename = e[44..64].*,
+            };
+            // Device-provided names may not be NUL-terminated (qdl does the same).
+            regions[i].region[19] = 0;
+            regions[i].filename[19] = 0;
+        }
+        self.logger.info("RAM dump: {d} region(s) in the table", .{count});
+        return regions;
+    }
+
+    fn dumpRegions(self: *Session, alloc: std.mem.Allocator, regions: []DebugRegion64, opts: RamDumpOpts) Error!u32 {
+        var dumped: u32 = 0;
+        for (regions) |region| {
+            if (self.debugRegionFiltered(region.filenameSlice(), opts.filter)) {
+                self.logger.info("RAM dump: {s} skipped per filter", .{region.filenameSlice()});
+                continue;
+            }
+            self.logger.debug("RAM dump: type 0x{x} address 0x{x} length 0x{x} region {s} file {s}", .{ region.type, region.addr, region.length, &region.region, region.filenameSlice() });
+            try self.dumpRegion(alloc, region, opts.dir);
+            dumped += 1;
+            self.logger.info("RAM dump: {s} dumped successfully", .{region.filenameSlice()});
+        }
+        self.logger.info("RAM dump: {d} region(s) dumped — resetting device", .{dumped});
+        self.sendReset();
+        return dumped;
+    }
+
+    fn dumpRegion(self: *Session, alloc: std.mem.Allocator, region: DebugRegion64, dir: []const u8) Error!void {
+        const name = region.filenameSlice();
+        // Reject empty names and any path separator: the filename comes from
+        // the device and must not escape the dump directory (qdl does this).
+        if (name.len == 0 or std.mem.indexOfAny(u8, name, "/\\") != null) {
+            self.logger.err("RAM dump: device provided unsafe region filename", .{});
+            return Error.Io;
+        }
+
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, name }) catch return Error.Io;
+        var file = fileio.File.create(path) catch {
+            self.logger.err("RAM dump: failed to create {s}", .{name});
+            return Error.Io;
+        };
+        defer file.close();
+
+        const chunk_buf = alloc.alloc(u8, @intCast(DEBUG_BLOCK_SIZE)) catch return Error.OutOfMemory;
+        defer alloc.free(chunk_buf);
+
+        var chunk: u64 = 0;
+        while (chunk < region.length) {
+            if (self.cancelled()) return Error.Cancelled;
+            const remain = @min(region.length - chunk, DEBUG_BLOCK_SIZE);
+            try self.memRead64Req(region.addr + chunk, remain);
+
+            var offset: usize = 0;
+            while (offset < remain) {
+                if (self.cancelled()) return Error.Cancelled;
+                const want: usize = @intCast(@min(remain - offset, DEBUG_BLOCK_SIZE));
+                const n = try self.io.read(chunk_buf[0..want], 30_000);
+                if (n == 0) {
+                    self.logger.err("RAM dump: data for {s} ended early ({d}/{d} bytes)", .{ name, chunk + offset, region.length });
+                    return Error.Timeout;
+                }
+                const written = file.writeAll(chunk_buf[0..n]) catch |e| {
+                    self.logger.err("RAM dump: failed writing to {s}", .{name});
+                    return e;
+                };
+                if (written != n) {
+                    self.logger.err("RAM dump: write to {s} truncated", .{name});
+                    return Error.Io;
+                }
+                offset += n;
+            }
+            // Drain a possible trailing zero-length packet (qdl reads 10 ms).
+            _ = self.io.read(chunk_buf[0..64], 10) catch {};
+
+            chunk += DEBUG_BLOCK_SIZE;
+            self.progress.report(name, @min(chunk, region.length), region.length);
+        }
+    }
+
+    /// Simple glob supporting '*' and '?' (port of qdl pattern_match).
+    fn patternMatch(pattern: []const u8, string: []const u8) bool {
+        if (pattern.len == 0 and string.len == 0) return true;
+        if (pattern.len > 0 and pattern[0] == '*') {
+            return patternMatch(pattern[1..], string) or
+                (string.len > 0 and patternMatch(pattern, string[1..]));
+        }
+        if (pattern.len > 0 and pattern[0] == '?') {
+            return string.len > 0 and patternMatch(pattern[1..], string[1..]);
+        }
+        if (pattern.len > 0 and string.len > 0 and pattern[0] == string[0]) {
+            return patternMatch(pattern[1..], string[1..]);
+        }
+        return false;
+    }
+
+    /// True when the region should be SKIPPED (port of sahara_debug64_filter:
+    /// comma-separated tokens, matched against the full filename or its stem).
+    fn debugRegionFiltered(self: *Session, filename: []const u8, filter: ?[]const u8) bool {
+        const f = filter orelse return false;
+        if (f.len == 0) return false;
+
+        const stem = if (std.mem.lastIndexOfScalar(u8, filename, '.')) |dot|
+            (if (dot == 0) filename[0..0] else filename[0..dot])
+        else
+            filename[0..0];
+
+        var it = std.mem.splitScalar(u8, f, ',');
+        while (it.next()) |token| {
+            const t = std.mem.trim(u8, token, " ");
+            if (t.len == 0) continue;
+            if (patternMatch(t, filename)) return false;
+            if (stem.len > 0 and patternMatch(t, stem)) return false;
+        }
+        self.logger.debug("RAM dump: filter did not match {s}", .{filename});
+        return true;
+    }
 };
+
 
 /// Port of qdl's sahara_pkhash_trim: collapse repeated prefix, strip trailing
 /// zero bytes, then snap to a known digest size (32/48/64).
@@ -567,4 +811,91 @@ test "pkhashTrim snaps to digest sizes" {
     var zbuf: [80]u8 = @splat(0);
     for (0..32) |i| zbuf[i] = @truncate(0xA0 + i);
     try std.testing.expectEqual(@as(usize, 32), pkhashTrim(zbuf[0..40]).len);
+}
+
+test "ramDump fetches the region table, streams regions and resets" {
+    const Harness = @import("../../transport/sim.zig").Harness;
+    const SimStep = @import("../../transport/sim.zig").Step;
+
+    var hello: [0x30]u8 = @splat(0);
+    std.mem.writeInt(u32, hello[0..4], HELLO, .little);
+    std.mem.writeInt(u32, hello[4..8], 0x30, .little);
+    std.mem.writeInt(u32, hello[8..12], 2, .little);
+    std.mem.writeInt(u32, hello[12..16], 1, .little);
+    std.mem.writeInt(u32, hello[16..20], 4096, .little);
+    std.mem.writeInt(u32, hello[20..24], MODE_MEMORY_DEBUG, .little);
+
+    var hello_resp: [0x30]u8 = @splat(0);
+    std.mem.writeInt(u32, hello_resp[0..4], HELLO_RESP, .little);
+    std.mem.writeInt(u32, hello_resp[4..8], 0x30, .little);
+    std.mem.writeInt(u32, hello_resp[8..12], 2, .little);
+    std.mem.writeInt(u32, hello_resp[12..16], 1, .little);
+    std.mem.writeInt(u32, hello_resp[16..20], SUCCESS, .little);
+    std.mem.writeInt(u32, hello_resp[20..24], MODE_MEMORY_DEBUG, .little);
+
+    var debug64_pkt: [0x18]u8 = @splat(0);
+    std.mem.writeInt(u32, debug64_pkt[0..4], MEM_DEBUG64, .little);
+    std.mem.writeInt(u32, debug64_pkt[4..8], 0x18, .little);
+    std.mem.writeInt(u64, debug64_pkt[8..16], 0x5000, .little); // table address
+    std.mem.writeInt(u64, debug64_pkt[16..24], 64, .little); // one 64-byte entry
+
+    var table_req: [0x18]u8 = @splat(0);
+    std.mem.writeInt(u32, table_req[0..4], MEM_READ64, .little);
+    std.mem.writeInt(u32, table_req[4..8], 0x18, .little);
+    std.mem.writeInt(u64, table_req[8..16], 0x5000, .little);
+    std.mem.writeInt(u64, table_req[16..24], 64, .little);
+
+    var table: [64]u8 = @splat(0);
+    std.mem.writeInt(u64, table[0..8], 0, .little); // type
+    std.mem.writeInt(u64, table[8..16], 0x1000, .little); // addr
+    std.mem.writeInt(u64, table[16..24], 512, .little); // length
+    @memcpy(table[24..30], "OCIMEM");
+    @memcpy(table[44..54], "OCIMEM.bin");
+
+    var data_req: [0x18]u8 = @splat(0);
+    std.mem.writeInt(u32, data_req[0..4], MEM_READ64, .little);
+    std.mem.writeInt(u32, data_req[4..8], 0x18, .little);
+    std.mem.writeInt(u64, data_req[8..16], 0x1000, .little);
+    std.mem.writeInt(u64, data_req[16..24], 512, .little);
+
+    var data: [512]u8 = undefined;
+    for (&data, 0..) |*b, i| b.* = @truncate(i * 3 + 7);
+
+    var reset: [8]u8 = @splat(0);
+    std.mem.writeInt(u32, reset[0..4], RESET, .little);
+    std.mem.writeInt(u32, reset[4..8], 8, .little);
+
+    const steps = [_]SimStep{
+        .{ .respond = &hello },
+        .{ .expect_write = &hello_resp },
+        .{ .respond = &debug64_pkt },
+        .{ .expect_write = &table_req },
+        .{ .respond = &table },
+        .{ .expect_write = &data_req },
+        .{ .respond = &data },
+        .{ .expect_write = &reset },
+    };
+
+    const logger = try std.testing.allocator.create(log.Logger);
+    defer std.testing.allocator.destroy(logger);
+    logger.* = .{ .mirror_stderr = false };
+
+    var tmp = try fileio.TmpDir.init();
+    defer tmp.cleanup();
+
+    var h = try Harness.init(std.testing.allocator, &steps);
+    defer h.deinit();
+    var io = transport.Io.init(std.testing.allocator, h.transport());
+    defer io.deinit();
+
+    var sa = Session{ .io = &io, .logger = logger, .images = &[_]Image{} };
+    const count = try sa.ramDump(std.testing.allocator, .{ .dir = tmp.path() });
+    try std.testing.expectEqual(@as(u32, 1), count);
+    try std.testing.expect(h.failure == null);
+
+    var pbuf: [176]u8 = undefined;
+    const dump_path = try tmp.filePath(&pbuf, "OCIMEM.bin");
+    const dumped = try fileio.readFileAlloc(std.testing.allocator, dump_path, 1 << 20);
+    defer std.testing.allocator.free(dumped);
+    try std.testing.expectEqualSlices(u8, &data, dumped);
 }
