@@ -541,6 +541,9 @@ pub const Session = struct {
                     drain_deadline = monoNow() + 120 * std.time.us_per_s;
                     self.logger.err("device NAK'd the write mid-stream — draining the data phase so the session survives", .{});
                 }
+                // Indeterminate progress with an explicit label: the bar must
+                // NOT pretend the write is progressing.
+                self.progress.report("write failed — draining", 0, 0);
             }
             if (mid.kind == .io) {
                 self.logger.err("unparseable response mid-stream — aborting", .{});

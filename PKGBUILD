@@ -7,7 +7,7 @@
 
 pkgname=ultron
 pkgver=0.2.0
-pkgrel=16
+pkgrel=17
 pkgdesc='Qualcomm EDL (9008) flashing tool — graphical successor to qdl'
 arch=(x86_64)
 url='https://github.com/redminote11tech/UltronTool'

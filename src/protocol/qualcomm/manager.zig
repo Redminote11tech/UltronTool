@@ -1016,12 +1016,13 @@ const JobProgress = struct {
         self.prefix_len = text.len;
     }
 
-    fn cb(ctx: ?*anyopaque, _: []const u8, done: u64, total: u64) void {
+    fn cb(ctx: ?*anyopaque, name: []const u8, done: u64, total: u64) void {
         const self: *JobProgress = @ptrCast(@alignCast(ctx orelse return));
         const frac: f32 = if (total == 0) -1.0 else @as(f32, @floatFromInt(done)) / @as(f32, @floatFromInt(total));
+        const label = if (name.len > 0) name else self.prefix[0..self.prefix_len];
         self.channel.push(.{ .progress = .{
             .fraction = frac,
-            .label = ev.FixedStr(160).fromSlice(self.prefix[0..self.prefix_len]),
+            .label = ev.FixedStr(160).fromSlice(label),
             .done = done,
             .total = total,
         } });
