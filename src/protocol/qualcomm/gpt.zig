@@ -32,6 +32,8 @@ pub const Header = struct {
     entry_lba: u64 = 0,
     num_entries: u32 = 0,
     entry_size: u32 = 0,
+    /// CRC32 over the partition entry array (UEFI PartitionEntryArrayCRC32).
+    entries_crc: u32 = 0,
 
     /// Sectors that must be read starting at `entry_lba` to cover the table.
     pub fn entrySectors(self: *const Header, sector_size: u32) u64 {
@@ -66,6 +68,7 @@ pub fn parseHeader(bytes: []const u8, sector_size: u32) Error!Header {
         .entry_lba = std.mem.readInt(u64, hdr[72..80], .little),
         .num_entries = std.mem.readInt(u32, hdr[80..84], .little),
         .entry_size = std.mem.readInt(u32, hdr[84..88], .little),
+        .entries_crc = std.mem.readInt(u32, hdr[88..92], .little),
     };
 }
 
@@ -92,8 +95,13 @@ pub fn parseEntries(alloc: std.mem.Allocator, bytes: []const u8, header: Header,
     if (header.entry_size < 128) return error.Truncated;
     if (bytes.len < entry_bytes) return error.Truncated;
 
-    // The entry-array CRC lives in the header (offset 88) and was verified
-    // against the raw array bytes by the reader before handing them here.
+    // UEFI PartitionEntryArrayCRC32 covers exactly num_entries × entry_size
+    // bytes; the read is usually padded to whole sectors, so hash only the
+    // meaningful range. Rejecting a stale/corrupt array here protects the
+    // flashing decisions made from these offsets.
+    if (std.hash.Crc32.hash(bytes[0..@intCast(entry_bytes)]) != header.entries_crc) {
+        return error.BadCrc;
+    }
 
     const backing = alloc.alloc(Partition, header.num_entries) catch return error.OutOfMemory;
 
@@ -241,6 +249,17 @@ test "header rejects non-GPT and corrupted crc" {
     // Corrupted CRC.
     buf[512 + 20] ^= 0xFF;
     try std.testing.expectError(error.BadCrc, parseHeader(buf[0..used], 512));
+}
+
+test "entries reject a corrupted entry array" {
+    var buf: [4096]u8 = undefined;
+    const used = sampleGpt(512, &buf);
+    const hdr = try parseHeader(buf[0..used], 512);
+
+    // Flip a byte inside the entry array: header CRC still matches, the
+    // array CRC must not.
+    buf[2 * 512 + 40] ^= 0xFF;
+    try std.testing.expectError(error.BadCrc, parseEntries(std.testing.allocator, buf[2 * 512 ..], hdr, 512));
 }
 
 test "utf16 names decode and truncate safely" {
