@@ -152,6 +152,10 @@ pub const HuaweiAppEvent = struct {
 
     entries: [max_entries]EntryInfo = undefined,
     count: u32 = 0,
+    /// Parse-run generation: the UI bumps the counter whenever a new file is
+    /// picked and drops events carrying an older value, so a slow parse of a
+    /// previously chosen file can never pair stale entries with the new path.
+    gen: u32 = 0,
 };
 
 pub const Event = union(enum) {

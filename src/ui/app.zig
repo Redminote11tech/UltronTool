@@ -171,6 +171,9 @@ pub const Ui = struct {
     huawei_btn: ?*gtk.Button = null,
     huawei_path: ?[]u8 = null,
     huawei_entries: ?ev.HuaweiAppEvent = null,
+    /// Bumped whenever a new UPDATE.APP is picked; parse results carry the
+    /// generation they belong to and stale ones are dropped on arrival.
+    huawei_gen: u32 = 0,
     huawei_pending_mappings: ?std.ArrayList(manager_mod.HuaweiMapping) = null,
     reset_btn: ?*gtk.Button = null,
     disconnect_btn: ?*gtk.Button = null,
@@ -1182,7 +1185,8 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
                 ui.huawei_entries = null;
                 // Parse on a worker: the magic scan reads the whole file.
                 const ctx = ui.alloc.create(HuaweiParseCtx) catch return;
-                ctx.* = .{ .ui = ui, .path = undefined };
+                ctx.* = .{ .ui = ui, .path = undefined, .gen = ui.huawei_gen + 1 };
+                ui.huawei_gen += 1;
                 ctx.path = ui.alloc.dupe(u8, p) catch {
                     ui.alloc.destroy(ctx);
                     return;
@@ -1903,6 +1907,7 @@ fn onUfsProvisionClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
 const HuaweiParseCtx = struct {
     ui: *Ui,
     path: []u8,
+    gen: u32,
 };
 
 fn huaweiParseRun(ctx: *HuaweiParseCtx) void {
@@ -1929,7 +1934,7 @@ fn huaweiParseRun(ctx: *HuaweiParseCtx) void {
     };
     defer index.deinit(ui.alloc);
 
-    var event = ev.HuaweiAppEvent{};
+    var event = ev.HuaweiAppEvent{ .gen = ctx.gen };
     for (index.entries.items) |*e| {
         if (event.count >= ev.HuaweiAppEvent.max_entries) break;
         event.entries[event.count] = .{
@@ -2341,6 +2346,9 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
             refreshHuaweiRow(ui);
         },
         .huawei_app => |ent| {
+            // A parse started before the current file was picked: its result
+            // must not be paired with the new path.
+            if (ent.gen != ui.huawei_gen) return;
             ui.huawei_entries = ent;
             refreshHuaweiRow(ui);
         },
