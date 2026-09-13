@@ -62,27 +62,25 @@ a small, dependency-free Zig library you can audit in an afternoon.
 
 Some programmers refuse every packet unless it matches the next SHA-256 digest
 in a vendor-signed table ("VIP is enabled, receiving the signed table" in their
-startup logs). Ultron ports upstream qdl's VIP support end to end:
+startup logs). Ultron ports upstream qdl's VIP support end to end — fully from
+the GUI, no command line needed:
 
-```sh
-# 1. Replay your flash plan offline and hash every Firehose packet:
-ultron --create-digests ./vip --payload-size 16384 rawprogram0.xml patch0.xml
+1. In the loader stage, under **Create VIP digest tables**, add your
+   `rawprogram*.xml` / `patch*.xml` files, choose an output folder and the
+   payload size, then **Generate digest tables…**. This replays the flash
+   plan offline (no device interaction) and hashes every Firehose packet.
+2. Have `DigestsToSign.bin` signed by your vendor / signing infrastructure,
+   then save the signed image as `DigestsToSign.bin.mbn` in the same folder.
+3. Still in the loader stage, choose that folder as **VIP digest tables**,
+   pick the programmer, and upload as usual — Ultron streams the signed
+   table and the chained tables at the right frame boundaries.
 
-# 2. Have DigestsToSign.bin signed by your vendor / signing infrastructure,
-#    then save the signed image as DigestsToSign.bin.mbn in the same folder.
-
-# 3. In the GUI's loader stage, choose ./vip as "VIP digest tables", pick the
-#    programmer, and upload as usual — Ultron streams the signed table and
-#    the chained tables at the right frame boundaries.
-```
-
-`--payload-size` must match the size the real programmer ACKs without
-renegotiating (its `MaxPayloadSizeToTargetInBytes`, e.g. 16384) — the digest
-table is bound to the exact packet sequence. While VIP is active the partition
-browser is disabled (reads are not in the table); flash via rawprogram XML.
-The table stays valid only for that exact plan: same XML files, images,
-storage type and SkipStorageInit setting. Run `ultron --create-digests` with
-no arguments for the full option list.
+The payload size (default 16 KiB) must match the size the real programmer
+ACKs without renegotiating (its `MaxPayloadSizeToTargetInBytes`) — the digest
+table is bound to the exact packet sequence. While VIP is active the
+partition browser is disabled (reads are not in the table); flash via
+rawprogram XML. The table stays valid only for that exact plan: same XML
+files, images, storage type and SkipStorageInit setting.
 
 ## Requirements
 

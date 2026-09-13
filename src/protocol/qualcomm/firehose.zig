@@ -97,7 +97,7 @@ pub const Session = struct {
     /// Active VIP digest-table transfer (set by the manager when the user
     /// chose a VIP tables folder). Null = VIP disabled.
     vip: ?*vip.Transfer = null,
-    /// Offline digest generator (--create-digests dry runs). Null = hashing off.
+    /// Offline digest generator (GUI digest-table generation). Null = hashing off.
     digest_gen: ?*vip.Generator = null,
     /// The programmer's logs announced VIP (it expects a signed digest table).
     programmer_requires_vip: bool = false,

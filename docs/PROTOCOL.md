@@ -186,7 +186,7 @@ digest in a vendor-signed table that the host streams over the wire. Ported from
   dropped with a warning; if the programmer announces VIP with no tables,
   configure fails with a clear message.
 
-### 5.2 Table files (`vip.zig` Generator; `ultron --create-digests`)
+### 5.2 Table files (`vip.zig` Generator; GUI "Create VIP digest tables")
 
 | File | Content |
 |---|---|
@@ -195,8 +195,9 @@ digest in a vendor-signed table that the host streams over the wire. Ported from
 | `ChainedTableOfDigests<N>.bin` | next 255 digests each; non-final ones end with the next file's SHA-256, the final one ends with a single `0x00` byte (a bare 512 B multiple would be an ambiguous packet) |
 | `DigestsToSign.bin.mbn` | the vendor-signed image of `DigestsToSign.bin` (external signing step) |
 
-Generation replays the flash plan offline against an auto-ACK loopback device
-(`digestgen.zig`) while hashing every packet — exactly the packets a real run
+Generation (GUI → loader stage → "Create VIP digest tables") replays the
+flash plan offline against an auto-ACK loopback device (`digestgen.zig`) while
+hashing every packet — exactly the packets a real run
 sends. The table is therefore bound to the plan: same XML files, same images,
 same order, same storage type, same payload size **with no renegotiation** (set
 `--payload-size` to the programmer's advertised size, e.g. 16384), same
@@ -218,7 +219,7 @@ loader stage; VIP requires the fresh-boot loader-upload flow.
 | Multi-image Sahara archives (zip / id:file) | ⏳ planned | qdl decode_programmer |
 | RAM dump / Memory Debug (900E crash dumps) | ⏳ planned | MEM_DEBUG64 region table + dumps |
 | UFS provisioning (<ufs> XML) | ⏳ planned | destructive; bConfigDescrLock gates |
-| VIP (Vendor Image Programming) | ✅ | full qdl vip.c port: digest generation (`--create-digests`), table streaming, single-configure rule; the vendor signing step stays external; untested against VIP hardware so far |
+| VIP (Vendor Image Programming) | ✅ | full qdl vip.c port: GUI digest generation, table streaming, single-configure rule; the vendor signing step stays external; untested against VIP hardware so far |
 | Streaming (nandprg/enandprg), Diag | ❌ n/a | NAND-target legacy paths |
 
 ## 7. Detection table (Ultron device scanner)

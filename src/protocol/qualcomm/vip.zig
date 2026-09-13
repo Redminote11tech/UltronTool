@@ -8,8 +8,9 @@
 //! startup log line (see `programmer_marker`).
 //!
 //! Workflow (mirrors qdl):
-//!   1. `ultron --create-digests DIR …` replays the flash plan offline and
-//!      hashes every packet into `DIGEST_TABLE.bin`, then splits it into
+//!   1. The GUI's "Create VIP digest tables" flow replays the flash plan
+//!      offline (digestgen.zig) and hashes every packet into
+//!      `DIGEST_TABLE.bin`, then splits it into
 //!      `DigestsToSign.bin` (first 53 digests + chain hash) and
 //!      `ChainedTableOfDigests<N>.bin` (255 digests each, chain-hashed
 //!      backwards, final one 0-terminated).

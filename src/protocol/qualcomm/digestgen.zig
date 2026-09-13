@@ -1,4 +1,6 @@
-//! Offline VIP digest-table generation — the `ultron --create-digests` mode.
+//! Offline VIP digest-table generation — the GUI's "Create VIP digest
+//! tables" flow (loader stage). No device is touched: everything runs
+//! against a loopback device.
 //!
 //! Replays a rawprogram flash plan against a loopback "always ACK" device
 //! while hashing every Firehose packet (XML command documents and data
@@ -28,7 +30,9 @@ pub const Options = struct {
     /// renegotiation — it changes the chunk layout, hence every digest.
     payload_size: usize = firehose.default_max_payload_size,
     storage: firehose.StorageType = .ufs,
-    /// Must match the flashing run's SkipStorageInit setting.
+    /// Must match the flashing run's SkipStorageInit setting. The GUI
+    /// connect flow always sends SkipStorageInit="0", so the GUI generation
+    /// flow hard-codes false here; the field stays for tests.
     skip_storage_init: bool = false,
 };
 

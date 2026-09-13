@@ -30,6 +30,7 @@ const scanner_mod = @import("../device/scanner.zig");
 const manager_mod = @import("../protocol/qualcomm/manager.zig");
 const session_mod = @import("../protocol/qualcomm/session.zig");
 const firehose = @import("../protocol/qualcomm/firehose.zig");
+const digestgen = @import("../protocol/qualcomm/digestgen.zig");
 const usb_ids = @import("../protocol/qualcomm/usb_ids.zig");
 const style = @import("style.zig");
 
@@ -51,8 +52,18 @@ const ChooserKind = union(enum) {
     loader: void,
     vip_tables: void,
     xml_add: void,
+    digest_xml_add: void,
+    digest_out_dir: void,
     read_partition: ev.PartitionRow,
     write_partition: ev.PartitionRow,
+};
+
+/// Payload-size choices for VIP digest generation. 16 KiB is the default
+/// because programmers commonly NAK-renegotiate the 1 MiB protocol default —
+/// and under VIP the size must be accepted without renegotiation.
+const digest_payload_values = [_]usize{ 16384, 65536, 262144, 1048576 };
+const digest_payload_names: [digest_payload_values.len + 1]?[*:0]const u8 = .{
+    "16384 (16 KiB)", "65536 (64 KiB)", "262144 (256 KiB)", "1048576 (1 MiB)", null,
 };
 
 const PendingWrite = struct {
@@ -77,6 +88,8 @@ pub const Ui = struct {
 
     programmer_path: ?[]u8 = null, // loader chosen in needs_loader state
     vip_dir: ?[]u8 = null, // optional folder with signed VIP digest tables
+    digest_xmls: std.ArrayList([]u8) = .empty, // flash-plan XMLs for digest generation
+    digest_dir: ?[]u8 = null, // digest-table output folder
     pending_writes: std.ArrayList(PendingWrite) = .empty,
     xml_paths: std.ArrayList([]u8) = .empty,
     storage: firehose.StorageType = .ufs,
@@ -106,6 +119,10 @@ pub const Ui = struct {
     loader_row: ?*adw.ActionRow = null,
     vip_row: ?*adw.ActionRow = null,
     upload_btn: ?*gtk.Button = null,
+    digest_row: ?*adw.ActionRow = null,
+    digest_dir_row: ?*adw.ActionRow = null,
+    digest_payload_drop: ?*gtk.DropDown = null,
+    digest_btn: ?*gtk.Button = null,
 
     conn_section: ?*gtk.Widget = null,
     parts_group: ?*adw.PreferencesGroup = null,
@@ -124,6 +141,9 @@ pub const Ui = struct {
     disconnect_btn: ?*gtk.Button = null,
 
     chooser: ?ChooserKind = null,
+    /// Offline VIP digest generation runs on its own detached thread; kept
+    /// so shutdown can wait for it before freeing UI state.
+    digest_thread: ?std.Thread = null,
     speed_scratch: [32]u8 = undefined,
     prog_last_ms: i64 = 0,
     prog_last_done: u64 = 0,
@@ -138,7 +158,7 @@ pub const Ui = struct {
 
     fn setBusy(self: *Ui, busy_now: bool) void {
         const enable: c_int = @intFromBool(!busy_now);
-        inline for (.{ self.connect_btn, self.probe_btn, self.upload_btn, self.write_all_btn, self.flash_xml_btn, self.reset_btn, self.disconnect_btn, self.refresh_btn }) |maybe_btn| {
+        inline for (.{ self.connect_btn, self.probe_btn, self.upload_btn, self.write_all_btn, self.flash_xml_btn, self.reset_btn, self.disconnect_btn, self.refresh_btn, self.digest_btn }) |maybe_btn| {
             if (maybe_btn) |b| gtk.Widget.setSensitive(b.as(gtk.Widget), enable);
         }
         if (self.cancel_button) |b| {
@@ -264,6 +284,7 @@ pub fn mainRun(init: std.process.Init) !void {
 
     // Shutdown: stop the manager and scanner, free UI state.
     ui.cancel.store(true, .release);
+    if (ui.digest_thread) |t| t.join(); // offline digest replay tail
     if (ui.manager) |m| m.shutdown();
     if (ui.scanner) |sc| sc.deinit();
     clearPendingWrites(ui);
@@ -272,6 +293,9 @@ pub fn mainRun(init: std.process.Init) !void {
     ui.xml_paths.deinit(alloc);
     if (ui.programmer_path) |p| alloc.free(p);
     if (ui.vip_dir) |p| alloc.free(p);
+    for (ui.digest_xmls.items) |p| alloc.free(p);
+    ui.digest_xmls.deinit(alloc);
+    if (ui.digest_dir) |p| alloc.free(p);
     for (ui.row_ctxs.items) |ctx| alloc.destroy(ctx);
     ui.row_ctxs.deinit(alloc);
     alloc.destroy(ui);
@@ -515,6 +539,52 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     adw.ActionRow.addSuffix(vip_row, vip_btn.as(gtk.Widget));
     adw.PreferencesGroup.add(loader_group, vip_row.as(gtk.Widget));
     ui.vip_row = vip_row;
+
+    // Offline VIP digest-table generation: replays a rawprogram flash plan
+    // against a loopback device — no device interaction at all. The output
+    // DigestsToSign.bin goes to the vendor for signing.
+    const digest_group = adw.PreferencesGroup.new();
+    adw.PreferencesGroup.setTitle(digest_group, "Create VIP digest tables");
+    adw.PreferencesGroup.setDescription(digest_group, "For VIP-locked programmers: hashes a flash plan offline into signed-ready digest tables");
+
+    const digest_row = adw.ActionRow.new();
+    rowTitle(digest_row, "Flash plan XML");
+    adw.ActionRow.setSubtitle(digest_row, "None selected");
+    const digest_add_btn = gtk.Button.newWithLabel("Add…");
+    _ = gtk.Button.signals.clicked.connect(digest_add_btn, *Ui, &onDigestAddXml, ui, .{});
+    adw.ActionRow.addSuffix(digest_row, digest_add_btn.as(gtk.Widget));
+    const digest_clear_btn = gtk.Button.newWithLabel("Clear");
+    _ = gtk.Button.signals.clicked.connect(digest_clear_btn, *Ui, &onDigestClearXml, ui, .{});
+    adw.ActionRow.addSuffix(digest_row, digest_clear_btn.as(gtk.Widget));
+    adw.PreferencesGroup.add(digest_group, digest_row.as(gtk.Widget));
+    ui.digest_row = digest_row;
+
+    const digest_dir_row = adw.ActionRow.new();
+    rowTitle(digest_dir_row, "Output folder");
+    adw.ActionRow.setSubtitle(digest_dir_row, "Receives DigestsToSign.bin + chained tables");
+    const digest_dir_btn = gtk.Button.newWithLabel("Choose…");
+    _ = gtk.Button.signals.clicked.connect(digest_dir_btn, *Ui, &onDigestPickDir, ui, .{});
+    adw.ActionRow.addSuffix(digest_dir_row, digest_dir_btn.as(gtk.Widget));
+    adw.PreferencesGroup.add(digest_group, digest_dir_row.as(gtk.Widget));
+    ui.digest_dir_row = digest_dir_row;
+
+    const digest_payload_row = adw.ActionRow.new();
+    rowTitle(digest_payload_row, "Payload size");
+    adw.ActionRow.setSubtitle(digest_payload_row, "Must match the size the real programmer accepts without renegotiating");
+    const digest_drop = gtk.DropDown.newFromStrings(@ptrCast(&digest_payload_names));
+    adw.ActionRow.addSuffix(digest_payload_row, digest_drop.as(gtk.Widget));
+    adw.PreferencesGroup.add(digest_group, digest_payload_row.as(gtk.Widget));
+    ui.digest_payload_drop = digest_drop;
+
+    const digest_btn = gtk.Button.newWithLabel("Generate digest tables…");
+    gtk.Widget.addCssClass(digest_btn.as(gtk.Widget), "suggested-action");
+    gtk.Widget.setHalign(digest_btn.as(gtk.Widget), .start);
+    gtk.Widget.setSensitive(digest_btn.as(gtk.Widget), 0);
+    _ = gtk.Button.signals.clicked.connect(digest_btn, *Ui, &onDigestGenerate, ui, .{});
+    ui.digest_btn = digest_btn;
+    adw.PreferencesGroup.add(digest_group, digest_btn.as(gtk.Widget));
+
+    gtk.Box.append(loader_box, digest_group.as(gtk.Widget));
 
     const upload_btn = gtk.Button.newWithLabel("Upload loader");
     gtk.Widget.addCssClass(upload_btn.as(gtk.Widget), "suggested-action");
@@ -876,6 +946,20 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
                 ui.logger.info("VIP digest tables folder selected: {s}", .{p});
             }
         },
+        .digest_xml_add => {
+            const dup = ui.alloc.dupe(u8, path) catch return;
+            ui.digest_xmls.append(ui.alloc, dup) catch {
+                ui.alloc.free(dup);
+                return;
+            };
+            refreshDigestRow(ui);
+        },
+        .digest_out_dir => {
+            if (ui.digest_dir) |old| ui.alloc.free(old);
+            ui.digest_dir = ui.alloc.dupe(u8, path) catch null;
+            if (ui.digest_dir) |p| setSubtitleZ(ui.digest_dir_row.?, p);
+            refreshDigestRow(ui);
+        },
         .xml_add => {
             const dup = ui.alloc.dupe(u8, path) catch return;
             ui.xml_paths.append(ui.alloc, dup) catch {
@@ -950,6 +1034,129 @@ fn onPickLoader(_: *gtk.Button, ui: *Ui) callconv(.c) void {
 
 fn onPickVip(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     openChooserFull(ui, .vip_tables, "Select VIP digest tables folder", false, null, true);
+}
+
+fn onDigestAddXml(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    openChooser(ui, .digest_xml_add, "Select rawprogram / patch XML", false, null);
+}
+
+fn onDigestClearXml(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    for (ui.digest_xmls.items) |p| ui.alloc.free(p);
+    ui.digest_xmls.clearRetainingCapacity();
+    refreshDigestRow(ui);
+}
+
+fn onDigestPickDir(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    openChooserFull(ui, .digest_out_dir, "Select output folder for digest tables", false, null, true);
+}
+
+fn refreshDigestRow(ui: *Ui) void {
+    const row = ui.digest_row orelse return;
+    if (ui.digest_xmls.items.len == 0) {
+        adw.ActionRow.setSubtitle(row, "None selected");
+    } else {
+        var buf: [96]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "{d} file(s) selected", .{ui.digest_xmls.items.len}) catch "Selected";
+        setSubtitleZ(row, s);
+    }
+    if (ui.digest_btn) |b| {
+        gtk.Widget.setSensitive(b.as(gtk.Widget), @intFromBool(!ui.busy() and ui.digest_xmls.items.len > 0 and ui.digest_dir != null));
+    }
+}
+
+/// Heap context for the offline digest-generation thread (self-freed).
+const DigestGenCtx = struct {
+    ui: *Ui,
+    dir: []u8,
+    xmls: [][]u8,
+    payload_size: usize,
+    storage: firehose.StorageType,
+};
+
+fn digestCtxFree(ctx: *DigestGenCtx) void {
+    const alloc = ctx.ui.alloc;
+    alloc.free(ctx.dir);
+    for (ctx.xmls) |x| alloc.free(x);
+    alloc.free(ctx.xmls);
+    alloc.destroy(ctx);
+}
+
+fn digestGenRun(ctx: *DigestGenCtx) void {
+    const ui = ctx.ui;
+    defer digestCtxFree(ctx);
+    digestgen.run(ui.alloc, ui.logger, .{
+        .dir = ctx.dir,
+        .xml_files = ctx.xmls,
+        .payload_size = ctx.payload_size,
+        .storage = ctx.storage,
+        // The GUI connect flow always runs with SkipStorageInit=false, so
+        // the replay must use the same value for byte-identical packets.
+        .skip_storage_init = false,
+    }) catch |e| {
+        var mbuf: [256]u8 = undefined;
+        var m = ev.FixedStr(512){};
+        m.set(std.fmt.bufPrint(&mbuf, "digest generation failed: {s}", .{@errorName(e)}) catch "digest generation failed");
+        ui.channel.push(.{ .finished = .{ .success = false, .message = m } });
+        return;
+    };
+    var m = ev.FixedStr(512){};
+    m.set("digest tables created");
+    ui.channel.push(.{ .finished = .{ .success = true, .message = m } });
+}
+
+fn onDigestGenerate(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (ui.busy()) {
+        ui.toast("Another operation is running — wait for it to finish");
+        return;
+    }
+    if (ui.digest_xmls.items.len == 0) {
+        ui.toast("Add the rawprogram / patch XML files first");
+        return;
+    }
+    const dir = ui.digest_dir orelse {
+        ui.toast("Choose an output folder first");
+        return;
+    };
+    readStorageSelection(ui); // storage type comes from the device card dropdown
+
+    var payload: usize = digest_payload_values[0];
+    if (ui.digest_payload_drop) |d| {
+        payload = digest_payload_values[@min(gtk.DropDown.getSelected(d), digest_payload_values.len - 1)];
+    }
+
+    const ctx = ui.alloc.create(DigestGenCtx) catch return;
+    ctx.* = .{ .ui = ui, .dir = undefined, .xmls = undefined, .payload_size = payload, .storage = ui.storage };
+    ctx.dir = ui.alloc.dupe(u8, dir) catch {
+        ui.alloc.destroy(ctx);
+        return;
+    };
+    ctx.xmls = ui.alloc.alloc([]u8, ui.digest_xmls.items.len) catch {
+        ui.alloc.free(ctx.dir);
+        ui.alloc.destroy(ctx);
+        return;
+    };
+    var dup_ok = true;
+    for (ui.digest_xmls.items, 0..) |p, i| {
+        ctx.xmls[i] = ui.alloc.dupe(u8, p) catch {
+            dup_ok = false;
+            break;
+        };
+    }
+    if (!dup_ok) {
+        digestCtxFree(ctx);
+        return;
+    }
+
+    ui.startJob();
+    const thread = std.Thread.spawn(.{}, digestGenRun, .{ctx}) catch {
+        ui.jobDone();
+        digestCtxFree(ctx);
+        ui.toast("Failed to start worker thread");
+        return;
+    };
+    thread.detach();
+    if (ui.digest_thread) |old| old.join(); // previous run's tail (frees only)
+    ui.digest_thread = thread;
 }
 
 fn onUploadLoaderClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
@@ -1391,7 +1598,7 @@ fn isNotable(msg: []const u8) bool {
     for (suffixes) |sfx| {
         if (std.mem.endsWith(u8, msg, sfx)) return true;
     }
-    const names = [_][]const u8{ "device reset", "loader required", "disconnected", "connected" };
+    const names = [_][]const u8{ "device reset", "loader required", "disconnected", "connected", "digest tables created" };
     for (names) |n| {
         if (std.mem.eql(u8, msg, n)) return true;
     }
