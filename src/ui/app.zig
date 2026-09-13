@@ -1766,18 +1766,6 @@ fn ramdumpRun(ctx: *RamdumpCtx) void {
     const ui = ctx.ui;
     defer ramdumpCtxFree(ctx);
 
-    var filter_text: [128]u8 = undefined;
-    var filter: ?[]const u8 = null;
-    if (ui.ramdump_filter_entry) |entry| {
-        const raw = gtk.Editable.getText(@ptrCast(entry));
-        const t = std.mem.trim(u8, std.mem.span(raw), " ");
-        if (t.len > 0) {
-            const n = @min(t.len, filter_text.len);
-            @memcpy(filter_text[0..n], t[0..n]);
-            filter = filter_text[0..n];
-        }
-    }
-
     const count = session_mod.ramDump(
         ui.alloc,
         ui.logger,
@@ -1786,7 +1774,7 @@ fn ramdumpRun(ctx: *RamdumpCtx) void {
         ctx.target,
         8000,
         ctx.dir,
-        filter,
+        ctx.filter,
     ) catch |e| {
         var mbuf: [256]u8 = undefined;
         var m = ev.FixedStr(512){};
@@ -1817,6 +1805,13 @@ fn onRamdumpClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
         ui.alloc.destroy(ctx);
         return;
     };
+    // Snapshot the filter text on the main thread — GTK widgets must not be
+    // touched from the worker.
+    if (ui.ramdump_filter_entry) |entry| {
+        const raw = gtk.Editable.getText(@ptrCast(entry));
+        const t = std.mem.trim(u8, std.mem.span(raw), " ");
+        if (t.len > 0) ctx.filter = ui.alloc.dupe(u8, t) catch null;
+    }
     if (activeTarget(ui)) |t| {
         var copy = t;
         if (t.serial) |s| {
