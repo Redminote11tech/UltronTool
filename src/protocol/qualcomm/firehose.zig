@@ -40,6 +40,9 @@ pub const Response = struct {
     pub const Kind = enum { ack, nak, timeout, io };
     kind: Kind = .timeout,
     rawmode: bool = false,
+    /// A <log> line announced a write failure (UFS error) — the device may
+    /// keep consuming the data phase while refusing every write.
+    error_seen: bool = false,
     /// Payload size reported by the target (either attribute).
     max_payload_size: ?u64 = null,
     /// 64-char hex digest, when the responses contained one (getsha256digest).
@@ -250,6 +253,14 @@ pub const Session = struct {
             if (value) |v| {
                 self.logger.info("LOG: {s}", .{v});
                 self.scanDigest(v, resp);
+                // Programmers report storage refusals via log lines BEFORE
+                // (or instead of) the final NAK — treat them as a mid-stream
+                // failure signal.
+                if (std.mem.indexOf(u8, v, "Write Failed") != null or
+                    std.mem.indexOf(u8, v, "UFS Error") != null)
+                {
+                    resp.error_seen = true;
+                }
             }
             return false; // keep waiting for the response
         }
@@ -535,11 +546,11 @@ pub const Session = struct {
                 else => Response{ .kind = .timeout },
             };
             if (mid.isAck()) ack_seen = true;
-            if (mid.kind == .nak) {
+            if (mid.error_seen or mid.kind == .nak) {
                 if (!drain_mode) {
                     drain_mode = true;
                     drain_deadline = monoNow() + 120 * std.time.us_per_s;
-                    self.logger.err("device NAK'd the write mid-stream — draining the data phase so the session survives", .{});
+                    self.logger.err("device reported a write failure — draining the data phase so the session survives", .{});
                 }
                 // Indeterminate progress with an explicit label: the bar must
                 // NOT pretend the write is progressing.
