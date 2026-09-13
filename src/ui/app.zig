@@ -170,9 +170,14 @@ pub const Ui = struct {
     disconnect_btn: ?*gtk.Button = null,
 
     chooser: ?ChooserKind = null,
-    /// Offline VIP digest generation runs on its own detached thread; kept
-    /// so shutdown can wait for it before freeing UI state.
+    /// One-shot worker threads (digest generation, UPDATE.APP parse, RAM
+    /// dump, chip probe). Handles are kept so shutdown can wait for them
+    /// before freeing the Ui/channel/logger they touch; each kind is
+    /// spawn-gated by busy(), so at most one of each is ever live.
     digest_thread: ?std.Thread = null,
+    huawei_thread: ?std.Thread = null,
+    ramdump_thread: ?std.Thread = null,
+    probe_thread: ?std.Thread = null,
     speed_scratch: [32]u8 = undefined,
     prog_last_ms: i64 = 0,
     prog_last_done: u64 = 0,
@@ -326,9 +331,13 @@ pub fn mainRun(init: std.process.Init) !void {
     _ = gio.Application.signals.activate.connect(app, *Ui, &onActivate, ui, .{});
     const status = gio.Application.run(app.as(gio.Application), 0, null);
 
-    // Shutdown: stop the manager and scanner, free UI state.
+    // Shutdown: stop the workers, then free UI state only once they are
+    // truly gone — they touch ui.alloc, the logger, the channel and cancel.
     ui.cancel.store(true, .release);
-    if (ui.digest_thread) |t| t.join(); // offline digest replay tail
+    if (ui.digest_thread) |t| t.join();
+    if (ui.huawei_thread) |t| t.join();
+    if (ui.ramdump_thread) |t| t.join();
+    if (ui.probe_thread) |t| t.join();
     if (ui.manager) |m| m.shutdown();
     if (ui.scanner) |sc| sc.deinit();
     clearPendingWrites(ui);
@@ -1156,6 +1165,10 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
             }
         },
         .huawei_app_file => {
+            if (ui.busy()) {
+                ui.toast("Another operation is running — wait for it to finish");
+                return;
+            }
             if (ui.huawei_path) |old| ui.alloc.free(old);
             ui.huawei_path = ui.alloc.dupe(u8, path) catch null;
             if (ui.huawei_path) |p| {
@@ -1176,7 +1189,10 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
                     ui.toast("Failed to start worker thread");
                     return;
                 };
-                thread.detach();
+                // busy() gated the spawn, so any stored handle is a finished
+                // previous run — joining it is instant.
+                if (ui.huawei_thread) |old| old.join();
+                ui.huawei_thread = thread;
             }
         },
         .ramdump_dir => {
@@ -1829,7 +1845,8 @@ fn onRamdumpClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
         ui.toast("Failed to start worker thread");
         return;
     };
-    thread.detach();
+    if (ui.ramdump_thread) |old| old.join();
+    ui.ramdump_thread = thread;
 }
 
 // ----------------------------------------------------------------------
@@ -2071,7 +2088,8 @@ fn spawnChipProbe(ui: *Ui) !void {
         ctx.target = copy;
     }
     const thread = try std.Thread.spawn(.{}, chipProbeRun, .{ctx});
-    thread.detach();
+    if (ui.probe_thread) |old| old.join();
+    ui.probe_thread = thread;
 }
 
 fn chipProbeRun(ctx: *WorkerCtx) void {
