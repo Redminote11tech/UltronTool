@@ -33,6 +33,16 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.3.0" date="2026-09-13">
+      <description>
+        <p>Verification and recovery release: per-partition Erase, automatic
+        write verification (device SHA-256 vs local image), a RAM dump page
+        for crash-dump (900e) devices, storage-type fallback plus a
+        Skip-storage-init switch, multi-device targeting by bus/device or
+        serial, VIP digest-table support, and qdl's two-pass UFS
+        provisioning with an explicit OTP-lock gate.</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-09-12">
       <description>
         <p>Unified single-page workflow: connect, upload the firehose loader
