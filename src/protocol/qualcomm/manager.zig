@@ -1018,9 +1018,22 @@ pub const Manager = struct {
         };
 
         self.logger.info("erasing {s} ({d} sectors from LBA {d}, LUN {d})", .{ label, num_sectors, first_lba, lun });
-        fh.erase(&op) catch |e| {
-            self.sessionError(e);
-            return;
+        fh.erase(&op) catch |e| switch (e) {
+            Error.EraseFailed => {
+                // Device-side refusal: the session is healthy. Typical
+                // causes are a previous erase still executing or a
+                // protected partition.
+                self.logger.err("erase of {s} was refused by the device — session recovered, no reset needed", .{label});
+                var msg_buf: [256]u8 = undefined;
+                var msg = ev.FixedStr(512){};
+                msg.set(std.fmt.bufPrint(&msg_buf, "{s}: erase refused by device", .{label}) catch "erase refused by device");
+                self.channel.push(.{ .finished = .{ .success = false, .message = msg } });
+                return;
+            },
+            else => {
+                self.sessionError(e);
+                return;
+            },
         };
         var msg = ev.FixedStr(512){};
         var msg_buf: [256]u8 = undefined;
@@ -1205,9 +1218,15 @@ pub const Manager = struct {
                     },
                     .erase => |*e| {
                         self.logger.info("erasing partition {s} ({d} sectors)", .{ e.start_sector, e.num_sectors });
-                        fh.erase(e) catch |e2| {
-                            self.sessionError(e2);
-                            return;
+                        fh.erase(e) catch |e2| switch (e2) {
+                            Error.EraseFailed => {
+                                pushFinished(self.channel, false, "erase refused by device — batch stopped");
+                                return;
+                            },
+                            else => {
+                                self.sessionError(e2);
+                                return;
+                            },
                         };
                     },
                     .patch => |*pt| {

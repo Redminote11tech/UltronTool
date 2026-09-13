@@ -23,6 +23,9 @@ pub const Error = error{
     /// The operation failed on the device side but the session survived
     /// (data phase was completed cleanly and commands parse again).
     WriteFailed,
+    /// The device refused an erase command (protected region, or a previous
+    /// erase is still executing). The session survives.
+    EraseFailed,
     /// The programmer demands VIP digest tables but none were provided.
     VipRequired,
     OutOfMemory,

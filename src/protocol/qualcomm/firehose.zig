@@ -804,10 +804,15 @@ pub const Session = struct {
         const resp = try self.readResponse(30000);
         if (resp.isAck()) {
             self.logger.info("successfully erased {s}+0x{d}", .{ op.start_sector, op.num_sectors });
-        } else {
-            self.logger.err("failed to erase {s}+0x{d}", .{ op.start_sector, op.num_sectors });
-            return Error.Io;
+            return;
         }
+        if (resp.kind == .timeout) return Error.Timeout;
+        if (resp.kind == .io) return Error.Io;
+        // NAK = device-side refusal (protected region, or a previous erase
+        // is still executing). The programmer itself answered fine, so the
+        // session survives — this is erase's WriteFailed equivalent.
+        self.logger.err("device refused to erase {s}+0x{d} — it may be busy with a previous erase, or the region is protected", .{ op.start_sector, op.num_sectors });
+        return error.EraseFailed;
     }
 
     /// Port of firehose_apply_patch: only patches with filename == "DISK"
@@ -1514,4 +1519,40 @@ test "configure adopts the MemoryName the programmer reports" {
     try env.sess.configure(.ufs, true);
     try std.testing.expectEqual(StorageType.spinor, env.sess.storage);
     try std.testing.expect(env.h.failure == null);
+}
+
+test "erase NAK is a device refusal that keeps the session alive" {
+    // Mirrors the reported oeminfo case: the device answers with UFS Error
+    // log lines and a NAK — the programmer itself is perfectly healthy.
+    const steps = [_]SimStep{
+        .{ .expect_write = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><erase SECTOR_SIZE_IN_BYTES=\"4096\" physical_partition_number=\"0\" num_partition_sectors=\"24576\" start_sector=\"12288\"/></data>" },
+        .{ .respond = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><log value=\"ERROR: UFS Error -5 (3)\"/><log value=\"ERROR: Erase Failed sector 12288, size 24576\"/><response value=\"NAK\"/></data>" },
+    };
+    const env = try TestEnv.init(std.testing.allocator, &steps);
+    defer env.deinit(std.testing.allocator);
+    env.sess.sector_size = 4096;
+    const op = rawprogram.Erase{
+        .sector_size = 4096,
+        .num_sectors = 24576,
+        .partition = 0,
+        .start_sector = "12288",
+    };
+    try std.testing.expectError(error.EraseFailed, env.sess.erase(&op));
+}
+
+test "erase transport timeout and io stay fatal" {
+    const steps = [_]SimStep{
+        .{ .expect_write = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><erase SECTOR_SIZE_IN_BYTES=\"4096\" physical_partition_number=\"0\"/></data>" },
+        .{ .read_timeout = {} },
+    };
+    const env = try TestEnv.init(std.testing.allocator, &steps);
+    defer env.deinit(std.testing.allocator);
+    env.sess.sector_size = 4096;
+    const op = rawprogram.Erase{
+        .sector_size = 4096,
+        .num_sectors = 0, // full physical partition (attributes omitted)
+        .partition = 0,
+        .start_sector = "0",
+    };
+    try std.testing.expectError(error.Timeout, env.sess.erase(&op));
 }
