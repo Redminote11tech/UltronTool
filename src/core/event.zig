@@ -123,6 +123,9 @@ pub const PartitionsEvent = struct {
     count: u32 = 0,
     sector_size: u32 = 0,
     luns: u32 = 1,
+    /// VIP session: every packet must match the signed digest table, so
+    /// partition browsing and single-partition reads/writes are unavailable.
+    vip: bool = false,
     parts: [max_partition_rows]PartitionRow = undefined,
 };
 

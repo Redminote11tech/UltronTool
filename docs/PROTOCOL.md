@@ -158,7 +158,52 @@ against an overall deadline; concatenated XML docs split on `<?xml` / `</data>`;
 4. Append RESET unless disabled.
 5. Run: Sahara (programmer upload, device-driven) → Firehose (configure → ops → reset).
 
-## 5. Ultron support matrix & roadmap
+## 5. VIP — Vendor Image Programming (digest-table auth)
+
+Some programmers enforce per-packet authentication ("VIP"): every Firehose packet
+(each XML command document **and** each data chunk) must match the next SHA-256
+digest in a vendor-signed table that the host streams over the wire. Ported from
+`refs/qdl/src/vip.c` (BSD-3-Clause, © 2025 Qualcomm Innovation Center).
+
+### 5.1 Wire behavior (`vip.zig` Transfer, `firehose.zig` hooks)
+
+- The programmer announces its policy with a startup log line; only the stable
+  prefix is matched: `VIP is enabled, receiving the signed table` …
+- The signed table (`DigestsToSign.bin.mbn`) is streamed raw before the very
+  first Firehose packet; the device ACKs it (30 s deadline).
+- Every subsequent packet consumes one digest ("frame"): after 53 frames the
+  host streams `ChainedTableOfDigests0.bin`; then 255 frames per chained table,
+  up to 32 chained tables (`MAX_CHAINED_FILES`).
+- Constraints while VIP is active (all ported from qdl):
+  - configure is sent **exactly once** — the speculative retry loop is disabled
+    (the table send is one-way; a premature send breaks the session), preceded
+    by a 5 s startup-log drain that confirms the marker;
+  - the sector-size probe is skipped (its packets are not in the table);
+  - no other reads may occur: storage-info queries and GPT reads are not in the
+    table, so Ultron disables the partition browser for VIP sessions;
+  - a refused data packet is unrecoverable (the digest stream desynced).
+- If tables were provided but the programmer never announces VIP, they are
+  dropped with a warning; if the programmer announces VIP with no tables,
+  configure fails with a clear message.
+
+### 5.2 Table files (`vip.zig` Generator; `ultron --create-digests`)
+
+| File | Content |
+|---|---|
+| `DIGEST_TABLE.bin` | every packet's SHA-256, in order (32 B each) |
+| `DigestsToSign.bin` | first 53 digests + SHA-256 of the complete `ChainedTableOfDigests0.bin` |
+| `ChainedTableOfDigests<N>.bin` | next 255 digests each; non-final ones end with the next file's SHA-256, the final one ends with a single `0x00` byte (a bare 512 B multiple would be an ambiguous packet) |
+| `DigestsToSign.bin.mbn` | the vendor-signed image of `DigestsToSign.bin` (external signing step) |
+
+Generation replays the flash plan offline against an auto-ACK loopback device
+(`digestgen.zig`) while hashing every packet — exactly the packets a real run
+sends. The table is therefore bound to the plan: same XML files, same images,
+same order, same storage type, same payload size **with no renegotiation** (set
+`--payload-size` to the programmer's advertised size, e.g. 16384), same
+SkipStorageInit setting. GUI runs pick the folder as "VIP digest tables" on the
+loader stage; VIP requires the fresh-boot loader-upload flow.
+
+## 6. Ultron support matrix & roadmap
 
 | Feature | Status | Notes |
 |---|---|---|
@@ -168,15 +213,15 @@ against an overall deadline; concatenated XML docs split on `<?xml` / `</data>`;
 | rawprogram/patch flashing | ✅ | qdl op-list order, set-bootable, allow-missing |
 | Partition browser + per-partition read/write | ✅ | GPT per LUN, CRC-verified |
 | Write verification (getsha256digest) | ✅ | Local SHA-256 of the streamed image vs device digest |
-| Drain-to-complete on refused writes | ✅ | Protected partitions fail cleanly; session survives |
+| Drain-to-complete on refused writes | ✅ | Protected partitions fail cleanly; session survives; the drain streams the image's own remaining bytes (not zeros), so whatever lands past a refusal is real image content |
 | Stuck-programmer recovery | ✅ | nop probe → USB reset → fresh EDL → auto loader re-upload |
 | Multi-image Sahara archives (zip / id:file) | ⏳ planned | qdl decode_programmer |
 | RAM dump / Memory Debug (900E crash dumps) | ⏳ planned | MEM_DEBUG64 region table + dumps |
 | UFS provisioning (<ufs> XML) | ⏳ planned | destructive; bConfigDescrLock gates |
-| VIP (Verified Image Programming) | ❌ n/a | vendor-signed digest tables; requires programmer support + keys |
+| VIP (Vendor Image Programming) | ✅ | full qdl vip.c port: digest generation (`--create-digests`), table streaming, single-configure rule; the vendor signing step stays external; untested against VIP hardware so far |
 | Streaming (nandprg/enandprg), Diag | ❌ n/a | NAND-target legacy paths |
 
-## 6. Detection table (Ultron device scanner)
+## 7. Detection table (Ultron device scanner)
 
 | VID:PID | Meaning | Module (v1 / future) |
 |---|---|---|

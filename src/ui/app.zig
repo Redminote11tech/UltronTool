@@ -49,6 +49,7 @@ const lun_names: [max_lun_choices + 1]?[*:0]const u8 = .{
 /// What a pending file chooser is for.
 const ChooserKind = union(enum) {
     loader: void,
+    vip_tables: void,
     xml_add: void,
     read_partition: ev.PartitionRow,
     write_partition: ev.PartitionRow,
@@ -75,6 +76,7 @@ pub const Ui = struct {
     parts: ?ev.PartitionsEvent = null,
 
     programmer_path: ?[]u8 = null, // loader chosen in needs_loader state
+    vip_dir: ?[]u8 = null, // optional folder with signed VIP digest tables
     pending_writes: std.ArrayList(PendingWrite) = .empty,
     xml_paths: std.ArrayList([]u8) = .empty,
     storage: firehose.StorageType = .ufs,
@@ -102,6 +104,7 @@ pub const Ui = struct {
 
     loader_section: ?*gtk.Widget = null,
     loader_row: ?*adw.ActionRow = null,
+    vip_row: ?*adw.ActionRow = null,
     upload_btn: ?*gtk.Button = null,
 
     conn_section: ?*gtk.Widget = null,
@@ -268,6 +271,7 @@ pub fn mainRun(init: std.process.Init) !void {
     for (ui.xml_paths.items) |p| alloc.free(p);
     ui.xml_paths.deinit(alloc);
     if (ui.programmer_path) |p| alloc.free(p);
+    if (ui.vip_dir) |p| alloc.free(p);
     for (ui.row_ctxs.items) |ctx| alloc.destroy(ctx);
     ui.row_ctxs.deinit(alloc);
     alloc.destroy(ui);
@@ -501,6 +505,17 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     adw.PreferencesGroup.add(loader_group, loader_row.as(gtk.Widget));
     ui.loader_row = loader_row;
 
+    // Optional VIP digest tables: only for programmers that enforce
+    // per-packet VIP authentication (they announce it in their startup logs).
+    const vip_row = adw.ActionRow.new();
+    rowTitle(vip_row, "VIP digest tables (optional)");
+    adw.ActionRow.setSubtitle(vip_row, "Folder with DigestsToSign.bin.mbn — only for VIP-locked programmers");
+    const vip_btn = gtk.Button.newWithLabel("Choose…");
+    _ = gtk.Button.signals.clicked.connect(vip_btn, *Ui, &onPickVip, ui, .{});
+    adw.ActionRow.addSuffix(vip_row, vip_btn.as(gtk.Widget));
+    adw.PreferencesGroup.add(loader_group, vip_row.as(gtk.Widget));
+    ui.vip_row = vip_row;
+
     const upload_btn = gtk.Button.newWithLabel("Upload loader");
     gtk.Widget.addCssClass(upload_btn.as(gtk.Widget), "suggested-action");
     gtk.Widget.addCssClass(upload_btn.as(gtk.Widget), "big-start");
@@ -672,7 +687,10 @@ fn rebuildPartitions(ui: *Ui, parts: *const ev.PartitionsEvent) void {
 
     if (ui.parts_group) |g| {
         var info_buf: [200]u8 = undefined;
-        const info = std.fmt.bufPrint(&info_buf, "LUN {d} · sector {d} B · {d} LUN(s) · Read makes a backup; Write overwrites after confirmation", .{ parts.lun, parts.sector_size, parts.luns }) catch "";
+        const info = if (parts.vip)
+            (std.fmt.bufPrint(&info_buf, "VIP session — every packet must match the signed digest table, so partition reads/writes are unavailable", .{}) catch "")
+        else
+            (std.fmt.bufPrint(&info_buf, "LUN {d} · sector {d} B · {d} LUN(s) · Read makes a backup; Write overwrites after confirmation", .{ parts.lun, parts.sector_size, parts.luns }) catch "");
         var info_z: [220]u8 = undefined;
         const info_zs = std.fmt.bufPrintZ(&info_z, "{s}", .{info}) catch return;
         adw.PreferencesGroup.setDescription(g, info_zs.ptr);
@@ -682,7 +700,11 @@ fn rebuildPartitions(ui: *Ui, parts: *const ev.PartitionsEvent) void {
     gtk.Widget.setVisible(ui.lun_row.?, @intFromBool(parts.luns > 1));
 
     if (parts.count == 0) {
-        gtk.Label.setText(ui.parts_empty.?, "No partitions found (empty GPT?)");
+        if (parts.vip) {
+            gtk.Label.setText(ui.parts_empty.?, "VIP session — flash rawprogram XML files below");
+        } else {
+            gtk.Label.setText(ui.parts_empty.?, "No partitions found (empty GPT?)");
+        }
         gtk.Widget.setVisible(ui.parts_empty.?.as(gtk.Widget), 1);
         return;
     }
@@ -792,12 +814,16 @@ fn clearPendingWrites(ui: *Ui) void {
 // ----------------------------------------------------------------------
 
 fn openChooser(ui: *Ui, kind: ChooserKind, title: [:0]const u8, save: bool, suggested: ?[:0]const u8) void {
+    openChooserFull(ui, kind, title, save, suggested, false);
+}
+
+fn openChooserFull(ui: *Ui, kind: ChooserKind, title: [:0]const u8, save: bool, suggested: ?[:0]const u8, folder: bool) void {
     if (ui.chooser != null) return; // a chooser is already pending
     const window = ui.window orelse return;
     const chooser = gtk.FileChooserNative.new(
         title.ptr,
         window.as(gtk.Window),
-        if (save) .save else .open,
+        if (folder) .select_folder else if (save) .save else .open,
         null,
         null,
     );
@@ -841,6 +867,14 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
             ui.programmer_path = ui.alloc.dupe(u8, path) catch null;
             if (ui.programmer_path) |p| setSubtitleZ(ui.loader_row.?, p);
             gtk.Widget.setSensitive(ui.upload_btn.?.as(gtk.Widget), @intFromBool(!ui.busy()));
+        },
+        .vip_tables => {
+            if (ui.vip_dir) |old| ui.alloc.free(old);
+            ui.vip_dir = ui.alloc.dupe(u8, path) catch null;
+            if (ui.vip_dir) |p| {
+                setSubtitleZ(ui.vip_row.?, p);
+                ui.logger.info("VIP digest tables folder selected: {s}", .{p});
+            }
         },
         .xml_add => {
             const dup = ui.alloc.dupe(u8, path) catch return;
@@ -907,11 +941,15 @@ fn onConnectClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     if (ui.busy() or ui.manager == null) return;
     readStorageSelection(ui);
     ui.startJob();
-    ui.manager.?.enqueue(.{ .connect = .{ .storage = ui.storage } });
+    ui.manager.?.enqueue(.{ .connect = .{ .storage = ui.storage, .vip_dir = ui.vip_dir } });
 }
 
 fn onPickLoader(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     openChooser(ui, .loader, "Select firehose programmer", false, null);
+}
+
+fn onPickVip(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    openChooserFull(ui, .vip_tables, "Select VIP digest tables folder", false, null, true);
 }
 
 fn onUploadLoaderClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
@@ -919,7 +957,11 @@ fn onUploadLoaderClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     const path = ui.programmer_path orelse return;
     readStorageSelection(ui);
     ui.startJob();
-    ui.manager.?.enqueue(.{ .upload_loader = .{ .programmer = path, .storage = ui.storage } });
+    ui.manager.?.enqueue(.{ .upload_loader = .{
+        .programmer = path,
+        .storage = ui.storage,
+        .vip_dir = ui.vip_dir,
+    } });
 }
 
 fn onProbeClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {

@@ -23,6 +23,7 @@ const fileio = @import("../../core/fileio.zig");
 const sahara = @import("sahara.zig");
 const firehose = @import("firehose.zig");
 const rawprogram = @import("rawprogram.zig");
+const vip = @import("vip.zig");
 const gpt = @import("gpt.zig");
 
 const Error = transport.Error;
@@ -36,17 +37,21 @@ pub const OpenFn = *const fn (ctx: *anyopaque, logger: *log.Logger, wait_ms: u32
 
 pub const Request = union(enum) {
     /// Open the transport and probe what is running. `programmer` may be
-    /// provided up front (uploaded only when the device is in EDL).
+    /// provided up front (uploaded only when the device is in EDL);
+    /// `vip_dir` optionally points at a folder with DigestsToSign.bin.mbn +
+    /// chained VIP digest tables for programmers that enforce VIP.
     connect: struct {
         programmer: ?[]const u8 = null,
         storage: firehose.StorageType = .ufs,
         skip_storage_init: bool = false,
+        vip_dir: ?[]const u8 = null,
     },
     /// Upload the firehose programmer over Sahara (state: needs_loader).
     upload_loader: struct {
         programmer: []const u8,
         storage: firehose.StorageType = .ufs,
         skip_storage_init: bool = false,
+        vip_dir: ?[]const u8 = null,
     },
     /// Read the GPT of `lun` and emit a .partitions event.
     list_partitions: struct { lun: u32 },
@@ -127,6 +132,8 @@ pub const Manager = struct {
     skip_saved: bool = false,
     /// Loader used for the current session — reused by stuck-state recovery.
     last_programmer: ?[]u8 = null,
+    /// VIP digest tables folder for the current session (optional).
+    vip_dir_saved: ?[]u8 = null,
     /// A USB reset recovery may run once per connect.
     reset_used: bool = false,
 
@@ -177,6 +184,7 @@ pub const Manager = struct {
         for (self.pending.items) |*item| item.deinit();
         self.pending.deinit(self.alloc);
         if (self.last_programmer) |p| self.alloc.free(p);
+        if (self.vip_dir_saved) |d| self.alloc.free(d);
         self.alloc.destroy(self);
     }
 
@@ -184,8 +192,12 @@ pub const Manager = struct {
         switch (item.req) {
             .connect => |*c| {
                 if (c.programmer) |p| c.programmer = try item.dupe(p);
+                if (c.vip_dir) |d| c.vip_dir = try item.dupe(d);
             },
-            .upload_loader => |*u| u.programmer = try item.dupe(u.programmer),
+            .upload_loader => |*u| {
+                u.programmer = try item.dupe(u.programmer);
+                if (u.vip_dir) |d| u.vip_dir = try item.dupe(d);
+            },
             .read_partition => |*r| {
                 r.path = try item.dupe(r.path);
                 r.label = try item.dupe(r.label);
@@ -232,8 +244,8 @@ pub const Manager = struct {
 
     fn runJob(self: *Manager, item: *QueueItem) void {
         switch (item.req) {
-            .connect => |c| self.connect(c.programmer, c.storage, c.skip_storage_init),
-            .upload_loader => |u| self.uploadLoader(u.programmer, u.storage, u.skip_storage_init),
+            .connect => |c| self.connect(c.programmer, c.storage, c.skip_storage_init, c.vip_dir),
+            .upload_loader => |u| self.uploadLoader(u.programmer, u.storage, u.skip_storage_init, u.vip_dir),
             .list_partitions => |lp| self.listPartitions(lp.lun),
             .read_partition => |r| self.readPartition(r.path, r.first_lba, r.num_sectors, r.lun, r.label),
             .write_partition => |w| self.writePartition(w.path, w.first_lba, w.max_sectors, w.lun, w.label),
@@ -291,13 +303,14 @@ pub const Manager = struct {
     }
 
     /// Open a transport and probe what is running.
-    fn connect(self: *Manager, programmer: ?[]const u8, storage: firehose.StorageType, skip_storage_init: bool) void {
+    fn connect(self: *Manager, programmer: ?[]const u8, storage: firehose.StorageType, skip_storage_init: bool, vip_dir: ?[]const u8) void {
         if (self.cancel.load(.acquire)) {
             pushFinished(self.channel, false, "Cancelled");
             return;
         }
         self.reset_used = false;
         self.storage = storage;
+        self.rememberVipDir(vip_dir);
 
         // Already waiting for a loader with the HELLO preserved: a re-probe
         // would close the transport and lose the HELLO (the PBL does not
@@ -357,7 +370,7 @@ pub const Manager = struct {
                 self.io.?.pushBack(buf[0..n]);
                 if (programmer) |p| {
                     self.logger.info("device is in EDL mode: uploading the chosen loader", .{});
-                    self.uploadLoader(p, storage, skip_storage_init);
+                    self.uploadLoader(p, storage, skip_storage_init, vip_dir);
                 } else {
                     self.logger.info("device is in EDL mode: a firehose loader is required (connection kept open)", .{});
                     self.emitState(.needs_loader);
@@ -431,7 +444,7 @@ pub const Manager = struct {
                 self.io.?.pushBack(buf[0..n]);
                 self.logger.info("device recovered to clean EDL state", .{});
                 if (programmer) |p| {
-                    self.uploadLoader(p, storage, skip_storage_init);
+                    self.uploadLoader(p, storage, skip_storage_init, self.vip_dir_saved);
                 } else {
                     self.emitState(.needs_loader);
                     pushFinished(self.channel, true, "loader required");
@@ -481,13 +494,14 @@ pub const Manager = struct {
         return true;
     }
 
-    fn uploadLoader(self: *Manager, programmer: []const u8, storage: firehose.StorageType, skip_storage_init: bool) void {
+    fn uploadLoader(self: *Manager, programmer: []const u8, storage: firehose.StorageType, skip_storage_init: bool, vip_dir: ?[]const u8) void {
         if (self.cancel.load(.acquire)) {
             pushFinished(self.channel, false, "Cancelled");
             return;
         }
         self.skip_saved = skip_storage_init;
         self.rememberLoader(programmer);
+        self.rememberVipDir(vip_dir);
 
         // Fresh connection if the probe consumed/closed one: the device
         // re-issues its HELLO on reopen.
@@ -548,7 +562,32 @@ pub const Manager = struct {
         };
         self.fh = fh;
 
+        // Load the VIP digest tables before configure: the signed table is
+        // streamed ahead of the very first packet.
+        if (self.vip_dir_saved) |dir| {
+            const v = self.alloc.create(vip.Transfer) catch {
+                pushFinished(self.channel, false, "OutOfMemory");
+                return;
+            };
+            v.* = vip.Transfer.init(self.alloc, dir) catch |e| {
+                self.alloc.destroy(v);
+                self.logger.err("failed to load VIP digest tables from {s}: {s}", .{ dir, @errorName(e) });
+                self.teardown();
+                pushFinished(self.channel, false, "VIP tables folder must contain DigestsToSign.bin.mbn");
+                self.emitState(.disconnected);
+                return;
+            };
+            fh.vip = v;
+        }
+
         fh.configure(storage, skip_storage_init) catch |e| {
+            if (e == Error.VipRequired) {
+                self.teardown();
+                self.logger.err("the programmer requires VIP digest tables — flash with a VIP tables folder selected", .{});
+                pushFinished(self.channel, false, "programmer requires VIP — select the VIP digest tables folder and reconnect");
+                self.emitState(.disconnected);
+                return;
+            }
             self.logger.err("Firehose configure failed: {s}", .{@errorName(e)});
             // A timeout here with a "confirmed" programmer means it is stuck
             // (e.g. still retrying a failed write in a raw data phase) and is
@@ -565,6 +604,19 @@ pub const Manager = struct {
             return;
         };
         self.sector_size = fh.sector_size;
+
+        if (fh.vip != null and fh.programmer_requires_vip) {
+            // Every packet of a VIP session must match the signed digest
+            // table — storage-info queries and GPT reads are not in it, so
+            // the partition browser stays unavailable. rawprogram XML
+            // flashing (whose plan the tables were generated from) works.
+            self.logger.info("VIP session active: partition browsing and single-partition read/write are disabled — flash rawprogram XML files", .{});
+            self.channel.push(.{ .partitions = .{ .lun = 0, .sector_size = 0, .luns = 1, .vip = true } });
+            self.logger.info("✓ loader uploaded — Firehose ready (VIP)", .{});
+            self.emitState(.firehose_ready);
+            pushFinished(self.channel, true, "connected (VIP)");
+            return;
+        }
 
         // Storage info: LUN count for the dropdown and a sector-size fallback
         // when the probe could not run.
@@ -592,6 +644,16 @@ pub const Manager = struct {
             self.alloc.free(old);
         }
         self.last_programmer = self.alloc.dupe(u8, programmer) catch null;
+    }
+
+    fn rememberVipDir(self: *Manager, dir: ?[]const u8) void {
+        if (self.vip_dir_saved) |old| {
+            if (dir != null and std.mem.eql(u8, old, dir.?)) return;
+            self.alloc.free(old);
+            self.vip_dir_saved = null;
+        }
+        const d = dir orelse return;
+        self.vip_dir_saved = self.alloc.dupe(u8, d) catch null;
     }
 
     /// Force the device back to a clean EDL state: USB reset (software
@@ -632,7 +694,7 @@ pub const Manager = struct {
         self.io.?.pushBack(buf[0..hello_n]);
         self.logger.info("device recovered to clean EDL state", .{});
         if (self.last_programmer) |p| {
-            self.uploadLoader(p, storage, skip_storage_init);
+            self.uploadLoader(p, storage, skip_storage_init, self.vip_dir_saved);
         } else {
             self.emitState(.needs_loader);
             pushFinished(self.channel, true, "loader required");
@@ -642,6 +704,7 @@ pub const Manager = struct {
     /// Close the transport and drop the Firehose session. Safe to call twice.
     fn teardown(self: *Manager) void {
         if (self.fh) |fh| {
+            fh.destroyVip();
             self.alloc.destroy(fh);
             self.fh = null;
         }

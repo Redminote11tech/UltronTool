@@ -53,7 +53,36 @@ a small, dependency-free Zig library you can audit in an afternoon.
 - **Chip identity probe** — serial number, HW ID (MSM/OEM/Model), OEM PK hash
   over Sahara command mode (v2 and v3 targets)
 - **Live protocol console** — every XML exchange and device log line is shown
+- **VIP digest tables** — for programmers that enforce Vendor Image Programming
+  (per-packet SHA-256 auth against a vendor-signed digest table, as upstream
+  qdl implements it); see below
 - Storage types: UFS, eMMC, Spinor, NAND, NVMe
+
+## VIP programming (digest-table auth)
+
+Some programmers refuse every packet unless it matches the next SHA-256 digest
+in a vendor-signed table ("VIP is enabled, receiving the signed table" in their
+startup logs). Ultron ports upstream qdl's VIP support end to end:
+
+```sh
+# 1. Replay your flash plan offline and hash every Firehose packet:
+ultron --create-digests ./vip --payload-size 16384 rawprogram0.xml patch0.xml
+
+# 2. Have DigestsToSign.bin signed by your vendor / signing infrastructure,
+#    then save the signed image as DigestsToSign.bin.mbn in the same folder.
+
+# 3. In the GUI's loader stage, choose ./vip as "VIP digest tables", pick the
+#    programmer, and upload as usual — Ultron streams the signed table and
+#    the chained tables at the right frame boundaries.
+```
+
+`--payload-size` must match the size the real programmer ACKs without
+renegotiating (its `MaxPayloadSizeToTargetInBytes`, e.g. 16384) — the digest
+table is bound to the exact packet sequence. While VIP is active the partition
+browser is disabled (reads are not in the table); flash via rawprogram XML.
+The table stays valid only for that exact plan: same XML files, images,
+storage type and SkipStorageInit setting. Run `ultron --create-digests` with
+no arguments for the full option list.
 
 ## Requirements
 
@@ -99,7 +128,7 @@ src/
 ├── transport/  Transport vtable · libusb backend (qdl ZLP semantics) · sim backend
 ├── device/     libudev hot-plug scanner
 ├── protocol/   Protocol vtable + registry (the plugin point)
-│   └── qualcomm/  sahara · firehose · gpt · xml · rawprogram · session · manager
+│   └── qualcomm/  sahara · firehose · vip · digestgen · gpt · xml · rawprogram · manager
 └── ui/         libadwaita app (workflow page + console)
 ```
 

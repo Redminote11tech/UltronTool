@@ -12,6 +12,8 @@ test {
     _ = @import("protocol/qualcomm/rawprogram.zig");
     _ = @import("protocol/qualcomm/sahara.zig");
     _ = @import("protocol/qualcomm/firehose.zig");
+    _ = @import("protocol/qualcomm/vip.zig");
+    _ = @import("protocol/qualcomm/digestgen.zig");
     _ = @import("protocol/qualcomm/session.zig");
     _ = @import("protocol/qualcomm/gpt.zig");
     _ = @import("protocol/qualcomm/manager.zig");

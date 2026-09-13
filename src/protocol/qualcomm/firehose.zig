@@ -11,6 +11,7 @@ const transport = @import("../../transport/transport.zig");
 const log = @import("../../core/log.zig");
 const xml = @import("xml.zig");
 const rawprogram = @import("rawprogram.zig");
+const vip = @import("vip.zig");
 const fileio = @import("../../core/fileio.zig");
 
 const Io = transport.Io;
@@ -93,6 +94,28 @@ pub const Session = struct {
     sector_size: u32 = 0,
     storage: StorageType = .ufs,
     progress: ProgressHook = .{},
+    /// Active VIP digest-table transfer (set by the manager when the user
+    /// chose a VIP tables folder). Null = VIP disabled.
+    vip: ?*vip.Transfer = null,
+    /// Offline digest generator (--create-digests dry runs). Null = hashing off.
+    digest_gen: ?*vip.Generator = null,
+    /// The programmer's logs announced VIP (it expects a signed digest table).
+    programmer_requires_vip: bool = false,
+    /// Force-skip the sector-size probe (used by digest generation, which
+    /// must not emit packets the VIP digest table does not cover).
+    no_probe: bool = false,
+
+    /// Free the VIP transfer (contents + allocation). The transfer object is
+    /// allocated by the manager but the session owns it for the session's
+    /// lifetime; demotion inside configure() goes through here so the
+    /// manager's teardown can always call it safely.
+    pub fn destroyVip(self: *Session) void {
+        if (self.vip) |v| {
+            v.deinit();
+            self.alloc.destroy(v);
+            self.vip = null;
+        }
+    }
 
     fn cancelled(self: *Session) bool {
         return self.cancel != null and self.cancel.?.load(.acquire);
@@ -261,6 +284,14 @@ pub const Session = struct {
                 {
                     resp.error_seen = true;
                 }
+                // VIP programmers announce their digest-table policy in the
+                // startup logs (qdl's firehose_check_vip_marker).
+                if (!self.programmer_requires_vip and
+                    std.mem.indexOf(u8, v, vip.programmer_marker) != null)
+                {
+                    self.programmer_requires_vip = true;
+                    self.logger.info("VIP: programmer expects a signed digest table", .{});
+                }
             }
             return false; // keep waiting for the response
         }
@@ -321,11 +352,37 @@ pub const Session = struct {
     // Request write (port of firehose_write)
     // ------------------------------------------------------------------
 
+    /// Port of firehose_vip_send_table: push a digest table when one is due,
+    /// and wait for its ACK (only right after a table was actually sent —
+    /// the device verifies every subsequent packet against it).
+    fn sendVipTable(self: *Session) Error!void {
+        const v = self.vip orelse return;
+        v.handleTables(self.io, self.logger) catch |e| {
+            self.logger.err("VIP: digest table transmission failed", .{});
+            return e;
+        };
+        if (!v.statusCheckNeeded()) return;
+        const r = try self.readResponse(30000);
+        if (!r.isAck()) {
+            self.logger.err("VIP: the programmer rejected the digest table", .{});
+            return Error.Io;
+        }
+        self.logger.info("VIP: digest table accepted", .{});
+        v.clearStatus();
+    }
+
     fn writeRequest(self: *Session, req: []const u8) Error!void {
+        // VIP tables are pushed before every packet (XML commands included).
+        try self.sendVipTable();
         self.logger.debug("FIREHOSE WRITE: {s}", .{req});
+        // Digest generation covers every packet exactly once, retries
+        // included in the same hash like qdl's firehose_write.
+        if (self.digest_gen) |g| g.chunkInit();
+        defer if (self.digest_gen) |g| g.chunkStore();
         var retries: u32 = 0;
         while (true) {
             if (self.cancelled()) return Error.Cancelled;
+            if (self.digest_gen) |g| g.chunkUpdate(req);
             _ = self.io.write(req, 1000) catch |e| switch (e) {
                 Error.Timeout => {
                     // Some programmers send <response> + <log> entries and
@@ -371,12 +428,36 @@ pub const Session = struct {
     /// only timeouts are retried while the programmer boots.
     pub fn configure(self: *Session, storage: StorageType, skip_storage_init: bool) Error!void {
         self.storage = storage;
+
+        // VIP: the signed table can only be sent once per session, so the
+        // speculative retry loop must not run (a premature configure would
+        // burn the table on a session the programmer was not ready for).
+        // Port of firehose_detect_and_configure's VIP branch: drain the
+        // startup logs, confirm the programmer really wants VIP (demote
+        // otherwise), then a single configure attempt.
+        var vip_single = false;
+        if (self.vip != null) {
+            _ = self.readResponse(5000) catch {};
+            if (!self.programmer_requires_vip) {
+                self.logger.info("VIP: tables provided but the programmer did not announce VIP — continuing without VIP", .{});
+                self.destroyVip();
+            } else {
+                vip_single = true;
+            }
+        }
+
         const deadline = monoNow() + 5 * std.time.us_per_s;
 
         var resp: Response = .{ .kind = .timeout };
         while (true) {
             if (self.cancelled()) return Error.Cancelled;
             resp = try self.sendConfigure(self.max_payload_size, skip_storage_init);
+            // The programmer wants VIP but the host has no tables: bail now
+            // instead of waiting out the configure deadline.
+            if (self.programmer_requires_vip and self.vip == null) {
+                self.logger.err("programmer requires VIP, but no digest tables were provided", .{});
+                return Error.VipRequired;
+            }
             // A NAK that carries MaxPayloadSizeToTargetInBytes is the
             // programmer proposing a size it can handle (e.g. 16 KiB) — qdl's
             // configure parser accepts it and renegotiates below. Only a NAK
@@ -388,8 +469,9 @@ pub const Session = struct {
                 return Error.Io;
             }
             if (resp.kind == .io) return Error.Io;
-            // .timeout: retry until the deadline.
-            if (monoNow() > deadline) {
+            // .timeout: retry until the deadline — except under VIP, where
+            // every extra configure would consume a digest.
+            if (vip_single or monoNow() > deadline) {
                 self.logger.err("failed to detect firehose programmer", .{});
                 return Error.Timeout;
             }
@@ -411,8 +493,12 @@ pub const Session = struct {
 
         self.logger.debug("accepted max payload size: {d}", .{self.max_payload_size});
 
-        // Probe the sector size by reading sector 1 at 512 then 4096.
-        if (!skip_storage_init and storage != .nand and self.sector_size == 0) {
+        // Probe the sector size by reading sector 1 at 512 then 4096. Skipped
+        // under VIP: the probe's packets are not in the digest table, so
+        // sending them would cause a VIP hash mismatch on the device.
+        if (!skip_storage_init and storage != .nand and self.sector_size == 0 and
+            self.vip == null and !self.no_probe)
+        {
             self.probeSectorSize();
         }
         if (self.sector_size != 0) {
@@ -494,30 +580,43 @@ pub const Session = struct {
 
         var left: u64 = num_sectors;
         var ack_seen = false; // ACK may arrive while our last chunks are in flight
-        var drain_mode = false; // op failed device-side: feed zeros to finish the data phase
+        var drain_mode = false; // op failed device-side: keep feeding the data phase to finish it
         var drain_deadline: i64 = 0;
         var write_timeouts: u32 = 0;
         while (left > 0) {
             if (self.cancelled()) return Error.Cancelled;
+            if (self.digest_gen) |g| g.chunkInit();
 
             const chunk_sectors = @min(self.max_payload_size / sector_size, left);
             const chunk_bytes = chunk_sectors * sector_size;
-            if (drain_mode) {
-                // The op already failed device-side; keep the data phase fed
-                // with zeros so the programmer returns to command mode.
-                if (monoNow() > drain_deadline) {
-                    self.logger.err("drain deadline exceeded — the device stopped responding entirely", .{});
-                    return Error.Timeout;
-                }
-                @memset(buf[0..@intCast(chunk_bytes)], 0);
-            } else {
-                const got = file.readAll(buf[0..@intCast(chunk_bytes)]) catch return Error.Io;
-                // Zero-pad short reads: the wire expects exactly chunk_bytes.
-                if (got < chunk_bytes) @memset(buf[@intCast(got)..@intCast(chunk_bytes)], 0);
+            if (drain_mode and monoNow() > drain_deadline) {
+                self.logger.err("drain deadline exceeded — the device stopped responding entirely", .{});
+                return Error.Timeout;
             }
+            // Drain keeps streaming the image's OWN remaining bytes — the
+            // file position sits exactly at the failure point — instead of
+            // zeros: whatever the device stores past the refusal is real
+            // image content, so a partially written partition may still be
+            // usable (e.g. oeminfo with intact headers).
+            const got = file.readAll(buf[0..@intCast(chunk_bytes)]) catch return Error.Io;
+            // Zero-pad short reads: the wire expects exactly chunk_bytes.
+            if (got < chunk_bytes) @memset(buf[@intCast(got)..@intCast(chunk_bytes)], 0);
+
+            // The VIP digest covers the exact bytes on the wire (including
+            // the zero-padded tail); hash before the table send, matching
+            // qdl's firehose_stream_out ordering.
+            if (self.digest_gen) |g| g.chunkUpdate(buf[0..@intCast(chunk_bytes)]);
+            try self.sendVipTable();
 
             _ = self.io.write(buf[0..@intCast(chunk_bytes)], zlp_timeout) catch |e| switch (e) {
                 Error.Timeout => {
+                    // A VIP session cannot recover here: the device counts
+                    // packets against the digest table, so a skipped or
+                    // repeated chunk desyncs the stream (qdl aborts too).
+                    if (self.vip != null) {
+                        self.logger.err("device stopped consuming the write during a VIP session — aborting", .{});
+                        return Error.Timeout;
+                    }
                     write_timeouts += 1;
                     if (!drain_mode) {
                         self.logger.err("device stopped consuming the write — attempting to drain the data phase", .{});
@@ -535,22 +634,31 @@ pub const Session = struct {
                 else => return e,
             };
             write_timeouts = 0;
+            if (self.digest_gen) |g| g.chunkStore();
 
             // Mid-stream failure handling: a UFS write refusal makes some
             // programmers NAK the operation while still consuming the data
             // phase. There is no cancel command, so the only graceful exit
-            // is to FEED the declared remaining bytes (zeros) until the op
-            // completes and the programmer returns to command mode.
+            // is to keep feeding the declared remaining bytes until the op
+            // completes and the programmer returns to command mode — using
+            // the image's own data so anything stored past the refusal is
+            // real content rather than zeros.
             const mid = self.pollResponse() catch |e| switch (e) {
                 Error.Cancelled => return e,
                 else => Response{ .kind = .timeout },
             };
             if (mid.isAck()) ack_seen = true;
+            // Under VIP a refusal means the digest stream desynced — there
+            // is no way to resume against a signed table.
+            if (self.vip != null and (mid.error_seen or mid.kind == .nak)) {
+                self.logger.err("VIP: the device refused a data packet — the session cannot recover", .{});
+                return Error.Io;
+            }
             if (mid.error_seen or mid.kind == .nak) {
                 if (!drain_mode) {
                     drain_mode = true;
                     drain_deadline = monoNow() + 120 * std.time.us_per_s;
-                    self.logger.err("device reported a write failure — draining the data phase so the session survives", .{});
+                    self.logger.err("device reported a write failure — draining the data phase with the image's remaining bytes so the session survives", .{});
                 }
                 // Indeterminate progress with an explicit label: the bar must
                 // NOT pretend the write is progressing.
@@ -1060,4 +1168,166 @@ test "extract json number helper" {
     try std.testing.expectEqual(@as(u64, 42), extractJsonNumber("{\"total_blocks\": 42, \"x\":1}", "total_blocks").?);
     try std.testing.expectEqual(@as(u64, 7), extractJsonNumber("{\"block_size\":7}", "block_size").?);
     try std.testing.expectEqual(@as(?u64, null), extractJsonNumber("{\"other\":1}", "total_blocks"));
+}
+
+test "drain streams the image's remaining bytes instead of zeros" {
+    const image_len = 2048; // 512-byte sectors → 4 sectors → 2 chunks
+    const image = try std.testing.allocator.alloc(u8, image_len);
+    defer std.testing.allocator.free(image);
+    for (image, 0..) |*b, i| b.* = @truncate(i * 7 + 3);
+
+    const setup_ack = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><response value=\"ACK\"/></data>";
+    // nv9-style refusal: a log line mid-data-phase instead of an immediate NAK.
+    const faillog = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><log value=\"Write Failed sector 2, size 2 result 3\"/><response value=\"NAK\"/></data>";
+    const nak = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><response value=\"NAK\"/></data>";
+
+    var tmp_dir = try fileio.TmpDir.init();
+    defer tmp_dir.cleanup();
+    try tmp_dir.writeFile("oeminfo.img", image);
+    var pbuf: [176]u8 = undefined;
+    const path = try tmp_dir.filePath(&pbuf, "oeminfo.img");
+
+    const expected_setup = try std.fmt.allocPrint(std.testing.allocator, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><program SECTOR_SIZE_IN_BYTES=\"{d}\" num_partition_sectors=\"{d}\" physical_partition_number=\"{d}\" start_sector=\"{s}\" filename=\"{s}\"/></data>", .{ 512, 4, 0, "8192", path });
+    defer std.testing.allocator.free(expected_setup);
+
+    const steps = [_]SimStep{
+        .{ .expect_write = expected_setup },
+        .{ .respond = setup_ack },
+        .{ .expect_write = image[0..1024] },
+        .{ .respond = faillog },
+        // Drain chunk: must be the image's own second half, NOT zeros.
+        .{ .expect_write = image[1024..2048] },
+        .{ .respond = nak },
+        .{ .respond = nak },
+    };
+
+    const env = try TestEnv.init(std.testing.allocator, &steps);
+    defer env.deinit(std.testing.allocator);
+    errdefer if (env.h.failure) |f| std.debug.print("SIM MISMATCH: expected vs got: {s}\n", .{f});
+    env.sess.max_payload_size = 1024;
+    env.sess.sector_size = 512;
+
+    var file = try fileio.File.open(path);
+    defer file.close();
+
+    const op = rawprogram.Program{
+        .sector_size = 512,
+        .num_sectors = 4,
+        .partition = 0,
+        .start_sector = "8192",
+        .filename = path,
+        .label = "oeminfo",
+    };
+    try std.testing.expectError(error.WriteFailed, env.sess.program(&op, &file));
+    try std.testing.expect(env.h.failure == null);
+}
+
+test "VIP: marker detected and signed table sent before configure" {
+    var tmp_dir = try fileio.TmpDir.init();
+    defer tmp_dir.cleanup();
+    var signed: [64]u8 = undefined;
+    for (&signed, 0..) |*b, i| b.* = @truncate(i + 1);
+    try tmp_dir.writeFile("DigestsToSign.bin.mbn", &signed);
+    var pbuf: [176]u8 = undefined;
+    const vip_dir = try tmp_dir.filePath(&pbuf, "");
+
+    const marker_doc = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><log value=\"INFO: VIP is enabled, receiving the signed table (8192 bytes)\"/><response value=\"ACK\"/></data>";
+    const cfg_ack = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><response value=\"ACK\" MaxPayloadSizeToTargetInBytes=\"16384\"/></data>";
+    const expected_configure = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><configure MemoryName=\"ufs\" MaxPayloadSizeToTargetInBytes=\"16384\" Verbose=\"0\" ZlpAwareHost=\"1\" SkipStorageInit=\"1\" /></data>";
+
+    const steps = [_]SimStep{
+        // Startup output drained by configure's VIP prelude; the marker in
+        // the log line keeps VIP active.
+        .{ .respond = marker_doc },
+        // The signed table precedes the configure packet.
+        .{ .expect_write = &signed },
+        .{ .respond = cfg_ack },
+        .{ .expect_write = expected_configure },
+        .{ .respond = cfg_ack },
+    };
+
+    const env = try TestEnv.init(std.testing.allocator, &steps);
+    defer env.deinit(std.testing.allocator);
+    errdefer if (env.h.failure) |f| std.debug.print("SIM MISMATCH: expected vs got: {s}\n", .{f});
+
+    const v = try std.testing.allocator.create(vip.Transfer);
+    v.* = try vip.Transfer.init(std.testing.allocator, vip_dir);
+    env.sess.vip = v;
+    defer env.sess.destroyVip();
+
+    env.sess.max_payload_size = 16384;
+    try env.sess.configure(.ufs, true);
+    try std.testing.expect(env.sess.programmer_requires_vip);
+    try std.testing.expectEqual(@as(usize, 16384), env.sess.max_payload_size);
+    try std.testing.expect(env.h.failure == null);
+}
+
+test "VIP: program consumes table slots for setup and data packets" {
+    var tmp_dir = try fileio.TmpDir.init();
+    defer tmp_dir.cleanup();
+    var signed: [64]u8 = undefined;
+    for (&signed, 0..) |*b, i| b.* = @truncate(i + 1);
+    try tmp_dir.writeFile("DigestsToSign.bin.mbn", &signed);
+    const image = [_]u8{'A'} ** 512;
+    try tmp_dir.writeFile("boot.img", &image);
+    var pbuf: [176]u8 = undefined;
+    const vip_dir = try tmp_dir.filePath(&pbuf, "");
+    const path = try tmp_dir.filePath(&pbuf, "boot.img");
+
+    const v = try std.testing.allocator.create(vip.Transfer);
+    v.* = try vip.Transfer.init(std.testing.allocator, vip_dir);
+
+    const ack = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><response value=\"ACK\"/></data>";
+    const expected_setup = try std.fmt.allocPrint(std.testing.allocator, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><program SECTOR_SIZE_IN_BYTES=\"{d}\" num_partition_sectors=\"{d}\" physical_partition_number=\"{d}\" start_sector=\"{s}\" filename=\"{s}\"/></data>", .{ 512, 1, 0, "8192", path });
+    defer std.testing.allocator.free(expected_setup);
+
+    const steps = [_]SimStep{
+        .{ .expect_write = &signed }, // pushed before the setup packet
+        .{ .respond = ack },
+        .{ .expect_write = expected_setup },
+        .{ .respond = ack },
+        .{ .expect_write = &image }, // the data chunk itself
+        .{ .respond = ack },
+    };
+
+    const env = try TestEnv.init(std.testing.allocator, &steps);
+    defer env.deinit(std.testing.allocator);
+    errdefer if (env.h.failure) |f| std.debug.print("SIM MISMATCH: expected vs got: {s}\n", .{f});
+    env.sess.max_payload_size = 1024;
+    env.sess.sector_size = 512;
+    env.sess.vip = v;
+    defer env.sess.destroyVip();
+
+    var file = try fileio.File.open(path);
+    defer file.close();
+
+    const op = rawprogram.Program{
+        .sector_size = 512,
+        .num_sectors = 1,
+        .partition = 0,
+        .start_sector = "8192",
+        .filename = path,
+        .label = "boot",
+    };
+    try env.sess.program(&op, &file);
+    // Two packets (setup + chunk) consumed digest slots after the table.
+    try std.testing.expectEqual(@as(usize, 2), v.frames_sent);
+    try std.testing.expect(!v.statusCheckNeeded());
+    try std.testing.expect(env.h.failure == null);
+}
+
+test "VIP required without tables fails configure clearly" {
+    const marker_doc = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><log value=\"INFO: VIP is enabled, receiving the signed table (8192 bytes)\"/><response value=\"ACK\"/></data>";
+    const nak = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><response value=\"NAK\"/></data>";
+
+    const steps = [_]SimStep{
+        .{ .respond = marker_doc },
+        .{ .any_write = {} }, // configure goes out without a table
+        .{ .respond = nak },
+    };
+
+    const env = try TestEnv.init(std.testing.allocator, &steps);
+    defer env.deinit(std.testing.allocator);
+    env.sess.max_payload_size = 16384;
+    try std.testing.expectError(error.VipRequired, env.sess.configure(.ufs, true));
 }
