@@ -217,7 +217,13 @@ pub const Ui = struct {
     fn toast(self: *Ui, msg: []const u8) void {
         const overlay = self.toast_overlay orelse return;
         var buf: [256]u8 = undefined;
-        const z = std.fmt.bufPrintZ(&buf, "{s}", .{msg}) catch return;
+        const z = std.fmt.bufPrintZ(&buf, "{s}", .{msg}) catch blk: {
+            // Too long for the buffer: truncate rather than lose the message.
+            const n = buf.len - 1;
+            @memcpy(buf[0..n], msg[0..n]);
+            buf[n] = 0;
+            break :blk buf[0..n :0];
+        };
         const t = adw.Toast.new(z.ptr);
         adw.ToastOverlay.addToast(overlay, t);
     }
@@ -1743,7 +1749,16 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
             ui.manager.?.enqueue(.{ .provision_ufs = .{ .path = path, .finalize = finalize } });
         },
         .huawei_app => {
-            if (ui.busy() or ui.manager == null or huawei_maps == null) return;
+            if (ui.busy() or ui.manager == null or huawei_maps == null) {
+                if (huawei_maps) |*list| {
+                    for (list.items) |m| {
+                        ui.alloc.free(m.entry);
+                        ui.alloc.free(m.label);
+                    }
+                    list.deinit(ui.alloc);
+                }
+                return;
+            }
             ui.startJob();
             ui.manager.?.enqueue(.{ .flash_huawei_app = .{
                 .path = ui.huawei_path.?,
@@ -2108,7 +2123,10 @@ fn spawnChipProbe(ui: *Ui) !void {
 
 fn chipProbeRun(ctx: *WorkerCtx) void {
     const ui = ctx.ui;
-    defer ui.alloc.destroy(ctx);
+    defer {
+        if (ctx.target_serial_buf) |b| ui.alloc.free(b);
+        ui.alloc.destroy(ctx);
+    }
     const channel = ui.channel;
     const info = session_mod.chipInfo(ui.alloc, ui.logger, &ui.cancel, ctx.target, 8000) catch |e| {
         var m = ev.FixedStr(512){};
@@ -2222,6 +2240,11 @@ fn onTick(ud: ?*anyopaque) callconv(.c) c_int {
     const ui: *Ui = @ptrCast(@alignCast(ud orelse return 0));
     if (!ui.ready) return 1;
     ui.channel.drain(ui, handleEvent);
+    if (ui.channel.takeDropped() > 0) {
+        // The 256-slot ring overflowed: the UI missed progress/state events
+        // (and possibly a .finished) — say so instead of failing silently.
+        ui.logger.warn("event ring overflowed — some progress events were dropped", .{});
+    }
     drainLogs(ui);
     return 1; // G_SOURCE_CONTINUE
 }

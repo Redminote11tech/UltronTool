@@ -369,6 +369,17 @@ pub const Session = struct {
             if (std.mem.eql(u8, rm, "true")) return true;
         }
 
+        // Some Firehose implementations attach the digest as an attribute on
+        // the response itself rather than emitting it via <log> — try the
+        // known attribute names (port of firehose_sha256_parser's fallback).
+        if (resp.digest_len == 0) {
+            inline for (.{ "Digest", "SHA256", "sha256" }) |name| {
+                if (resp.digest_len == 0) {
+                    if (elem.attr(name)) |v| self.scanDigest(v, resp);
+                }
+            }
+        }
+
         // Some programmers state the memory type they support (bkerler).
         if (elem.attr("MemoryName")) |mn| {
             const n = @min(mn.len, resp.memory_name_buf.len);
@@ -529,8 +540,11 @@ pub const Session = struct {
             }
             // Storage-type fallback (bkerler deltas): adopt the MemoryName
             // the programmer reports, or swap ufs<->emmc when it rejected
-            // ours. One fallback attempt per configure.
-            if (!fallback_tried) {
+            // ours. One fallback attempt per configure. Never under an
+            // active VIP session: qdl's VIP branch makes a single attempt,
+            // and the extra configure would not be covered by the digest
+            // table generated from the replay plan.
+            if (!fallback_tried and !vip_single) {
                 if (resp.memory_name_len > 0) {
                     if (StorageType.fromMemoryName(resp.memory_name_buf[0..resp.memory_name_len])) |st| {
                         if (st != self.storage) {
