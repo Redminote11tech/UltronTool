@@ -41,6 +41,17 @@ fn attrU64(el: *xml.Element, name: []const u8, errors: *u32) u64 {
     };
 }
 
+/// Parse an attribute into an integer field of type T. Out-of-range values
+/// count as a parse error (and yield 0) instead of panicking on @intCast.
+fn attrNum(comptime T: type, el: *xml.Element, name: []const u8, errors: *u32) T {
+    const v = attrU64(el, name, errors);
+    if (v > std.math.maxInt(T)) {
+        errors.* += 1;
+        return 0;
+    }
+    return @intCast(v);
+}
+
 fn attrBool(el: *xml.Element, name: []const u8, errors: *u32) u32 {
     return if (attrU64(el, name, errors) != 0) 1 else 0;
 }
@@ -78,21 +89,21 @@ pub fn load(alloc: std.mem.Allocator, path: []const u8, finalize: bool, logger: 
                 return error.Invalid;
             }
             var c = firehose.UfsCommon{
-                .bNumberLU = @intCast(attrU64(el, "bNumberLU", &errors)),
+                .bNumberLU = attrNum(u32, el, "bNumberLU", &errors),
                 .bBootEnable = attrBool(el, "bBootEnable", &errors),
                 .bDescrAccessEn = attrBool(el, "bDescrAccessEn", &errors),
-                .bInitPowerMode = @intCast(attrU64(el, "bInitPowerMode", &errors)),
-                .bHighPriorityLUN = @intCast(attrU64(el, "bHighPriorityLUN", &errors)),
-                .bSecureRemovalType = @intCast(attrU64(el, "bSecureRemovalType", &errors)),
-                .bInitActiveICCLevel = @intCast(attrU64(el, "bInitActiveICCLevel", &errors)),
-                .wPeriodicRTCUpdate = @intCast(attrU64(el, "wPeriodicRTCUpdate", &errors)),
+                .bInitPowerMode = attrNum(u32, el, "bInitPowerMode", &errors),
+                .bHighPriorityLUN = attrNum(u32, el, "bHighPriorityLUN", &errors),
+                .bSecureRemovalType = attrNum(u32, el, "bSecureRemovalType", &errors),
+                .bInitActiveICCLevel = attrNum(u32, el, "bInitActiveICCLevel", &errors),
+                .wPeriodicRTCUpdate = attrNum(u32, el, "wPeriodicRTCUpdate", &errors),
                 .bConfigDescrLock = attrBool(el, "bConfigDescrLock", &errors),
             };
             // Optional write-booster parameters.
             var wb_errors: u32 = 0;
             c.bWriteBoosterBufferPreserveUserSpaceEn = attrBool(el, "bWriteBoosterBufferPreserveUserSpaceEn", &wb_errors);
             c.bWriteBoosterBufferType = attrBool(el, "bWriteBoosterBufferType", &wb_errors);
-            c.shared_wb_buffer_size_in_kb = @intCast(attrU64(el, "shared_wb_buffer_size_in_kb", &wb_errors));
+            c.shared_wb_buffer_size_in_kb = attrNum(u32, el, "shared_wb_buffer_size_in_kb", &wb_errors);
             c.wb = wb_errors == 0;
             if (errors != 0) {
                 logger.err("errors while parsing UFS common tag in {s}", .{path});
@@ -102,16 +113,16 @@ pub fn load(alloc: std.mem.Allocator, path: []const u8, finalize: bool, logger: 
             have_common = true;
         } else if (el.attr("LUNum") != null) {
             const b = firehose.UfsBody{
-                .LUNum = @intCast(attrU64(el, "LUNum", &errors)),
+                .LUNum = attrNum(u32, el, "LUNum", &errors),
                 .bLUEnable = attrBool(el, "bLUEnable", &errors),
-                .bBootLunID = @intCast(attrU64(el, "bBootLunID", &errors)),
-                .size_in_kb = @intCast(attrU64(el, "size_in_kb", &errors)),
-                .bDataReliability = @intCast(attrU64(el, "bDataReliability", &errors)),
-                .bLUWriteProtect = @intCast(attrU64(el, "bLUWriteProtect", &errors)),
-                .bMemoryType = @intCast(attrU64(el, "bMemoryType", &errors)),
-                .bLogicalBlockSize = @intCast(attrU64(el, "bLogicalBlockSize", &errors)),
-                .bProvisioningType = @intCast(attrU64(el, "bProvisioningType", &errors)),
-                .wContextCapabilities = @intCast(attrU64(el, "wContextCapabilities", &errors)),
+                .bBootLunID = attrNum(u32, el, "bBootLunID", &errors),
+                .size_in_kb = attrNum(u32, el, "size_in_kb", &errors),
+                .bDataReliability = attrNum(u32, el, "bDataReliability", &errors),
+                .bLUWriteProtect = attrNum(u32, el, "bLUWriteProtect", &errors),
+                .bMemoryType = attrNum(u32, el, "bMemoryType", &errors),
+                .bLogicalBlockSize = attrNum(u32, el, "bLogicalBlockSize", &errors),
+                .bProvisioningType = attrNum(u32, el, "bProvisioningType", &errors),
+                .wContextCapabilities = attrNum(u32, el, "wContextCapabilities", &errors),
                 .desc = el.attr("desc"),
             };
             if (errors != 0) {
@@ -124,7 +135,7 @@ pub fn load(alloc: std.mem.Allocator, path: []const u8, finalize: bool, logger: 
                 logger.err("multiple UFS finalizing tags found in {s}", .{path});
                 return error.Invalid;
             }
-            cfg.epilogue = .{ .LUNtoGrow = @intCast(attrU64(el, "LUNtoGrow", &errors)) };
+            cfg.epilogue = .{ .LUNtoGrow = attrNum(u32, el, "LUNtoGrow", &errors) };
             if (errors != 0) {
                 logger.err("errors while parsing UFS finalizing tag in {s}", .{path});
                 return error.Invalid;
@@ -241,6 +252,27 @@ test "ufs load rejects finalize mismatch" {
     const path = try tmp.filePath(&pbuf, "provision.xml");
 
     try std.testing.expectError(error.Mismatch, load(std.testing.allocator, path, true, l));
+}
+
+test "ufs load rejects out-of-range attribute values instead of panicking" {
+    var tmp = try fileio.TmpDir.init();
+    defer tmp.cleanup();
+    // bInitPowerMode fits a u64 but not the u32 field the descriptor uses.
+    try tmp.writeFile("provision.xml",
+        \\<?xml version="1.0" ?>
+        \\<provision>
+        \\<ufs bNumberLU="4" bBootEnable="1" bDescrAccessEn="0" bInitPowerMode="99999999999" bHighPriorityLUN="1" bSecureRemovalType="0" bInitActiveICCLevel="0" wPeriodicRTCUpdate="0" bConfigDescrLock="0"/>
+        \\<ufs LUNum="0" bLUEnable="1" bBootLunID="0" size_in_kb="1024" bDataReliability="1" bLUWriteProtect="0" bMemoryType="3" bLogicalBlockSize="12" bProvisioningType="0" wContextCapabilities="0"/>
+        \\<ufs LUNtoGrow="1" commit="0"/>
+        \\</provision>
+    );
+
+    const l = testLogger();
+    defer std.testing.allocator.destroy(l);
+    var pbuf: [176]u8 = undefined;
+    const path = try tmp.filePath(&pbuf, "provision.xml");
+
+    try std.testing.expectError(error.Invalid, load(std.testing.allocator, path, false, l));
 }
 
 test "ufs execute runs validation then commit against the firehose session" {
