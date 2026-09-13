@@ -94,6 +94,7 @@ pub const Ui = struct {
     pending_writes: std.ArrayList(PendingWrite) = .empty,
     xml_paths: std.ArrayList([]u8) = .empty,
     storage: firehose.StorageType = .ufs,
+    skip_storage_init: bool = false,
     allow_missing: bool = false,
 
     // Widget references.
@@ -115,6 +116,8 @@ pub const Ui = struct {
     probe_btn: ?*gtk.Button = null,
     connect_btn: ?*gtk.Button = null,
     storage_drop: ?*gtk.DropDown = null,
+    skip_init_sw: ?*gtk.Switch = null,
+    skip_init_row: ?*gtk.Widget = null,
 
     loader_section: ?*gtk.Widget = null,
     loader_row: ?*adw.ActionRow = null,
@@ -497,6 +500,16 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     ui.storage_drop = storage_drop;
     adw.PreferencesGroup.add(dev_group, storage_row.as(gtk.Widget));
 
+    const skip_init_row = adw.ActionRow.new();
+    rowTitle(skip_init_row, "Skip storage init");
+    adw.ActionRow.setSubtitle(skip_init_row, "Only for unprovisioned UFS devices — leave off otherwise");
+    const skip_init_sw = gtk.Switch.new();
+    gtk.Widget.setValign(skip_init_sw.as(gtk.Widget), .center);
+    adw.ActionRow.addSuffix(skip_init_row, skip_init_sw.as(gtk.Widget));
+    ui.skip_init_sw = skip_init_sw;
+    ui.skip_init_row = skip_init_row.as(gtk.Widget);
+    adw.PreferencesGroup.add(dev_group, skip_init_row.as(gtk.Widget));
+
     const chip_row = adw.ActionRow.new();
     rowTitle(chip_row, "Sahara chip identity");
     const probe_btn = gtk.Button.newWithLabel("Read chip info");
@@ -794,6 +807,8 @@ fn refreshMainPage(ui: *Ui) void {
     // The chip probe and Connect only make sense before a session exists.
     if (ui.dev_chip_label) |l| gtk.Widget.setVisible(l.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
     if (ui.storage_drop) |d| gtk.Widget.setVisible(d.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
+    if (ui.skip_init_sw) |sw| gtk.Widget.setVisible(sw.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
+    if (ui.skip_init_row) |row| gtk.Widget.setVisible(row.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
     if (ui.connect_btn) |b| gtk.Widget.setVisible(b.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
 
     if (has_device) {
@@ -1073,6 +1088,7 @@ fn readStorageSelection(ui: *Ui) void {
         const idx = gtk.DropDown.getSelected(d);
         ui.storage = storage_values[@min(idx, storage_values.len - 1)];
     }
+    if (ui.skip_init_sw) |sw| ui.skip_storage_init = gtk.Switch.getActive(sw) != 0;
     if (ui.allow_missing_sw) |sw| ui.allow_missing = gtk.Switch.getActive(sw) != 0;
 }
 
@@ -1095,7 +1111,7 @@ fn onConnectClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     if (ui.busy() or ui.manager == null) return;
     readStorageSelection(ui);
     ui.startJob();
-    ui.manager.?.enqueue(.{ .connect = .{ .storage = ui.storage, .vip_dir = ui.vip_dir } });
+    ui.manager.?.enqueue(.{ .connect = .{ .storage = ui.storage, .skip_storage_init = ui.skip_storage_init, .vip_dir = ui.vip_dir } });
 }
 
 fn onPickLoader(_: *gtk.Button, ui: *Ui) callconv(.c) void {
@@ -1141,6 +1157,7 @@ const DigestGenCtx = struct {
     xmls: [][]u8,
     payload_size: usize,
     storage: firehose.StorageType,
+    skip_storage_init: bool,
 };
 
 fn digestCtxFree(ctx: *DigestGenCtx) void {
@@ -1159,9 +1176,9 @@ fn digestGenRun(ctx: *DigestGenCtx) void {
         .xml_files = ctx.xmls,
         .payload_size = ctx.payload_size,
         .storage = ctx.storage,
-        // The GUI connect flow always runs with SkipStorageInit=false, so
-        // the replay must use the same value for byte-identical packets.
-        .skip_storage_init = false,
+        // The replay must send the same SkipStorageInit as the flashing run
+        // for byte-identical packets.
+        .skip_storage_init = ctx.skip_storage_init,
     }) catch |e| {
         var mbuf: [256]u8 = undefined;
         var m = ev.FixedStr(512){};
@@ -1195,7 +1212,7 @@ fn onDigestGenerate(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     }
 
     const ctx = ui.alloc.create(DigestGenCtx) catch return;
-    ctx.* = .{ .ui = ui, .dir = undefined, .xmls = undefined, .payload_size = payload, .storage = ui.storage };
+    ctx.* = .{ .ui = ui, .dir = undefined, .xmls = undefined, .payload_size = payload, .storage = ui.storage, .skip_storage_init = ui.skip_storage_init };
     ctx.dir = ui.alloc.dupe(u8, dir) catch {
         ui.alloc.destroy(ctx);
         return;
@@ -1237,6 +1254,7 @@ fn onUploadLoaderClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     ui.manager.?.enqueue(.{ .upload_loader = .{
         .programmer = path,
         .storage = ui.storage,
+        .skip_storage_init = ui.skip_storage_init,
         .vip_dir = ui.vip_dir,
     } });
 }

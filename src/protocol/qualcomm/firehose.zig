@@ -33,6 +33,16 @@ pub const StorageType = enum {
             .nvme => "nvme",
         };
     }
+
+    pub fn fromMemoryName(s: []const u8) ?StorageType {
+        inline for (@typeInfo(StorageType).@"enum".fields) |f| {
+            const st: StorageType = @enumFromInt(f.value);
+            if (std.ascii.eqlIgnoreCase(s, st.memoryName())) return st;
+        }
+        // Programmers write "eMMC"/"UFS" with random casing — the
+        // case-insensitive compare above already covers those spellings.
+        return null;
+    }
 };
 
 pub const default_max_payload_size: usize = 1048576;
@@ -44,6 +54,11 @@ pub const Response = struct {
     /// A <log> line announced a write failure (UFS error) — the device may
     /// keep consuming the data phase while refusing every write.
     error_seen: bool = false,
+    /// A <log> line said the configure MemoryName is not supported.
+    memory_name_rejected: bool = false,
+    /// MemoryName the programmer reports it actually supports (if any).
+    memory_name_buf: [12]u8 = undefined,
+    memory_name_len: usize = 0,
     /// Payload size reported by the target (either attribute).
     max_payload_size: ?u64 = null,
     /// 64-char hex digest, when the responses contained one (getsha256digest).
@@ -284,6 +299,13 @@ pub const Session = struct {
                 {
                     resp.error_seen = true;
                 }
+                // bkerler-delta: programmers that lack a storage type say
+                // so in a log line ("Not support configure MemoryName …").
+                if (!resp.memory_name_rejected and
+                    std.mem.indexOf(u8, v, "Not support configure MemoryName") != null)
+                {
+                    resp.memory_name_rejected = true;
+                }
                 // VIP programmers announce their digest-table policy in the
                 // startup logs (qdl's firehose_check_vip_marker).
                 if (!self.programmer_requires_vip and
@@ -306,6 +328,13 @@ pub const Session = struct {
 
         if (elem.attr("rawmode")) |rm| {
             if (std.mem.eql(u8, rm, "true")) return true;
+        }
+
+        // Some programmers state the memory type they support (bkerler).
+        if (elem.attr("MemoryName")) |mn| {
+            const n = @min(mn.len, resp.memory_name_buf.len);
+            @memcpy(resp.memory_name_buf[0..n], mn[0..n]);
+            resp.memory_name_len = n;
         }
 
         if (resp.kind == .ack) {
@@ -449,6 +478,7 @@ pub const Session = struct {
         const deadline = monoNow() + 5 * std.time.us_per_s;
 
         var resp: Response = .{ .kind = .timeout };
+        var fallback_tried = false;
         while (true) {
             if (self.cancelled()) return Error.Cancelled;
             resp = try self.sendConfigure(self.max_payload_size, skip_storage_init);
@@ -457,6 +487,27 @@ pub const Session = struct {
             if (self.programmer_requires_vip and self.vip == null) {
                 self.logger.err("programmer requires VIP, but no digest tables were provided", .{});
                 return Error.VipRequired;
+            }
+            // Storage-type fallback (bkerler deltas): adopt the MemoryName
+            // the programmer reports, or swap ufs<->emmc when it rejected
+            // ours. One fallback attempt per configure.
+            if (!fallback_tried) {
+                if (resp.memory_name_len > 0) {
+                    if (StorageType.fromMemoryName(resp.memory_name_buf[0..resp.memory_name_len])) |st| {
+                        if (st != self.storage) {
+                            self.logger.info("firehose: programmer supports {s} — retrying configure", .{st.memoryName()});
+                            self.storage = st;
+                            fallback_tried = true;
+                            continue;
+                        }
+                    }
+                }
+                if (resp.memory_name_rejected and (self.storage == .ufs or self.storage == .emmc)) {
+                    self.storage = if (self.storage == .ufs) .emmc else .ufs;
+                    fallback_tried = true;
+                    self.logger.info("firehose: programmer rejected the memory type — retrying configure as {s}", .{self.storage.memoryName()});
+                    continue;
+                }
             }
             // A NAK that carries MaxPayloadSizeToTargetInBytes is the
             // programmer proposing a size it can handle (e.g. 16 KiB) — qdl's
@@ -1333,4 +1384,41 @@ test "VIP required without tables fails configure clearly" {
     defer env.deinit(std.testing.allocator);
     env.sess.max_payload_size = 16384;
     try std.testing.expectError(error.VipRequired, env.sess.configure(.ufs, true));
+}
+
+test "configure falls back to the other memory type on rejection" {
+    const reject_ufs = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><log value=\"ERROR: Not support configure MemoryName ufs\"/><response value=\"NAK\"/></data>";
+    const ack_emmc = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><response value=\"ACK\" MaxPayloadSizeToTargetInBytes=\"1048576\"/></data>";
+
+    const steps = [_]SimStep{
+        .{ .expect_write = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><configure MemoryName=\"ufs\" MaxPayloadSizeToTargetInBytes=\"1048576\" Verbose=\"0\" ZlpAwareHost=\"1\" SkipStorageInit=\"1\" /></data>" },
+        .{ .respond = reject_ufs },
+        .{ .expect_write = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><configure MemoryName=\"emmc\" MaxPayloadSizeToTargetInBytes=\"1048576\" Verbose=\"0\" ZlpAwareHost=\"1\" SkipStorageInit=\"1\" /></data>" },
+        .{ .respond = ack_emmc },
+    };
+
+    const env = try TestEnv.init(std.testing.allocator, &steps);
+    defer env.deinit(std.testing.allocator);
+
+    try env.sess.configure(.ufs, true);
+    try std.testing.expectEqual(StorageType.emmc, env.sess.storage);
+    try std.testing.expect(env.h.failure == null);
+}
+
+test "configure adopts the MemoryName the programmer reports" {
+    const report = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><response value=\"ACK\" MemoryName=\"spinor\" MaxPayloadSizeToTargetInBytes=\"1048576\"/></data>";
+
+    const steps = [_]SimStep{
+        .{ .expect_write = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><configure MemoryName=\"ufs\" MaxPayloadSizeToTargetInBytes=\"1048576\" Verbose=\"0\" ZlpAwareHost=\"1\" SkipStorageInit=\"1\" /></data>" },
+        .{ .respond = report },
+        .{ .expect_write = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><configure MemoryName=\"spinor\" MaxPayloadSizeToTargetInBytes=\"1048576\" Verbose=\"0\" ZlpAwareHost=\"1\" SkipStorageInit=\"1\" /></data>" },
+        .{ .respond = report },
+    };
+
+    const env = try TestEnv.init(std.testing.allocator, &steps);
+    defer env.deinit(std.testing.allocator);
+
+    try env.sess.configure(.ufs, true);
+    try std.testing.expectEqual(StorageType.spinor, env.sess.storage);
+    try std.testing.expect(env.h.failure == null);
 }

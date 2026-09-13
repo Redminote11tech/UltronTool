@@ -128,7 +128,6 @@ against an overall deadline; concatenated XML docs split on `<?xml` / `</data>`;
 ### 2.3 bkerler deltas worth honoring
 
 - `nop` (`<data><nop /></data>`) as probe/handshake.
-- If `erase` unsupported by programmer: emit `<program>` streaming zeros instead.
 - MemoryName fallback eMMC → UFS on "Not support configure MemoryName" errors.
 - `MaxXMLSizeInBytes`, `MaxPayloadSizeFromTargetInBytes`, Version, TargetName are
   parsed from the configure *response*, not sent.
@@ -209,7 +208,7 @@ loader stage; VIP requires the fresh-boot loader-upload flow.
 | Feature | Status | Notes |
 |---|---|---|
 | Sahara loader upload (v1/v2/v3 devices) | ✅ | Host replies version 2 / compatible 1 with the device's requested mode — qdl's policy, works for all versions; chip identity adapts (HW_ID pre-v3, CHIP_ID_V3 v3+) |
-| Firehose configure negotiation | ✅ | 1 MiB offer; ACK-with-Supported and NAK-with-Bytes size hints both renegotiated once |
+| Firehose configure negotiation | ✅ | 1 MiB offer; ACK-with-Supported and NAK-with-Bytes size hints both renegotiated once; storage-type fallback (ufs↔emmc on rejection, or adopt the MemoryName the programmer reports — bkerler deltas) |
 | Sector-size probing | ✅ | 512 → 4096 trial reads, storage-info fallback |
 | rawprogram/patch flashing | ✅ | qdl op-list order, set-bootable, allow-missing |
 | Partition browser + per-partition read/write | ✅ | GPT per LUN, CRC-verified |
