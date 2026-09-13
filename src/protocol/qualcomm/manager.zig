@@ -725,17 +725,23 @@ pub const Manager = struct {
 
     /// Store the requested device target (serial string owned).
     fn rememberTarget(self: *Manager, target: ?transport.Target) void {
-        if (self.target_serial_owned) |s| {
-            self.alloc.free(s);
+        const t = target orelse {
+            if (self.target_serial_owned) |s| self.alloc.free(s);
             self.target_serial_owned = null;
-        }
-        self.target_saved = null;
-        const t = target orelse return;
+            self.target_saved = null;
+            return;
+        };
+        // Copy the serial BEFORE freeing the previous one: recovery flows
+        // re-arm rememberTarget from self.target_saved itself, so the source
+        // may be the very string we are about to release.
+        var new_serial: ?[]u8 = null;
         if (t.serial) |s| {
-            self.target_serial_owned = self.alloc.dupe(u8, s) catch null;
+            new_serial = self.alloc.dupe(u8, s) catch null;
         }
+        if (self.target_serial_owned) |s| self.alloc.free(s);
+        self.target_serial_owned = new_serial;
         self.target_saved = .{
-            .serial = self.target_serial_owned,
+            .serial = new_serial,
             .bus = t.bus,
             .devnum = t.devnum,
         };
