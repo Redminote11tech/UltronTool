@@ -58,7 +58,10 @@ const ChooserKind = union(enum) {
     ramdump_dir: void,
     ufs_xml: void,
     huawei_app_file: void,
-    read_partition: ev.PartitionRow,
+    /// The row AND the LUN it came from are frozen at chooser-open time:
+    /// using the dropdown's LUN at response time could read LUN A's offsets
+    /// from LUN B.
+    read_partition: struct { row: ev.PartitionRow, lun: u32 },
     write_partition: ev.PartitionRow,
 };
 
@@ -73,6 +76,9 @@ const digest_payload_names: [digest_payload_values.len + 1]?[*:0]const u8 = .{
 const PendingWrite = struct {
     row: ev.PartitionRow,
     path: []u8, // owned by Ui
+    /// LUN the row came from, captured at queue time — the dropdown may
+    /// point elsewhere by the time the batch is applied.
+    lun: u32,
 };
 
 pub const Ui = struct {
@@ -1212,7 +1218,7 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
             refreshXmlRow(ui);
             gtk.Widget.setSensitive(ui.flash_xml_btn.?.as(gtk.Widget), @intFromBool(!ui.busy()));
         },
-        .read_partition => |row| {
+        .read_partition => |rp| {
             if (ui.busy()) {
                 ui.toast("Another operation is running — wait for it to finish");
                 return;
@@ -1220,15 +1226,15 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
             ui.startJob();
             ui.manager.?.enqueue(.{ .read_partition = .{
                 .path = path,
-                .first_lba = row.first_lba,
-                .num_sectors = row.sectors(),
-                .lun = currentLun(ui),
-                .label = row.name.slice(),
+                .first_lba = rp.row.first_lba,
+                .num_sectors = rp.row.sectors(),
+                .lun = rp.lun,
+                .label = rp.row.name.slice(),
             } });
         },
         .write_partition => |row| {
             const dup = ui.alloc.dupe(u8, path) catch return;
-            ui.pending_writes.append(ui.alloc, .{ .row = row, .path = dup }) catch {
+            ui.pending_writes.append(ui.alloc, .{ .row = row, .path = dup, .lun = currentLun(ui) }) catch {
                 ui.alloc.free(dup);
                 return;
             };
@@ -1530,7 +1536,7 @@ fn onReadClicked(_: *gtk.Button, ctx: *RowCtx) callconv(.c) void {
     }
     var name_buf: [96]u8 = undefined;
     const suggested = std.fmt.bufPrintZ(&name_buf, "{s}.img", .{ctx.row.name.slice()}) catch "partition.img";
-    openChooser(ui, .{ .read_partition = ctx.row }, "Save partition backup", true, suggested);
+    openChooser(ui, .{ .read_partition = .{ .row = ctx.row, .lun = currentLun(ui) } }, "Save partition backup", true, suggested);
 }
 
 fn onWriteClicked(_: *gtk.Button, ctx: *RowCtx) callconv(.c) void {
@@ -1697,7 +1703,7 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
                     .path = pw.path,
                     .first_lba = pw.row.first_lba,
                     .max_sectors = pw.row.sectors(),
-                    .lun = currentLun(ui),
+                    .lun = pw.lun,
                     .label = pw.row.name.slice(),
                 } });
             }
@@ -2322,6 +2328,10 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
                 ui.parts = null;
                 if (ui.parts_list) |list| listBoxClear(list);
                 gtk.Label.setText(ui.parts_empty.?, "Not connected");
+                // Queued writes belong to the partition table of the device
+                // that just went away — carrying them into the next session
+                // would flash them at the wrong device's offsets.
+                clearPendingWrites(ui);
             }
             refreshMainPage(ui);
         },
