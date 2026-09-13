@@ -530,9 +530,11 @@ pub const Session = struct {
 
     /// Port of firehose_program: send <program>, stream the file in
     /// max_payload_size chunks (zero-padded to sector boundaries), consume
-    /// the final ACK.
-    pub fn program(self: *Session, op: *const rawprogram.Program, file: *fileio.File) Error!void {
-        const fname = op.filename orelse return;
+    /// the final ACK. Returns the number of sectors actually streamed (file
+    /// size, clamped by the op's num_partition_sectors) so callers can
+    /// verify the write via getsha256digest.
+    pub fn program(self: *Session, op: *const rawprogram.Program, file: *fileio.File) Error!u64 {
+        const fname = op.filename orelse return 0;
         var zlp_timeout: u32 = 10000;
         // ZLP has been measured to take up to 15 seconds on SPINOR devices.
         if (self.storage == .spinor) zlp_timeout = 60000;
@@ -683,6 +685,7 @@ pub const Session = struct {
             }
         }
         self.logger.info("flashed \"{s}\" successfully", .{op.label orelse fname});
+        return num_sectors;
     }
 
     /// Port of firehose_erase. num_sectors == 0 erases the full physical
@@ -1117,7 +1120,7 @@ test "program streams file chunks and consumes final ack" {
         .filename = path,
         .label = "boot",
     };
-    try env.sess.program(&op, &file);
+    _ = try env.sess.program(&op, &file);
     try std.testing.expect(env.h.failure == null);
 }
 
@@ -1309,7 +1312,7 @@ test "VIP: program consumes table slots for setup and data packets" {
         .filename = path,
         .label = "boot",
     };
-    try env.sess.program(&op, &file);
+    _ = try env.sess.program(&op, &file);
     // Two packets (setup + chunk) consumed digest slots after the table.
     try std.testing.expectEqual(@as(usize, 2), v.frames_sent);
     try std.testing.expect(!v.statusCheckNeeded());

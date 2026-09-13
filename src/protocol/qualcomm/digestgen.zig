@@ -91,7 +91,7 @@ pub fn run(alloc: std.mem.Allocator, logger: *log.Logger, opts: Options) !void {
                     logger.info("digest replay: programming {s}", .{fname});
                     var file = try fileio.File.open(fname);
                     defer file.close();
-                    try sess.program(p, &file);
+                    _ = try sess.program(p, &file);
                 },
                 .erase => |*e| {
                     logger.info("digest replay: erasing {s}+{d}", .{ e.start_sector, e.num_sectors });

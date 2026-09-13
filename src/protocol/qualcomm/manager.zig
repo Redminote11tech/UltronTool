@@ -918,9 +918,22 @@ pub const Manager = struct {
 
         const program_result = fh.program(&op, &file);
         fh.progress = saved_progress; // restore BEFORE any teardown (fh dies there)
-        if (program_result) |_| {
+        if (program_result) |written| {
+            var msg_buf: [256]u8 = undefined;
             var msg = ev.FixedStr(512){};
-            msg.set(std.fmt.bufPrint(&jp.prefix, "{s}: write finished", .{label}) catch "write finished");
+            switch (self.verifyWrite(fh, &op, &file, written, label)) {
+                .verified => {
+                    msg.set(std.fmt.bufPrint(&msg_buf, "{s}: write finished (digest verified)", .{label}) catch "write finished");
+                },
+                .mismatch => {
+                    msg.set(std.fmt.bufPrint(&msg_buf, "{s}: write finished — DIGEST MISMATCH", .{label}) catch "digest mismatch");
+                    self.channel.push(.{ .finished = .{ .success = false, .message = msg } });
+                    return;
+                },
+                .unavailable => {
+                    msg.set(std.fmt.bufPrint(&jp.prefix, "{s}: write finished", .{label}) catch "write finished");
+                },
+            }
             self.channel.push(.{ .finished = .{ .success = true, .message = msg } });
         } else |e| switch (e) {
             Error.WriteFailed => {
@@ -971,6 +984,77 @@ pub const Manager = struct {
         var msg_buf: [256]u8 = undefined;
         msg.set(std.fmt.bufPrint(&msg_buf, "{s}: erase finished", .{label}) catch "erase finished");
         self.channel.push(.{ .finished = .{ .success = true, .message = msg } });
+    }
+
+    /// SHA-256 of exactly what the wire received: the file bytes from
+    /// file_offset onward, zero-padded to written_sectors × sector_size.
+    fn localFileDigestHex(alloc: std.mem.Allocator, file: *fileio.File, file_offset_sectors: u64, sector_size: u64, written_sectors: u64, out: *[64]u8) !void {
+        var sha = Sha256.init(.{});
+        try file.seekTo(file_offset_sectors * sector_size);
+        const chunk = try alloc.alloc(u8, 1024 * 1024);
+        defer alloc.free(chunk);
+
+        const total = written_sectors * sector_size;
+        var hashed: u64 = 0;
+        while (hashed < total) {
+            const want: usize = @intCast(@min(@as(u64, chunk.len), total - hashed));
+            const got = try file.readAll(chunk[0..want]);
+            // Short read = EOF: the wire stream zero-pads the residue.
+            if (got < want) @memset(chunk[got..want], 0);
+            sha.update(chunk[0..want]);
+            hashed += want;
+        }
+
+        var digest: [32]u8 = undefined;
+        sha.final(&digest);
+        const hex = "0123456789abcdef";
+        for (digest, 0..) |b, i| {
+            out[i * 2] = hex[b >> 4];
+            out[i * 2 + 1] = hex[b & 0xf];
+        }
+    }
+
+    const WriteVerify = enum { verified, mismatch, unavailable };
+
+    /// Ask the programmer for the SHA-256 of the freshly written device
+    /// range and compare it with the local image's digest (qdl's
+    /// getsha256digest path). Unavailable = verification could not run and
+    /// the write result stands on its own.
+    fn verifyWrite(self: *Manager, fh: *firehose.Session, op: *const rawprogram.Program, file: *fileio.File, written: u64, label: []const u8) WriteVerify {
+        if (written == 0) return .unavailable;
+        if (fh.vip != null) {
+            self.logger.info("digest verification skipped: VIP sessions cannot issue extra commands", .{});
+            return .unavailable;
+        }
+
+        var dev_hex: [64]u8 = undefined;
+        const digest_op = rawprogram.Program{
+            .sector_size = op.sector_size,
+            .num_sectors = @intCast(written),
+            .partition = op.partition,
+            .start_sector = op.start_sector,
+        };
+        const got = fh.getSha256Digest(&digest_op, &dev_hex) catch |e| {
+            self.logger.warn("device digest request failed: {s}", .{@errorName(e)});
+            return .unavailable;
+        };
+        if (!got) {
+            self.logger.warn("programmer did not return a SHA-256 digest for {s}", .{label});
+            return .unavailable;
+        }
+
+        var local_hex: [64]u8 = undefined;
+        localFileDigestHex(self.alloc, file, op.file_offset, op.sector_size, written, &local_hex) catch |e| {
+            self.logger.warn("local digest computation failed: {s}", .{@errorName(e)});
+            return .unavailable;
+        };
+
+        if (std.ascii.eqlIgnoreCase(&dev_hex, &local_hex)) {
+            self.logger.info("✓ {s}: device SHA-256 matches the image", .{label});
+            return .verified;
+        }
+        self.logger.err("✗ {s}: DIGEST MISMATCH — device {s} vs local {s}", .{ label, dev_hex, local_hex });
+        return .mismatch;
     }
 
     fn flashXml(self: *Manager, files: []const []const u8, allow_missing: bool) void {
@@ -1029,10 +1113,17 @@ pub const Manager = struct {
                             return;
                         };
                         defer file.close();
-                        fh.program(p, &file) catch |e| {
+                        const written = fh.program(p, &file) catch |e| {
                             self.sessionError(e);
                             return;
                         };
+                        switch (self.verifyWrite(fh, p, &file, written, p.label orelse fname)) {
+                            .verified, .unavailable => {},
+                            .mismatch => {
+                                pushFinished(self.channel, false, "digest mismatch — batch stopped");
+                                return;
+                            },
+                        }
                     },
                     .erase => |*e| {
                         self.logger.info("erasing partition {s} ({d} sectors)", .{ e.start_sector, e.num_sectors });
@@ -1197,6 +1288,144 @@ const Collector = struct {
         self.finished.deinit(heap);
     }
 };
+
+/// Shared connect+write harness: firehose-running device, GPT loaded, then a
+/// one-sector write of `img` to LBA 8192 with a getsha256digest check whose
+/// log line carries `digest_hex`.
+fn runVerifyCase(alloc: std.mem.Allocator, channel: *EventChannel, logger: *log.Logger, cancel: *const std.atomic.Value(bool), img: *const [512]u8, digest_hex: *const [64]u8, collector: *Collector) !void {
+    var tmp = try fileio.TmpDir.init();
+    defer tmp.cleanup();
+    try tmp.writeFile("cache.img", img);
+    var pbuf: [176]u8 = undefined;
+    const img_path = try tmp.filePath(&pbuf, "cache.img");
+
+    var digest_xml_buf: [256]u8 = undefined;
+    const digest_xml = try std.fmt.bufPrint(&digest_xml_buf, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><log value=\"SHA-256 digest: {s}\"/><response value=\"ACK\"/></data>", .{digest_hex});
+
+    var gpt_buf: [4096]u8 = undefined;
+    _ = gpt.sampleGpt(512, &gpt_buf);
+    const head = gpt_buf[0..1024];
+    const ents = gpt_buf[1024..1536];
+
+    const steps = [_]SimStep{
+        .{ .respond = nop_xml },
+        .{ .any_write = {} },
+        .{ .respond = ack },
+        .{ .any_write = {} },
+        .{ .respond = storage_info_log },
+        .{ .any_write = {} },
+        .{ .respond = rawmode_ack },
+        .{ .respond = head },
+        .{ .respond = ack },
+        .{ .any_write = {} },
+        .{ .respond = rawmode_ack },
+        .{ .respond = ents },
+        .{ .respond = ack },
+        // write: program setup → data → final ACK
+        .{ .any_write = {} },
+        .{ .respond = ack },
+        .{ .expect_write = img },
+        .{ .respond = ack },
+        // verification: getsha256digest → digest log + ACK
+        .{ .any_write = {} },
+        .{ .respond = digest_xml },
+    };
+
+    var harness = try SimHarness.init(heap, &steps);
+    defer harness.deinit();
+    var opener = SimOpener{ .harness = &harness };
+
+    const mgr = try Manager.init(alloc, logger, channel, cancel, &SimOpener.open, &opener);
+    defer mgr.shutdown();
+    try mgr.start();
+
+    mgr.enqueue(.{ .connect = .{ .storage = .ufs, .skip_storage_init = true } });
+
+    var deadline: usize = 0;
+    while (deadline < 300) : (deadline += 1) {
+        channel.drain(collector, Collector.cb);
+        if (collector.partitions != null) break;
+        glib.usleep(10 * std.time.us_per_ms);
+    }
+    if (collector.partitions == null) return error.ConnectFailed;
+
+    mgr.enqueue(.{ .write_partition = .{
+        .path = img_path,
+        .first_lba = 8192,
+        .max_sectors = 1,
+        .lun = 0,
+        .label = "cache",
+    } });
+    deadline = 0;
+    while (deadline < 300) : (deadline += 1) {
+        channel.drain(collector, Collector.cb);
+        var newest: ?ev.Finished = null;
+        for (collector.finished.items) |f| newest = f;
+        if (newest != null and std.mem.endsWith(u8, newest.?.message.slice(), "finished")) break;
+        if (newest != null and std.mem.indexOf(u8, newest.?.message.slice(), "MISMATCH") != null) break;
+        glib.usleep(10 * std.time.us_per_ms);
+    }
+}
+
+test "manager: write_partition verifies the device digest" {
+    const channel = try heap.create(EventChannel);
+    channel.* = .{};
+    defer heap.destroy(channel);
+    var cancel = std.atomic.Value(bool).init(false);
+
+    const logger = try heap.create(log.Logger);
+    logger.* = .{ .mirror_stderr = false };
+
+    var img: [512]u8 = undefined;
+    for (&img, 0..) |*b, i| b.* = @truncate(i * 5 + 1);
+    var sha = std.crypto.hash.sha2.Sha256.init(.{});
+    sha.update(&img);
+    var dg: [32]u8 = undefined;
+    sha.final(&dg);
+    var digest_hex: [64]u8 = undefined;
+    const hex_chars = "0123456789abcdef";
+    for (dg, 0..) |b, i| {
+        digest_hex[i * 2] = hex_chars[b >> 4];
+        digest_hex[i * 2 + 1] = hex_chars[b & 0xf];
+    }
+
+    var collector = Collector{};
+    defer collector.deinit();
+    try runVerifyCase(std.testing.allocator, channel, logger, &cancel, &img, &digest_hex, &collector);
+
+    var ok = false;
+    for (collector.finished.items) |f| {
+        if (std.mem.eql(u8, f.message.slice(), "cache: write finished (digest verified)")) ok = true;
+    }
+    if (!ok) {
+        for (collector.finished.items) |f| std.debug.print("DBG finished: success={} msg={s}\n", .{ f.success, f.message.slice() });
+        return error.TestExpectedEqual;
+    }
+}
+
+test "manager: digest mismatch fails the write" {
+    const channel = try heap.create(EventChannel);
+    channel.* = .{};
+    defer heap.destroy(channel);
+    var cancel = std.atomic.Value(bool).init(false);
+
+    const logger = try heap.create(log.Logger);
+    logger.* = .{ .mirror_stderr = false };
+
+    var img: [512]u8 = undefined;
+    for (&img, 0..) |*b, i| b.* = @truncate(i * 5 + 1);
+    var wrong_digest: [64]u8 = @splat('f');
+
+    var collector = Collector{};
+    defer collector.deinit();
+    try runVerifyCase(std.testing.allocator, channel, logger, &cancel, &img, &wrong_digest, &collector);
+
+    var saw_mismatch = false;
+    for (collector.finished.items) |f| {
+        if (!f.success and std.mem.indexOf(u8, f.message.slice(), "DIGEST MISMATCH") != null) saw_mismatch = true;
+    }
+    try std.testing.expect(saw_mismatch);
+}
 
 test "manager: already-in-firehose connect loads partitions" {
     const channel = try heap.create(EventChannel);

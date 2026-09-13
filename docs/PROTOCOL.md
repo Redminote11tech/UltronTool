@@ -213,7 +213,7 @@ loader stage; VIP requires the fresh-boot loader-upload flow.
 | Sector-size probing | ✅ | 512 → 4096 trial reads, storage-info fallback |
 | rawprogram/patch flashing | ✅ | qdl op-list order, set-bootable, allow-missing |
 | Partition browser + per-partition read/write | ✅ | GPT per LUN, CRC-verified |
-| Write verification (getsha256digest) | ✅ | Local SHA-256 of the streamed image vs device digest |
+| Write verification (getsha256digest) | ✅ | after every program op (partition write + rawprogram): device SHA-256 of the written range vs local image digest; skips VIP sessions (extra packet would desync the digest table) |
 | Drain-to-complete on refused writes | ✅ | Protected partitions fail cleanly; session survives; the drain streams the image's own remaining bytes (not zeros), so whatever lands past a refusal is real image content |
 | Stuck-programmer recovery | ✅ | nop probe → USB reset → fresh EDL → auto loader re-upload |
 | Multi-image Sahara archives (zip / id:file) | ⏳ planned | qdl decode_programmer |
