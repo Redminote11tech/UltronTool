@@ -14,7 +14,7 @@ cd "$(dirname "$0")/.."
 
 PKGNAME=ultron
 PKGVER=0.3.0
-PKGREL=1
+PKGREL=2
 ARCH=$(uname -m)
 STAGE="${STAGE:-$(mktemp -d)}"
 

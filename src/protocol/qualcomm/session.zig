@@ -51,7 +51,7 @@ pub fn chipInfo(
     target: ?transport.Target,
     wait_ms: u32,
 ) !sahara.ChipInfo {
-    var usb_dev = try usb.open(&usb_ids.policy, target, wait_ms, logger, alloc);
+    var usb_dev = try usb.open(&usb_ids.policy, target, wait_ms, logger, alloc, cancel);
     defer usb_dev.close();
     var io = transport.Io.init(alloc, usb_dev.transport());
     defer io.deinit();
@@ -74,7 +74,7 @@ pub fn ramDump(
     dir: []const u8,
     filter: ?[]const u8,
 ) !u32 {
-    var usb_dev = try usb.open(&usb_ids.policy, target, wait_ms, logger, alloc);
+    var usb_dev = try usb.open(&usb_ids.policy, target, wait_ms, logger, alloc, cancel);
     defer usb_dev.close();
     var io = transport.Io.init(alloc, usb_dev.transport());
     defer io.deinit();

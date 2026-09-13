@@ -120,6 +120,7 @@ pub const Ui = struct {
     dev_path_label: ?*gtk.Label = null,
     dev_chip_label: ?*gtk.Label = null,
     probe_btn: ?*gtk.Button = null,
+    chip_row: ?*gtk.Widget = null,
     connect_btn: ?*gtk.Button = null,
     storage_drop: ?*gtk.DropDown = null,
     device_sel_row: ?*gtk.Widget = null,
@@ -223,6 +224,11 @@ pub const Ui = struct {
                 gtk.Spinner.stop(sp);
                 gtk.Widget.setVisible(sp.as(gtk.Widget), 0);
             }
+            // Consume the cancel flag: it must never leak into a LATER job
+            // (a cancelled probe used to make the next write fail instantly
+            // with "Cancelled — disconnecting").
+            self.cancel.store(false, .release);
+            if (self.cancel_button) |b| gtk.Widget.setSensitive(b.as(gtk.Widget), 1);
         }
     }
 };
@@ -259,7 +265,9 @@ fn usbOpen(ctx: *anyopaque, logger: *log_mod.Logger, target: ?transport.Target, 
     _ = ctx;
     const u = try alloc.create(usb.Usb);
     errdefer alloc.destroy(u);
-    u.* = try usb.open(&usb_ids.policy, target, wait_ms, logger, alloc);
+    // The manager checks its own cancel between transfers; the open retry
+    // loop here stays short-lived and uncancellable.
+    u.* = try usb.open(&usb_ids.policy, target, wait_ms, logger, alloc, null);
     return u.transport();
 }
 
@@ -542,6 +550,7 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     _ = gtk.Button.signals.clicked.connect(probe_btn, *Ui, &onProbeClicked, ui, .{});
     adw.ActionRow.addSuffix(chip_row, probe_btn.as(gtk.Widget));
     ui.probe_btn = probe_btn;
+    ui.chip_row = chip_row.as(gtk.Widget);
     adw.PreferencesGroup.add(dev_group, chip_row.as(gtk.Widget));
 
     gtk.Box.append(dev_card, dev_group.as(gtk.Widget));
@@ -869,6 +878,7 @@ fn refreshMainPage(ui: *Ui) void {
 
     // The chip probe and Connect only make sense before a session exists.
     if (ui.dev_chip_label) |l| gtk.Widget.setVisible(l.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
+    if (ui.chip_row) |w| gtk.Widget.setVisible(w, @intFromBool(ui.session == .disconnected));
     if (ui.storage_drop) |d| gtk.Widget.setVisible(d.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
     if (ui.skip_init_sw) |sw| gtk.Widget.setVisible(sw.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
     if (ui.skip_init_row) |row| gtk.Widget.setVisible(row.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
@@ -1412,6 +1422,13 @@ fn onUploadLoaderClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
 
 fn onProbeClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     if (ui.busy() or ui.device == null) return;
+    // The probe needs the device in bare EDL mode with NO open session: it
+    // opens its own USB handle, which is impossible while the manager holds
+    // the interface (it would spin and die with Busy).
+    if (ui.session != .disconnected) {
+        ui.toast("Read chip needs bare EDL mode — Disconnect the session first");
+        return;
+    }
     ui.startJob();
     spawnChipProbe(ui) catch {
         ui.jobDone();

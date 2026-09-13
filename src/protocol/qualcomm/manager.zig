@@ -1240,7 +1240,10 @@ pub const Manager = struct {
         const msg = std.fmt.bufPrint(&msg_buf, "session error: {s}", .{@errorName(e)}) catch "session error";
         pushFinished(self.channel, false, msg);
 
-        if (e != Error.Gone and !self.reset_used) {
+        // A deliberate Cancel only disconnects — no automatic USB reset.
+        // The stuck-programmer recovery chain runs on the next connect if
+        // the device was left mid-operation.
+        if (e != Error.Gone and e != Error.Cancelled and !self.reset_used) {
             self.reset_used = true;
             _ = self.tryResetRecover(self.storage, self.skip_saved, self.last_programmer);
         }

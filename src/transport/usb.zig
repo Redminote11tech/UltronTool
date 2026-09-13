@@ -260,10 +260,14 @@ pub fn open(
     wait_ms: u32,
     logger: *log.Logger,
     alloc: std.mem.Allocator,
+    cancel: ?*const std.atomic.Value(bool),
 ) Error!Usb {
     const glib = @import("glib");
     const deadline = glib.getMonotonicTime() + @as(i64, wait_ms) * std.time.us_per_ms;
     while (true) {
+        if (cancel) |cancel_flag| {
+            if (cancel_flag.load(.acquire)) return Error.Cancelled;
+        }
         if (openOnce(policy, target, logger, alloc)) |usb| return usb else |err| {
             if (err != Error.NoDevice and err != Error.Busy) return err;
             if (glib.getMonotonicTime() >= deadline) return err;
