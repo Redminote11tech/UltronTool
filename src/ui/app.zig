@@ -221,7 +221,11 @@ const ConfirmCtx = struct {
     kind: ConfirmKind,
 };
 
-const ConfirmKind = enum { apply_writes, flash_xml };
+const ConfirmKind = union(enum) {
+    apply_writes: void,
+    flash_xml: void,
+    erase_partition: ev.PartitionRow,
+};
 
 // ----------------------------------------------------------------------
 // Entry (called from main.zig)
@@ -809,6 +813,11 @@ fn rebuildPartitions(ui: *Ui, parts: *const ev.PartitionsEvent) void {
         _ = gtk.Button.signals.clicked.connect(write_btn, *RowCtx, &onWriteClicked, ctx, .{});
         adw.ActionRow.addSuffix(action_row, write_btn.as(gtk.Widget));
 
+        const erase_btn = gtk.Button.newWithLabel("Erase");
+        gtk.Widget.addCssClass(erase_btn.as(gtk.Widget), "destructive-action");
+        _ = gtk.Button.signals.clicked.connect(erase_btn, *RowCtx, &onEraseClicked, ctx, .{});
+        adw.ActionRow.addSuffix(action_row, erase_btn.as(gtk.Widget));
+
         ctx.row_widget = action_row.as(gtk.Widget);
         gtk.ListBox.append(ui.parts_list.?, action_row.as(gtk.Widget));
     }
@@ -1203,6 +1212,19 @@ fn onWriteClicked(_: *gtk.Button, ctx: *RowCtx) callconv(.c) void {
     openChooser(ctx.ui, .{ .write_partition = ctx.row }, "Select image to write", false, null);
 }
 
+fn onEraseClicked(_: *gtk.Button, ctx: *RowCtx) callconv(.c) void {
+    const ui = ctx.ui;
+    if (ui.busy()) {
+        ui.toast("Another operation is running — wait for it to finish");
+        return;
+    }
+    var size_buf: [32]u8 = undefined;
+    const size_txt = util.formatBytes(&size_buf, ctx.row.sectors() * sectorSizeOf(ui));
+    var body_buf: [512]u8 = undefined;
+    const body = std.fmt.bufPrint(&body_buf, "Erase \"{s}\" ({s}, LBA {d}–{d}) on LUN {d}?\n\nEverything in this partition is lost. This is IRREVERSIBLE.", .{ ctx.row.name.slice(), size_txt, ctx.row.first_lba, ctx.row.last_lba, currentLun(ui) }) catch return;
+    confirmDialog(ui, "Erase partition?", body, "Erase", .destructive, .{ .erase_partition = ctx.row });
+}
+
 fn onClearWritesClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     clearPendingWrites(ui);
 }
@@ -1345,6 +1367,16 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
             ui.manager.?.enqueue(.{ .flash_xml = .{
                 .files = ui.xml_paths.items,
                 .allow_missing = ui.allow_missing,
+            } });
+        },
+        .erase_partition => |row| {
+            if (ui.busy() or ui.manager == null) return;
+            ui.startJob();
+            ui.manager.?.enqueue(.{ .erase_partition = .{
+                .first_lba = row.first_lba,
+                .num_sectors = row.sectors(),
+                .lun = currentLun(ui),
+                .label = row.name.slice(),
             } });
         },
     }

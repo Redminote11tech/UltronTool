@@ -71,6 +71,13 @@ pub const Request = union(enum) {
         lun: u32,
         label: []const u8,
     },
+    /// Erase a partition range (device-side erase command).
+    erase_partition: struct {
+        first_lba: u64,
+        num_sectors: u64,
+        lun: u32,
+        label: []const u8,
+    },
     /// Flash rawprogram/patch XML files (qdl parity; no auto-reset).
     flash_xml: struct {
         files: []const []const u8,
@@ -206,6 +213,7 @@ pub const Manager = struct {
                 w.path = try item.dupe(w.path);
                 w.label = try item.dupe(w.label);
             },
+            .erase_partition => |*e| e.label = try item.dupe(e.label),
             .flash_xml => |*f| {
                 const files = try heap.alloc([]const u8, f.files.len);
                 errdefer heap.free(files);
@@ -249,6 +257,7 @@ pub const Manager = struct {
             .list_partitions => |lp| self.listPartitions(lp.lun),
             .read_partition => |r| self.readPartition(r.path, r.first_lba, r.num_sectors, r.lun, r.label),
             .write_partition => |w| self.writePartition(w.path, w.first_lba, w.max_sectors, w.lun, w.label),
+            .erase_partition => |e| self.erasePartition(e.first_lba, e.num_sectors, e.lun, e.label),
             .flash_xml => |fx| self.flashXml(fx.files, fx.allow_missing),
             .reset => {
                 if (self.requireSession()) |fh| {
@@ -930,6 +939,40 @@ pub const Manager = struct {
         }
     }
 
+    /// Device-side erase of a partition range. A refusal behaves like the
+    /// rawprogram path: the transport-level failure triggers the reset
+    /// recovery chain via sessionError.
+    fn erasePartition(self: *Manager, first_lba: u64, num_sectors: u64, lun: u32, label: []const u8) void {
+        const fh = self.requireSession() orelse return;
+        const sector_size = self.sector_size;
+        if (sector_size == 0) {
+            pushFinished(self.channel, false, "sector size unknown");
+            return;
+        }
+        if (num_sectors == 0 or num_sectors > std.math.maxInt(u32)) {
+            pushFinished(self.channel, false, "nothing to erase");
+            return;
+        }
+
+        var start_buf: [32]u8 = undefined;
+        const op = rawprogram.Erase{
+            .sector_size = sector_size,
+            .num_sectors = @intCast(num_sectors),
+            .partition = lun,
+            .start_sector = std.fmt.bufPrint(&start_buf, "{d}", .{first_lba}) catch "0",
+        };
+
+        self.logger.info("erasing {s} ({d} sectors from LBA {d}, LUN {d})", .{ label, num_sectors, first_lba, lun });
+        fh.erase(&op) catch |e| {
+            self.sessionError(e);
+            return;
+        };
+        var msg = ev.FixedStr(512){};
+        var msg_buf: [256]u8 = undefined;
+        msg.set(std.fmt.bufPrint(&msg_buf, "{s}: erase finished", .{label}) catch "erase finished");
+        self.channel.push(.{ .finished = .{ .success = true, .message = msg } });
+    }
+
     fn flashXml(self: *Manager, files: []const []const u8, allow_missing: bool) void {
         const fh = self.requireSession() orelse return;
 
@@ -1189,6 +1232,9 @@ test "manager: already-in-firehose connect loads partitions" {
         .{ .respond = rawmode_ack },
         .{ .respond = ents },
         .{ .respond = ack },
+        // erase_partition job (boot: 2 sectors @ LBA 8192)
+        .{ .any_write = {} },
+        .{ .respond = ack },
     };
 
     var harness = try SimHarness.init(heap, &steps);
@@ -1222,6 +1268,20 @@ test "manager: already-in-firehose connect loads partitions" {
     try std.testing.expectEqual(@as(u32, 2), mgr.num_luns);
     // Final state fired was firehose_ready.
     try std.testing.expectEqual(ev.SessionState.firehose_ready, collector.states.items[collector.states.items.len - 1]);
+
+    // Erase job on the live session: device-side erase command + ACK.
+    mgr.enqueue(.{ .erase_partition = .{ .first_lba = 8192, .num_sectors = 2, .lun = 0, .label = "boot" } });
+    var erased = false;
+    deadline = 0;
+    while (deadline < 200 and !erased) : (deadline += 1) {
+        channel.drain(&collector, Collector.cb);
+        for (collector.finished.items) |f| {
+            if (std.mem.eql(u8, f.message.slice(), "boot: erase finished")) erased = true;
+        }
+        glib.usleep(10 * std.time.us_per_ms);
+    }
+    try std.testing.expect(erased);
+    try std.testing.expect(harness.failure == null);
 }
 
 test "manager: loader upload reuses the probed connection (replayed HELLO)" {
