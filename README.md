@@ -36,7 +36,8 @@ a small, dependency-free Zig library you can audit in an afternoon.
 
 - **Live device detection** — udev hot-plug monitoring recognizes Qualcomm EDL
   (`05c6:9008`), crash-dump mode (`05c6:900e`), and any Qualcomm PID exposing
-  the Sahara vendor-specific interface
+  the Sahara vendor-specific interface; with several EDL devices attached a
+  target picker (bus/device or serial) selects which one to open
 - **One workflow page**: Connect → (if the device is a bare EDL target, choose
   your signed firehose programmer and upload it over Sahara — devices already
   running a programmer skip this automatically) → the live partition table

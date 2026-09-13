@@ -251,11 +251,12 @@ pub const OpenResult = struct {
 };
 
 /// Port of usb_open(): enumerate once per 250 ms until a matching device can
-/// be opened, for up to `wait_ms` total. Serial filters on the token after
-/// "_SN:" in iProduct (qdl's usb_read_serial policy) when `serial` is given.
+/// be opened, for up to `wait_ms` total. When `target` is given, bus/devnum
+/// must match exactly and the serial token after "_SN:" in iProduct
+/// (qdl's usb_read_serial policy) must equal the requested serial.
 pub fn open(
     policy: *const Policy,
-    serial: ?[]const u8,
+    target: ?transport_mod.Target,
     wait_ms: u32,
     logger: *log.Logger,
     alloc: std.mem.Allocator,
@@ -263,7 +264,7 @@ pub fn open(
     const glib = @import("glib");
     const deadline = glib.getMonotonicTime() + @as(i64, wait_ms) * std.time.us_per_ms;
     while (true) {
-        if (openOnce(policy, serial, logger, alloc)) |usb| return usb else |err| {
+        if (openOnce(policy, target, logger, alloc)) |usb| return usb else |err| {
             if (err != Error.NoDevice and err != Error.Busy) return err;
             if (glib.getMonotonicTime() >= deadline) return err;
             glib.usleep(250 * std.time.us_per_ms);
@@ -273,7 +274,7 @@ pub fn open(
 
 /// Port of usb_open_once(): one enumeration pass. NoDevice when nothing
 /// matched, Busy when a candidate was visible but unopenable.
-fn openOnce(policy: *const Policy, serial: ?[]const u8, logger: *log.Logger, alloc: std.mem.Allocator) Error!Usb {
+fn openOnce(policy: *const Policy, target: ?transport_mod.Target, logger: *log.Logger, alloc: std.mem.Allocator) Error!Usb {
     if (c.libusb_init(null) != 0) return Error.Io;
     errdefer c.libusb_exit(null);
 
@@ -298,7 +299,7 @@ fn openOnce(policy: *const Policy, serial: ?[]const u8, logger: *log.Logger, all
 
         saw_candidate = true;
 
-        if (tryOpenCandidate(dev, &desc, policy, serial, logger, alloc)) |usb| return usb;
+        if (tryOpenCandidate(dev, &desc, policy, target, logger, alloc)) |usb| return usb;
     }
 
     return if (saw_candidate) Error.Busy else Error.NoDevice;
@@ -310,10 +311,20 @@ fn tryOpenCandidate(
     dev: *c.libusb_device,
     desc: *const c.libusb_device_descriptor,
     policy: *const Policy,
-    serial: ?[]const u8,
+    target: ?transport_mod.Target,
     logger: *log.Logger,
     alloc: std.mem.Allocator,
 ) ?Usb {
+    // Bus/address filter: cheapest check, before descriptor round-trips.
+    if (target) |t| {
+        if (t.bus != null or t.devnum != null) {
+            const b: u32 = c.libusb_get_bus_number(dev);
+            const a: u32 = c.libusb_get_device_address(dev);
+            if (t.bus != null and t.bus.? != b) return null;
+            if (t.devnum != null and t.devnum.? != a) return null;
+        }
+    }
+
     var handle: ?*c.libusb_device_handle = null;
     if (c.libusb_open(dev, &handle) != 0) {
         logger.debug("USB: unable to open candidate device {x:0>4}:{x:0>4}", .{ desc.idVendor, desc.idProduct });
@@ -323,13 +334,15 @@ fn tryOpenCandidate(
     const product = readProductString(handle.?, desc, &product_buf);
 
     // Serial filter: token after "_SN:" in iProduct.
-    if (serial) |want| {
-        const got = serialFromProduct(product);
-        if (!std.mem.eql(u8, got, want)) {
-            logger.debug("USB: serial mismatch ({s} != {s})", .{ got, want });
-            c.libusb_close(handle);
-            handle = null;
-            return null;
+    if (target) |t| {
+        if (t.serial) |want| {
+            const got = serialFromProduct(product);
+            if (!std.mem.eql(u8, got, want)) {
+                logger.debug("USB: serial mismatch ({s} != {s})", .{ got, want });
+                c.libusb_close(handle);
+                handle = null;
+                return null;
+            }
         }
     }
 

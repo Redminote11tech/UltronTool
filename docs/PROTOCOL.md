@@ -215,6 +215,7 @@ loader stage; VIP requires the fresh-boot loader-upload flow.
 | Write verification (getsha256digest) | ✅ | after every program op (partition write + rawprogram): device SHA-256 of the written range vs local image digest; skips VIP sessions (extra packet would desync the digest table) |
 | Drain-to-complete on refused writes | ✅ | Protected partitions fail cleanly; session survives; the drain streams the image's own remaining bytes (not zeros), so whatever lands past a refusal is real image content |
 | Stuck-programmer recovery | ✅ | nop probe → USB reset → fresh EDL → auto loader re-upload |
+| Multi-device targeting | ✅ | bus/devnum + `_SN:` product-string serial filter (qdl --serial semantics), picker appears with 2+ visible devices |
 | Multi-image Sahara archives (zip / id:file) | ⏳ planned | qdl decode_programmer |
 | RAM dump / Memory Debug (900E crash dumps) | ⏳ planned | MEM_DEBUG64 region table + dumps |
 | UFS provisioning (<ufs> XML) | ⏳ planned | destructive; bConfigDescrLock gates |

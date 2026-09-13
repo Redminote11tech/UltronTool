@@ -84,6 +84,10 @@ pub const Ui = struct {
     outstanding: u32 = 0, // jobs in flight on the manager
 
     device: ?ev.DeviceInfo = null,
+    /// All currently visible matching devices (multi-device targeting).
+    devices: std.ArrayList(ev.DeviceInfo) = .empty,
+    /// User's target choice: null = automatic (first device found).
+    selected_key: ?ev.DeviceKey = null,
     session: ev.SessionState = .disconnected,
     parts: ?ev.PartitionsEvent = null,
 
@@ -116,6 +120,8 @@ pub const Ui = struct {
     probe_btn: ?*gtk.Button = null,
     connect_btn: ?*gtk.Button = null,
     storage_drop: ?*gtk.DropDown = null,
+    device_sel_row: ?*gtk.Widget = null,
+    device_sel_slot: ?*gtk.Box = null,
     skip_init_sw: ?*gtk.Switch = null,
     skip_init_row: ?*gtk.Widget = null,
 
@@ -218,6 +224,8 @@ pub const Ui = struct {
 
 const WorkerCtx = struct {
     ui: *Ui,
+    target: ?transport.Target = null,
+    target_serial_buf: ?[]u8 = null,
 };
 
 const RowCtx = struct {
@@ -241,11 +249,11 @@ const ConfirmKind = union(enum) {
 // Entry (called from main.zig)
 // ----------------------------------------------------------------------
 
-fn usbOpen(ctx: *anyopaque, logger: *log_mod.Logger, wait_ms: u32, alloc: std.mem.Allocator) transport.Error!transport.Transport {
+fn usbOpen(ctx: *anyopaque, logger: *log_mod.Logger, target: ?transport.Target, wait_ms: u32, alloc: std.mem.Allocator) transport.Error!transport.Transport {
     _ = ctx;
     const u = try alloc.create(usb.Usb);
     errdefer alloc.destroy(u);
-    u.* = try usb.open(&usb_ids.policy, null, wait_ms, logger, alloc);
+    u.* = try usb.open(&usb_ids.policy, target, wait_ms, logger, alloc);
     return u.transport();
 }
 
@@ -313,6 +321,7 @@ pub fn mainRun(init: std.process.Init) !void {
     if (ui.digest_dir) |p| alloc.free(p);
     for (ui.row_ctxs.items) |ctx| alloc.destroy(ctx);
     ui.row_ctxs.deinit(alloc);
+    ui.devices.deinit(alloc);
     alloc.destroy(ui);
     alloc.destroy(channel);
     alloc.destroy(logger);
@@ -499,6 +508,16 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     adw.ActionRow.addSuffix(storage_row, storage_drop.as(gtk.Widget));
     ui.storage_drop = storage_drop;
     adw.PreferencesGroup.add(dev_group, storage_row.as(gtk.Widget));
+
+    const device_sel_row = adw.ActionRow.new();
+    rowTitle(device_sel_row, "Target device");
+    adw.ActionRow.setSubtitle(device_sel_row, "Multiple EDL devices visible — pick one");
+    const device_sel_slot = gtk.Box.new(.horizontal, 8);
+    adw.ActionRow.addSuffix(device_sel_row, device_sel_slot.as(gtk.Widget));
+    ui.device_sel_row = device_sel_row.as(gtk.Widget);
+    ui.device_sel_slot = device_sel_slot;
+    gtk.Widget.setVisible(device_sel_row.as(gtk.Widget), 0);
+    adw.PreferencesGroup.add(dev_group, device_sel_row.as(gtk.Widget));
 
     const skip_init_row = adw.ActionRow.new();
     rowTitle(skip_init_row, "Skip storage init");
@@ -803,6 +822,7 @@ fn refreshMainPage(ui: *Ui) void {
         const is_crash = has_device and ui.device.?.mode == .qualcomm_crash;
         gtk.Widget.setVisible(w, @intFromBool(is_crash));
     }
+    refreshDeviceSelector(ui);
 
     // The chip probe and Connect only make sense before a session exists.
     if (ui.dev_chip_label) |l| gtk.Widget.setVisible(l.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
@@ -1092,6 +1112,80 @@ fn readStorageSelection(ui: *Ui) void {
     if (ui.allow_missing_sw) |sw| ui.allow_missing = gtk.Switch.getActive(sw) != 0;
 }
 
+/// Sync ui.device from the visible-device list and the user's selection.
+fn syncActiveDevice(ui: *Ui) void {
+    if (ui.selected_key) |want| {
+        for (ui.devices.items) |d| {
+            if (d.key.eql(want)) {
+                ui.device = d;
+                return;
+            }
+        }
+    }
+    ui.device = if (ui.devices.items.len > 0) ui.devices.items[ui.devices.items.len - 1] else null;
+}
+
+/// The transport filter for the currently selected device (null = auto).
+fn activeTarget(ui: *Ui) ?transport.Target {
+    const dev = ui.device orelse return null;
+    if (ui.devices.items.len < 2) return null;
+    return .{
+        .bus = dev.bus,
+        .devnum = dev.devnum,
+        .serial = if (dev.serial.len > 0) dev.serial.slice() else null,
+    };
+}
+
+/// Rebuild the device dropdown (only shown with 2+ devices pre-connect).
+fn refreshDeviceSelector(ui: *Ui) void {
+    const slot = ui.device_sel_slot orelse return;
+    const row = ui.device_sel_row orelse return;
+    // Clear previous dropdown (if any).
+    while (gtk.Widget.getFirstChild(slot.as(gtk.Widget))) |child| gtk.Widget.unparent(child);
+    const show = ui.devices.items.len > 1 and ui.session == .disconnected;
+    gtk.Widget.setVisible(row, @intFromBool(show));
+    if (!show) return;
+
+    var names_buf: [10][64]u8 = undefined;
+    var name_zs: [10]?[*:0]const u8 = .{null} ** 10;
+    var n: usize = 0;
+    name_zs[n] = "Auto (first found)";
+    n += 1;
+    for (ui.devices.items) |d| {
+        if (n >= name_zs.len) break;
+        const z = std.fmt.bufPrintZ(&names_buf[n], "bus {d:0>3} dev {d:0>3}  {x:0>4}:{x:0>4}", .{ d.bus, d.devnum, d.vid, d.pid }) catch continue;
+        name_zs[n] = z.ptr;
+        n += 1;
+    }
+    name_zs[n] = null;
+
+    const drop = gtk.DropDown.newFromStrings(@ptrCast(&name_zs));
+    gtk.DropDown.setSelected(drop, 0);
+    // Mark the current selection.
+    if (ui.selected_key) |want| {
+        for (ui.devices.items, 0..) |d, i| {
+            if (d.key.eql(want)) {
+                gtk.DropDown.setSelected(drop, @intCast(i + 1));
+                break;
+            }
+        }
+    }
+    _ = gobject.Object.signals.notify.connect(drop, *Ui, &onDeviceSelected, ui, .{ .detail = "selected" });
+    gtk.Box.append(slot, drop.as(gtk.Widget));
+}
+
+fn onDeviceSelected(drop: *gtk.DropDown, _: *gobject.ParamSpec, ui: *Ui) callconv(.c) void {
+    const selected = gtk.DropDown.getSelected(drop);
+    if (selected == 0) {
+        ui.selected_key = null;
+    } else {
+        const idx: usize = selected - 1;
+        if (idx < ui.devices.items.len) ui.selected_key = ui.devices.items[idx].key;
+    }
+    syncActiveDevice(ui);
+    refreshMainPage(ui);
+}
+
 fn currentLun(ui: *Ui) u32 {
     if (ui.lun_drop) |d| return @min(gtk.DropDown.getSelected(d), max_lun_choices - 1);
     return 0;
@@ -1111,7 +1205,12 @@ fn onConnectClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     if (ui.busy() or ui.manager == null) return;
     readStorageSelection(ui);
     ui.startJob();
-    ui.manager.?.enqueue(.{ .connect = .{ .storage = ui.storage, .skip_storage_init = ui.skip_storage_init, .vip_dir = ui.vip_dir } });
+    ui.manager.?.enqueue(.{ .connect = .{
+        .storage = ui.storage,
+        .skip_storage_init = ui.skip_storage_init,
+        .vip_dir = ui.vip_dir,
+        .target = activeTarget(ui),
+    } });
 }
 
 fn onPickLoader(_: *gtk.Button, ui: *Ui) callconv(.c) void {
@@ -1256,6 +1355,7 @@ fn onUploadLoaderClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
         .storage = ui.storage,
         .skip_storage_init = ui.skip_storage_init,
         .vip_dir = ui.vip_dir,
+        .target = activeTarget(ui),
     } });
 }
 
@@ -1473,12 +1573,15 @@ const RamdumpCtx = struct {
     ui: *Ui,
     dir: []u8,
     filter: ?[]u8,
+    target: ?transport.Target = null,
+    target_serial_buf: ?[]u8 = null,
 };
 
 fn ramdumpCtxFree(ctx: *RamdumpCtx) void {
     const alloc = ctx.ui.alloc;
     alloc.free(ctx.dir);
     if (ctx.filter) |f| alloc.free(f);
+    if (ctx.target_serial_buf) |s| alloc.free(s);
     alloc.destroy(ctx);
 }
 
@@ -1511,7 +1614,7 @@ fn ramdumpRun(ctx: *RamdumpCtx) void {
         ui.logger,
         &ui.cancel,
         .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &ramdumpProgressCb },
-        null,
+        ctx.target,
         8000,
         ctx.dir,
         filter,
@@ -1545,6 +1648,15 @@ fn onRamdumpClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
         ui.alloc.destroy(ctx);
         return;
     };
+    if (activeTarget(ui)) |t| {
+        var copy = t;
+        if (t.serial) |s| {
+            const dup = ui.alloc.dupe(u8, s) catch null;
+            ctx.target_serial_buf = dup;
+            copy.serial = dup;
+        }
+        ctx.target = copy;
+    }
 
     ui.startJob();
     const thread = std.Thread.spawn(.{}, ramdumpRun, .{ctx}) catch {
@@ -1563,6 +1675,15 @@ fn onRamdumpClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
 fn spawnChipProbe(ui: *Ui) !void {
     const ctx = try ui.alloc.create(WorkerCtx);
     ctx.* = .{ .ui = ui };
+    if (activeTarget(ui)) |t| {
+        var copy = t;
+        if (t.serial) |s| {
+            const dup = try ui.alloc.dupe(u8, s);
+            ctx.target_serial_buf = dup;
+            copy.serial = dup;
+        }
+        ctx.target = copy;
+    }
     const thread = try std.Thread.spawn(.{}, chipProbeRun, .{ctx});
     thread.detach();
 }
@@ -1571,7 +1692,7 @@ fn chipProbeRun(ctx: *WorkerCtx) void {
     const ui = ctx.ui;
     defer ui.alloc.destroy(ctx);
     const channel = ui.channel;
-    const info = session_mod.chipInfo(ui.alloc, ui.logger, &ui.cancel, null, 8000) catch |e| {
+    const info = session_mod.chipInfo(ui.alloc, ui.logger, &ui.cancel, ctx.target, 8000) catch |e| {
         var m = ev.FixedStr(512){};
         m.set(@errorName(e));
         channel.push(.{ .finished = .{ .success = false, .message = m } });
@@ -1696,23 +1817,41 @@ fn onFirstLogDrain(ud: ?*anyopaque) callconv(.c) c_int {
 fn handleEvent(ui: *Ui, event: ev.Event) void {
     switch (event) {
         .device_added => |dev| {
-            ui.device = dev;
+            // Update-or-insert: hotplug events can repeat for one device.
+            var replaced = false;
+            for (ui.devices.items, 0..) |d, i| {
+                if (d.key.eql(dev.key)) {
+                    ui.devices.items[i] = dev;
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) ui.devices.append(ui.alloc, dev) catch {
+                ui.logger.err("out of memory tracking device list", .{});
+            };
+            syncActiveDevice(ui);
+            refreshDeviceSelector(ui);
             refreshMainPage(ui);
             ui.logger.info("device connected: {s} ({x:0>4}:{x:0>4})", .{ dev.mode.displayName(), dev.vid, dev.pid });
         },
         .device_removed => |key| {
-            if (ui.device) |dev| {
-                if (dev.key.eql(key)) {
-                    ui.device = null;
-                    if (ui.session != .disconnected and ui.manager != null and !ui.busy()) {
-                        ui.manager.?.enqueue(.{ .disconnect = {} });
-                    } else if (ui.session != .disconnected) {
-                        ui.cancel.store(true, .release);
-                    }
-                    ui.session = .disconnected;
-                    refreshMainPage(ui);
-                    ui.logger.info("device disconnected", .{});
+            for (ui.devices.items, 0..) |d, i| {
+                if (d.key.eql(key)) {
+                    _ = ui.devices.orderedRemove(i);
+                    break;
                 }
+            }
+            syncActiveDevice(ui);
+            refreshDeviceSelector(ui);
+            if (ui.device == null and ui.devices.items.len == 0) {
+                if (ui.session != .disconnected and ui.manager != null and !ui.busy()) {
+                    ui.manager.?.enqueue(.{ .disconnect = {} });
+                } else if (ui.session != .disconnected) {
+                    ui.cancel.store(true, .release);
+                }
+                ui.session = .disconnected;
+                refreshMainPage(ui);
+                ui.logger.info("device disconnected", .{});
             }
         },
         .progress => |p| {

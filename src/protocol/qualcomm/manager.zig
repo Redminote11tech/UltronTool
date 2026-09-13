@@ -33,7 +33,7 @@ const heap = std.heap.page_allocator;
 /// Opens a transport for the protocol's devices. Production wires this to
 /// the libusb backend + Qualcomm policy; tests inject a sim harness.
 /// The returned Transport must support destroy() if it is heap-allocated.
-pub const OpenFn = *const fn (ctx: *anyopaque, logger: *log.Logger, wait_ms: u32, alloc: std.mem.Allocator) Error!transport.Transport;
+pub const OpenFn = *const fn (ctx: *anyopaque, logger: *log.Logger, target: ?transport.Target, wait_ms: u32, alloc: std.mem.Allocator) Error!transport.Transport;
 
 pub const Request = union(enum) {
     /// Open the transport and probe what is running. `programmer` may be
@@ -45,6 +45,7 @@ pub const Request = union(enum) {
         storage: firehose.StorageType = .ufs,
         skip_storage_init: bool = false,
         vip_dir: ?[]const u8 = null,
+        target: ?transport.Target = null,
     },
     /// Upload the firehose programmer over Sahara (state: needs_loader).
     upload_loader: struct {
@@ -52,6 +53,7 @@ pub const Request = union(enum) {
         storage: firehose.StorageType = .ufs,
         skip_storage_init: bool = false,
         vip_dir: ?[]const u8 = null,
+        target: ?transport.Target = null,
     },
     /// Read the GPT of `lun` and emit a .partitions event.
     list_partitions: struct { lun: u32 },
@@ -105,6 +107,12 @@ const QueueItem = struct {
         return d;
     }
 
+    fn dupeTarget(item: *QueueItem, t: transport.Target) !transport.Target {
+        var copy = t;
+        if (t.serial) |s| copy.serial = try item.dupe(s);
+        return copy;
+    }
+
     fn deinit(item: *QueueItem) void {
         for (item.strings.items) |s| heap.free(s);
         item.strings.deinit(heap);
@@ -141,6 +149,9 @@ pub const Manager = struct {
     last_programmer: ?[]u8 = null,
     /// VIP digest tables folder for the current session (optional).
     vip_dir_saved: ?[]u8 = null,
+    /// Device selection for the current session (multi-device targeting).
+    target_saved: ?transport.Target = null,
+    target_serial_owned: ?[]u8 = null,
     /// A USB reset recovery may run once per connect.
     reset_used: bool = false,
 
@@ -192,6 +203,7 @@ pub const Manager = struct {
         self.pending.deinit(self.alloc);
         if (self.last_programmer) |p| self.alloc.free(p);
         if (self.vip_dir_saved) |d| self.alloc.free(d);
+        if (self.target_serial_owned) |s| self.alloc.free(s);
         self.alloc.destroy(self);
     }
 
@@ -200,10 +212,12 @@ pub const Manager = struct {
             .connect => |*c| {
                 if (c.programmer) |p| c.programmer = try item.dupe(p);
                 if (c.vip_dir) |d| c.vip_dir = try item.dupe(d);
+                if (c.target) |t| c.target = try item.dupeTarget(t);
             },
             .upload_loader => |*u| {
                 u.programmer = try item.dupe(u.programmer);
                 if (u.vip_dir) |d| u.vip_dir = try item.dupe(d);
+                if (u.target) |t| u.target = try item.dupeTarget(t);
             },
             .read_partition => |*r| {
                 r.path = try item.dupe(r.path);
@@ -252,8 +266,8 @@ pub const Manager = struct {
 
     fn runJob(self: *Manager, item: *QueueItem) void {
         switch (item.req) {
-            .connect => |c| self.connect(c.programmer, c.storage, c.skip_storage_init, c.vip_dir),
-            .upload_loader => |u| self.uploadLoader(u.programmer, u.storage, u.skip_storage_init, u.vip_dir),
+            .connect => |c| self.connect(c.programmer, c.storage, c.skip_storage_init, c.vip_dir, c.target),
+            .upload_loader => |u| self.uploadLoader(u.programmer, u.storage, u.skip_storage_init, u.vip_dir, u.target),
             .list_partitions => |lp| self.listPartitions(lp.lun),
             .read_partition => |r| self.readPartition(r.path, r.first_lba, r.num_sectors, r.lun, r.label),
             .write_partition => |w| self.writePartition(w.path, w.first_lba, w.max_sectors, w.lun, w.label),
@@ -312,7 +326,7 @@ pub const Manager = struct {
     }
 
     /// Open a transport and probe what is running.
-    fn connect(self: *Manager, programmer: ?[]const u8, storage: firehose.StorageType, skip_storage_init: bool, vip_dir: ?[]const u8) void {
+    fn connect(self: *Manager, programmer: ?[]const u8, storage: firehose.StorageType, skip_storage_init: bool, vip_dir: ?[]const u8, target: ?transport.Target) void {
         if (self.cancel.load(.acquire)) {
             pushFinished(self.channel, false, "Cancelled");
             return;
@@ -320,6 +334,7 @@ pub const Manager = struct {
         self.reset_used = false;
         self.storage = storage;
         self.rememberVipDir(vip_dir);
+        self.rememberTarget(target);
 
         // Already waiting for a loader with the HELLO preserved: a re-probe
         // would close the transport and lose the HELLO (the PBL does not
@@ -333,7 +348,7 @@ pub const Manager = struct {
         self.teardown();
         self.logger.info("connecting…", .{});
 
-        const t = self.opener(self.opener_ctx, self.logger, 8000, self.alloc) catch |e| {
+        const t = self.opener(self.opener_ctx, self.logger, self.target_saved, 8000, self.alloc) catch |e| {
             self.logger.err("failed to open device: {s}", .{@errorName(e)});
             pushFinished(self.channel, false, @errorName(e));
             self.emitState(.disconnected);
@@ -379,7 +394,7 @@ pub const Manager = struct {
                 self.io.?.pushBack(buf[0..n]);
                 if (programmer) |p| {
                     self.logger.info("device is in EDL mode: uploading the chosen loader", .{});
-                    self.uploadLoader(p, storage, skip_storage_init, vip_dir);
+                    self.uploadLoader(p, storage, skip_storage_init, vip_dir, target);
                 } else {
                     self.logger.info("device is in EDL mode: a firehose loader is required (connection kept open)", .{});
                     self.emitState(.needs_loader);
@@ -453,7 +468,7 @@ pub const Manager = struct {
                 self.io.?.pushBack(buf[0..n]);
                 self.logger.info("device recovered to clean EDL state", .{});
                 if (programmer) |p| {
-                    self.uploadLoader(p, storage, skip_storage_init, self.vip_dir_saved);
+                    self.uploadLoader(p, storage, skip_storage_init, self.vip_dir_saved, self.target_saved);
                 } else {
                     self.emitState(.needs_loader);
                     pushFinished(self.channel, true, "loader required");
@@ -487,7 +502,7 @@ pub const Manager = struct {
     }
 
     fn openTransport(self: *Manager) bool {
-        const t = self.opener(self.opener_ctx, self.logger, 8000, self.alloc) catch |e| {
+        const t = self.opener(self.opener_ctx, self.logger, self.target_saved, 8000, self.alloc) catch |e| {
             self.logger.err("failed to open device: {s}", .{@errorName(e)});
             pushFinished(self.channel, false, @errorName(e));
             self.emitState(.disconnected);
@@ -503,7 +518,7 @@ pub const Manager = struct {
         return true;
     }
 
-    fn uploadLoader(self: *Manager, programmer: []const u8, storage: firehose.StorageType, skip_storage_init: bool, vip_dir: ?[]const u8) void {
+    fn uploadLoader(self: *Manager, programmer: []const u8, storage: firehose.StorageType, skip_storage_init: bool, vip_dir: ?[]const u8, target: ?transport.Target) void {
         if (self.cancel.load(.acquire)) {
             pushFinished(self.channel, false, "Cancelled");
             return;
@@ -511,6 +526,7 @@ pub const Manager = struct {
         self.skip_saved = skip_storage_init;
         self.rememberLoader(programmer);
         self.rememberVipDir(vip_dir);
+        self.rememberTarget(target);
 
         // Fresh connection if the probe consumed/closed one: the device
         // re-issues its HELLO on reopen.
@@ -655,6 +671,24 @@ pub const Manager = struct {
         self.last_programmer = self.alloc.dupe(u8, programmer) catch null;
     }
 
+    /// Store the requested device target (serial string owned).
+    fn rememberTarget(self: *Manager, target: ?transport.Target) void {
+        if (self.target_serial_owned) |s| {
+            self.alloc.free(s);
+            self.target_serial_owned = null;
+        }
+        self.target_saved = null;
+        const t = target orelse return;
+        if (t.serial) |s| {
+            self.target_serial_owned = self.alloc.dupe(u8, s) catch null;
+        }
+        self.target_saved = .{
+            .serial = self.target_serial_owned,
+            .bus = t.bus,
+            .devnum = t.devnum,
+        };
+    }
+
     fn rememberVipDir(self: *Manager, dir: ?[]const u8) void {
         if (self.vip_dir_saved) |old| {
             if (dir != null and std.mem.eql(u8, old, dir.?)) return;
@@ -703,7 +737,7 @@ pub const Manager = struct {
         self.io.?.pushBack(buf[0..hello_n]);
         self.logger.info("device recovered to clean EDL state", .{});
         if (self.last_programmer) |p| {
-            self.uploadLoader(p, storage, skip_storage_init, self.vip_dir_saved);
+            self.uploadLoader(p, storage, skip_storage_init, self.vip_dir_saved, self.target_saved);
         } else {
             self.emitState(.needs_loader);
             pushFinished(self.channel, true, "loader required");
@@ -1255,11 +1289,15 @@ const SimStep = @import("../../transport/sim.zig").Step;
 const SimOpener = struct {
     harness: ?*SimHarness = null,
 
-    fn open(ctx: *anyopaque, logger: *log.Logger, wait_ms: u32, alloc: std.mem.Allocator) Error!transport.Transport {
+    /// Last target received through the opener (test assertions).
+    last_target: ?transport.Target = null,
+
+    fn open(ctx: *anyopaque, logger: *log.Logger, target: ?transport.Target, wait_ms: u32, alloc: std.mem.Allocator) Error!transport.Transport {
         _ = logger;
         _ = wait_ms;
         _ = alloc;
         const self: *SimOpener = @ptrCast(@alignCast(ctx));
+        self.last_target = target;
         return self.harness.?.transport();
     }
 };
@@ -1511,6 +1549,8 @@ test "manager: already-in-firehose connect loads partitions" {
     }
     try std.testing.expect(erased);
     try std.testing.expect(harness.failure == null);
+    // No target requested: the opener must see null.
+    try std.testing.expect(opener.last_target == null);
 }
 
 test "manager: loader upload reuses the probed connection (replayed HELLO)" {
@@ -1680,8 +1720,9 @@ test "manager: stuck rawmode device is reset and recovered to needs_loader" {
         first: *SimHarness,
         second: *SimHarness,
         swapped: bool = false,
-        fn open(ctx: *anyopaque, l: *log.Logger, w: u32, a: std.mem.Allocator) Error!transport.Transport {
+        fn open(ctx: *anyopaque, l: *log.Logger, target: ?transport.Target, w: u32, a: std.mem.Allocator) Error!transport.Transport {
             _ = l;
+            _ = target;
             _ = w;
             _ = a;
             const self: *@This() = @ptrCast(@alignCast(ctx));

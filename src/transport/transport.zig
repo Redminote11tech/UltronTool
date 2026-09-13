@@ -33,6 +33,15 @@ pub const PacketSizes = struct {
     out_max: usize,
 };
 
+/// Optional filter selecting one device when several match the policy.
+/// Every Some field must match; null fields match anything. Serial refers
+/// to the "_SN:" token in the product string (qdl's convention).
+pub const Target = struct {
+    serial: ?[]const u8 = null,
+    bus: ?u32 = null,
+    devnum: ?u32 = null,
+};
+
 /// Vtable-based transport handle (the equivalent of qdl's `struct qdl_device`).
 pub const Transport = struct {
     ptr: *anyopaque,
