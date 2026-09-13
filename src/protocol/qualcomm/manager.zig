@@ -711,7 +711,9 @@ pub const Manager = struct {
 
         self.logger.info("✓ loader uploaded — Firehose ready", .{});
         self.emitState(.firehose_ready);
-        pushFinished(self.channel, true, "connected");
+        // No .finished here: listPartitions below ends this connect job with
+        // exactly one ("partitions loaded"). An early finish would un-busy
+        // the UI (and clear a pending cancel) while the GPT is still reading.
         self.listPartitions(0);
     }
 
@@ -1473,15 +1475,19 @@ pub const Manager = struct {
         self.emitState(.disconnected);
         var msg_buf: [512]u8 = undefined;
         const msg = std.fmt.bufPrint(&msg_buf, "session error: {s}", .{@errorName(e)}) catch "session error";
-        pushFinished(self.channel, false, msg);
 
         // A deliberate Cancel only disconnects — no automatic USB reset.
         // The stuck-programmer recovery chain runs on the next connect if
-        // the device was left mid-operation.
+        // the device was left mid-operation. When recovery launches, it
+        // ends with exactly one .finished of its own (reconfigured, loader
+        // required, or give-up) — pushing one here too would double-count
+        // the job and un-busy the UI mid-recovery.
         if (e != Error.Gone and e != Error.Cancelled and !self.reset_used) {
             self.reset_used = true;
             _ = self.tryResetRecover(self.storage, self.skip_saved, self.last_programmer);
+            return;
         }
+        pushFinished(self.channel, false, msg);
     }
 };
 

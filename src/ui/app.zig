@@ -2370,7 +2370,7 @@ fn isNotable(msg: []const u8) bool {
     for (suffixes) |sfx| {
         if (std.mem.endsWith(u8, msg, sfx)) return true;
     }
-    const names = [_][]const u8{ "device reset", "loader required", "disconnected", "connected", "digest tables created", "ramdump finished", "UFS provisioning finished", "huawei app finished" };
+    const names = [_][]const u8{ "device reset", "loader required", "disconnected", "connected (VIP)", "partitions loaded", "digest tables created", "ramdump finished", "UFS provisioning finished", "huawei app finished" };
     for (names) |n| {
         if (std.mem.eql(u8, msg, n)) return true;
     }
