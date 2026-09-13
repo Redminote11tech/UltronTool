@@ -178,7 +178,6 @@ const AutoAck = struct {
         .read = read,
         .write = write,
         .close = close,
-        .packetSizes = packetSizes,
     };
 
     fn read(ptr: *anyopaque, buf: []u8, timeout_ms: u32) transport.Error!usize {
@@ -235,10 +234,6 @@ const AutoAck = struct {
         _ = ptr;
     }
 
-    fn packetSizes(ptr: *anyopaque) transport.PacketSizes {
-        _ = ptr;
-        return .{ .in_max = 512, .out_max = 512 };
-    }
 };
 
 fn xmlAttrU64(buf: []const u8, name: []const u8) ?u64 {

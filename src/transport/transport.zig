@@ -31,11 +31,6 @@ pub const Error = error{
     OutOfMemory,
 };
 
-pub const PacketSizes = struct {
-    in_max: usize,
-    out_max: usize,
-};
-
 /// Optional filter selecting one device when several match the policy.
 /// Every Some field must match; null fields match anything. Serial refers
 /// to the "_SN:" token in the product string (qdl's convention).
@@ -58,7 +53,6 @@ pub const Transport = struct {
         /// Write the whole buffer. Returns bytes written.
         write: *const fn (ptr: *anyopaque, buf: []const u8, timeout_ms: u32) Error!usize,
         close: *const fn (ptr: *anyopaque) void,
-        packetSizes: *const fn (ptr: *anyopaque) PacketSizes,
         /// Free the backend object itself (after close); null for backends
         /// that live outside the transport abstraction (e.g. the sim harness).
         destroy: ?*const fn (ptr: *anyopaque) void = null,
@@ -77,10 +71,6 @@ pub const Transport = struct {
 
     pub fn close(self: Transport) void {
         self.vtable.close(self.ptr);
-    }
-
-    pub fn packetSizes(self: Transport) PacketSizes {
-        return self.vtable.packetSizes(self.ptr);
     }
 
     /// Free the backend object (call after close); no-op when unsupported.
@@ -140,9 +130,6 @@ pub const Io = struct {
         return self.transport.write(buf, timeout_ms);
     }
 
-    pub fn packetSizes(self: *Io) PacketSizes {
-        return self.transport.packetSizes();
-    }
 };
 
 test "io serves pushback before transport and preserves order" {

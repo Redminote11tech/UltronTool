@@ -759,51 +759,6 @@ pub const Manager = struct {
         self.vip_dir_saved = self.alloc.dupe(u8, d) catch null;
     }
 
-    /// Force the device back to a clean EDL state: USB reset (software
-    /// replug), reopen, expect a fresh Sahara HELLO, then continue the
-    /// normal loader flow — re-uploading the session's loader if one was
-    /// used before.
-    fn recoverViaReset(self: *Manager, storage: firehose.StorageType, skip_storage_init: bool) void {
-        self.logger.warn("programmer looks stuck — forcing a USB reset to recover to a clean EDL state", .{});
-        if (self.t) |tr| tr.reset();
-        self.teardown();
-        glib.usleep(1500 * std.time.us_per_ms);
-        if (!self.openTransport()) return;
-
-        var buf: [4096]u8 = undefined;
-        var hello_n: usize = 0;
-        var attempt: u32 = 0;
-        while (attempt < 3) : (attempt += 1) {
-            if (self.cancel.load(.acquire)) return;
-            hello_n = self.io.?.read(&buf, 1000) catch 0;
-            if (hello_n > 0) break;
-        }
-        if (hello_n < 8) {
-            self.teardown();
-            self.logger.err("device did not come back after reset — unplug the USB cable, replug into EDL mode, and retry", .{});
-            pushFinished(self.channel, false, "device not responding");
-            self.emitState(.disconnected);
-            return;
-        }
-        const cmd = std.mem.readInt(u32, buf[0..4], .little);
-        const length = std.mem.readInt(u32, buf[4..8], .little);
-        if (@as(u32, @intCast(hello_n)) != length or cmd != sahara.HELLO) {
-            self.teardown();
-            pushFinished(self.channel, false, "unexpected device after reset");
-            self.emitState(.disconnected);
-            return;
-        }
-
-        self.io.?.pushBack(buf[0..hello_n]);
-        self.logger.info("device recovered to clean EDL state", .{});
-        if (self.last_programmer) |p| {
-            self.uploadLoader(p, storage, skip_storage_init, self.vip_dir_saved, self.target_saved);
-        } else {
-            self.emitState(.needs_loader);
-            pushFinished(self.channel, true, "loader required");
-        }
-    }
-
     /// Close the transport and drop the Firehose session. Safe to call twice.
     fn teardown(self: *Manager) void {
         if (self.fh) |fh| {

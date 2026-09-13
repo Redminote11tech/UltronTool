@@ -17,7 +17,6 @@ const log = @import("../core/log.zig");
 
 const Transport = transport_mod.Transport;
 const Error = transport_mod.Error;
-const PacketSizes = transport_mod.PacketSizes;
 
 const c = @cImport({
     @cInclude("libusb.h");
@@ -28,7 +27,6 @@ const c = @cImport({
 pub const DeviceDesc = struct {
     vid: u16,
     pid: u16,
-    product_str: []const u8, // iProduct, ASCII, best effort
 };
 
 pub const InterfaceDesc = struct {
@@ -82,7 +80,6 @@ pub const Usb = struct {
         .write = writeVt,
         .close = closeVt,
         .destroy = destroyVt,
-        .packetSizes = packetSizesVt,
     };
 
     fn readVt(ptr: *anyopaque, buf: []u8, timeout_ms: u32) Error!usize {
@@ -98,11 +95,6 @@ pub const Usb = struct {
     fn closeVt(ptr: *anyopaque) void {
         const self: *Usb = @ptrCast(@alignCast(ptr));
         self.close();
-    }
-
-    fn packetSizesVt(ptr: *anyopaque) PacketSizes {
-        const self: *Usb = @ptrCast(@alignCast(ptr));
-        return .{ .in_max = self.in_maxpktsize, .out_max = self.out_maxpktsize };
     }
 
     fn destroyVt(ptr: *anyopaque) void {
@@ -245,12 +237,6 @@ fn readProductString(handle: *c.libusb_device_handle, desc: *const c.libusb_devi
     return buf[0..@intCast(n)];
 }
 
-pub const OpenResult = struct {
-    usb: Usb,
-    product_str_buf: [128]u8, // the iProduct string of the opened device
-    product_len: usize,
-};
-
 /// Port of usb_open(): enumerate once per 250 ms until a matching device can
 /// be opened, for up to `wait_ms` total. When `target` is given, bus/devnum
 /// must match exactly and the serial token after "_SN:" in iProduct
@@ -299,7 +285,7 @@ fn openOnce(policy: *const Policy, target: ?transport_mod.Target, logger: *log.L
         var desc: c.libusb_device_descriptor = undefined;
         if (c.libusb_get_device_descriptor(dev, &desc) != 0) continue;
 
-        const ddesc = DeviceDesc{ .vid = desc.idVendor, .pid = desc.idProduct, .product_str = "" };
+        const ddesc = DeviceDesc{ .vid = desc.idVendor, .pid = desc.idProduct };
         if (!policy.matchDevice(ddesc)) continue;
 
         saw_candidate = true;

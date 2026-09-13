@@ -53,19 +53,10 @@ pub const Harness = struct {
         return .{ .ptr = self, .vtable = &vtable };
     }
 
-    /// Restart the script from `reset_step` and drop queued bytes (stands in
-    /// for a USB reset / device re-enumeration).
-    pub fn resetScript(self: *Harness) void {
-        self.step_idx = self.reset_step;
-        self.queue.clearRetainingCapacity();
-        self.advance();
-    }
-
     const vtable = Transport.VTable{
         .read = readVt,
         .write = writeVt,
         .close = closeVt,
-        .packetSizes = packetSizesVt,
         .reset = resetVt,
     };
 
@@ -159,10 +150,6 @@ pub const Harness = struct {
         _ = ptr;
     }
 
-    fn packetSizesVt(ptr: *anyopaque) transport_mod.PacketSizes {
-        _ = ptr;
-        return .{ .in_max = 512, .out_max = 512 };
-    }
 };
 
 test "harness matches writes and serves responses in order" {

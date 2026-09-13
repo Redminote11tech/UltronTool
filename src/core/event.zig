@@ -28,9 +28,6 @@ pub fn FixedStr(comptime N: usize) type {
             return self.buf[0..self.len];
         }
 
-        pub fn isEmpty(self: *const Self) bool {
-            return self.len == 0;
-        }
     };
 }
 

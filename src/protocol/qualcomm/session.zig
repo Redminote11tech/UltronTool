@@ -22,24 +22,6 @@ const fileio = @import("../../core/fileio.zig");
 const Error = transport.Error;
 const EventChannel = ev.Channel(ev.Event, 256);
 
-pub const FlashRequest = struct {
-    /// Path to the device's firehose programmer (.mbn/.elf). Optional when
-    /// the programmer is already running on the device.
-    programmer: ?[]const u8 = null,
-    /// rawprogram*.xml and patch*.xml files, executed in the given order
-    /// (qdl applies ops in argv order).
-    xml_files: []const []const u8 = &.{},
-    storage: fh.StorageType = .ufs,
-    /// Skip images whose files are absent (qdl --allow-missing).
-    allow_missing: bool = false,
-    /// Do not send the final reset.
-    skip_reset: bool = false,
-    /// Optional "_SN:" serial filter for the USB device.
-    serial: ?[]const u8 = null,
-    /// How long to wait for the device to appear, ms.
-    wait_ms: u32 = 5000,
-};
-
 // ----------------------------------------------------------------------
 // Chip identity probe (port of sahara_chipinfo)
 // ----------------------------------------------------------------------
