@@ -81,6 +81,7 @@ pub const Usb = struct {
         .read = readVt,
         .write = writeVt,
         .close = closeVt,
+        .destroy = destroyVt,
         .packetSizes = packetSizesVt,
     };
 
