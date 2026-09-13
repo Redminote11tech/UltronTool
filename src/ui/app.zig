@@ -1103,6 +1103,9 @@ fn openChooserFull(ui: *Ui, kind: ChooserKind, title: [:0]const u8, save: bool, 
         null,
     );
     if (suggested) |s| gtk.FileChooser.setCurrentName(chooser.as(gtk.FileChooser), s.ptr);
+    // Modal: the main window must not change state (LUN, device, busy) while
+    // a chooser is open — the response handlers act on state captured then.
+    gtk.NativeDialog.setModal(chooser.as(gtk.NativeDialog), 1);
     ui.chooser = kind;
     _ = gtk.NativeDialog.signals.response.connect(chooser, *Ui, &onChooserResponse, ui, .{});
     gtk.NativeDialog.show(chooser.as(gtk.NativeDialog));
