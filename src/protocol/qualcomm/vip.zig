@@ -59,9 +59,20 @@ fn joinPath(buf: []u8, dir: []const u8, name: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, name });
 }
 
-/// Write `bytes` to `dir/name`, appending to existing content (the chain
-/// hashes are appended to already-written tables, like qdl's
-/// write_output_file(append=true)).
+/// Write `bytes` to `dir/name`, truncating any existing file (qdl's
+/// write_digests_to_table opens its output with "wb").
+fn writeFileTruncate(dir: []const u8, name: []const u8, bytes: []const u8) !void {
+    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try joinPath(&pbuf, dir, name);
+    var out = try fileio.File.create(path);
+    const ok = (out.writeAll(bytes) catch 0) == bytes.len;
+    out.close();
+    if (!ok) return error.WriteFailed;
+}
+
+/// Append `bytes` to `dir/name`, creating it when missing (qdl's
+/// write_output_file with append=true — the chain hashes ride onto the
+/// payload written by writeFileTruncate).
 fn writeFileAppend(alloc: std.mem.Allocator, dir: []const u8, name: []const u8, bytes: []const u8) !void {
     var pbuf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try joinPath(&pbuf, dir, name);
@@ -94,8 +105,18 @@ pub const Generator = struct {
     ctx: std.crypto.hash.sha2.Sha256 = undefined,
 
     /// Create DIGEST_TABLE.bin in `dir` and start collecting digests.
+    /// Stale outputs from a previous run into the same folder are removed:
+    /// the transfer loader picks up chained tables by index until one is
+    /// missing, so leftover higher-numbered tables would pair a fresh
+    /// DigestsToSign.bin with dead payloads.
     pub fn init(alloc: std.mem.Allocator, dir: []const u8) !Generator {
         var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+        var nbuf: [64]u8 = undefined;
+        for (0..max_chained_files) |i| {
+            const name = std.fmt.bufPrint(&nbuf, "{s}{d}.bin", .{ chained_prefix, i }) catch break;
+            const stale = joinPath(&pbuf, dir, name) catch break;
+            fileio.removeFile(stale);
+        }
         const path = try joinPath(&pbuf, dir, digest_table_file);
         var g = Generator{ .alloc = alloc, .dir = dir };
         g.ctx = std.crypto.hash.sha2.Sha256.init(.{});
@@ -162,7 +183,7 @@ fn createChainedTables(alloc: std.mem.Allocator, dir: []const u8, total: usize) 
 
     // Step 1: DigestsToSign.bin = the first `signed_count` digests.
     {
-        try writeFileAppend(alloc, dir, digests_to_sign_file, all[0 .. signed_count * digest_len]);
+        try writeFileTruncate(dir, digests_to_sign_file, all[0 .. signed_count * digest_len]);
     }
 
     // Step 2: the remaining digests, 255 per chained table; the final table
@@ -177,7 +198,7 @@ fn createChainedTables(alloc: std.mem.Allocator, dir: []const u8, total: usize) 
 
         var nbuf: [64]u8 = undefined;
         const name = try std.fmt.bufPrint(&nbuf, "{s}{d}.bin", .{ chained_prefix, chain_idx });
-        try writeFileAppend(alloc, dir, name, payload);
+        try writeFileTruncate(dir, name, payload);
 
         ctxs[chain_idx] = std.crypto.hash.sha2.Sha256.init(.{});
         ctxs[chain_idx].update(payload);
