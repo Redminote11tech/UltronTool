@@ -965,13 +965,16 @@ pub const Session = struct {
         while (got < need) {
             if (self.cancelled()) return Error.Cancelled;
             const n = try self.io.read(out[@intCast(got)..@intCast(need)], 30000);
+            // A 0-byte return is a ZLP, not end-of-data (qdl semantics):
+            // devices emit one between the ACK phase and the first sector
+            // chunk of a large read. Real exhaustion surfaces as a timeout.
+            if (n == 0) continue;
             got += n;
-            if (n == 0) break; // ZLP-delimited end of data
         }
         self.progress.report("read", got, need);
 
         const final = try self.readResponse(10000);
-        return final.isAck();
+        return final.isAck() and got == need;
     }
 
     /// Same exchange, streaming into a file — used for partition reads
@@ -986,7 +989,8 @@ pub const Session = struct {
         while (got < need) {
             if (self.cancelled()) return Error.Cancelled;
             const n = try self.io.read(chunk, 30000);
-            if (n == 0) break; // ZLP-delimited end of data
+            // ZLP, not end-of-data (see readSectors).
+            if (n == 0) continue;
             const written = file.writeAll(chunk[0..n]) catch {
                 var ebuf: [128]u8 = undefined;
                 self.logger.err("failed writing to {s}: {s}", .{ label, file.errorMessage(&ebuf) });
@@ -1007,9 +1011,10 @@ pub const Session = struct {
             return Error.Io;
         };
         if (final.isAck() and got != need) {
-            self.logger.warn("read of {s} ended early ({d}/{d} bytes)", .{ label, got, need });
+            self.logger.err("read of {s} ended early ({d}/{d} bytes) — the backup is NOT usable", .{ label, got, need });
+            return Error.Io;
         }
-        return final.isAck();
+        return final.isAck() and got == need;
     }
 
     /// Send the <read> request and consume the setup ACK. Returns false when
