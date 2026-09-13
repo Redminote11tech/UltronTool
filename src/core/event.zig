@@ -196,20 +196,26 @@ pub fn Channel(comptime T: type, comptime capacity: usize) type {
         pub fn drain(self: *Self, ctx: anytype, comptime cb: fn (@TypeOf(ctx), T) void) void {
             self.mutex.lock();
             const n = self.len;
-            const base = (self.head + capacity - n) % capacity;
             const scratch = std.heap.page_allocator.alloc(T, n) catch {
-                // OOM: fall back to oldest-first per-event copies without a
-                // snapshot (still cannot lose producer events mid-callback).
+                // OOM: fall back to oldest-first per-event pops (still cannot
+                // lose producer events mid-callback). GMutex is not recursive,
+                // so the snapshot lock must be released before popping.
+                self.mutex.unlock();
                 var i: usize = 0;
                 while (i < n) : (i += 1) {
                     self.mutex.lock();
-                    const ev = self.ring[(base + i) % capacity];
+                    if (self.len == 0) {
+                        self.mutex.unlock();
+                        return;
+                    }
+                    const popped = self.ring[(self.head + capacity - self.len) % capacity];
                     self.len -= 1;
                     self.mutex.unlock();
-                    cb(ctx, ev);
+                    cb(ctx, popped);
                 }
                 return;
             };
+            const base = (self.head + capacity - n) % capacity;
             for (0..n) |i| scratch[i] = self.ring[(base + i) % capacity];
             self.len = 0; // consumed while locked
             self.mutex.unlock();
