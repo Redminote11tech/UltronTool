@@ -33,6 +33,18 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.4.1" date="2026-09-13">
+      <description>
+        <p>Hardening release from a five-agent code audit: worker threads are
+        joined at shutdown, cancelling the connect probe no longer wedges the
+        UI, partition reads reject truncated data and verify the GPT entry
+        CRC, out-of-range UFS provisioning values are rejected instead of
+        aborting, queued writes can no longer survive a disconnect or land on
+        another device/LUN, VIP digest tables regenerate cleanly into the same
+        folder, file choosers are modal, and several small leaks and doc
+        drifts were fixed.</p>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-09-13">
       <description>
         <p>Huawei UPDATE.APP support: flash an entire Huawei firmware package

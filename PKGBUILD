@@ -6,7 +6,7 @@
 #                fetched once in prepare() (see the note below).
 
 pkgname=ultron
-pkgver=0.4.0
+pkgver=0.4.1
 pkgrel=1
 pkgdesc='Qualcomm EDL (9008) flashing tool — graphical successor to qdl'
 arch=(x86_64)
