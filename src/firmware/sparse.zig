@@ -153,7 +153,9 @@ pub fn convertToFile(
         const zero = [_]u8{0};
         if ((try out.writeAll(&zero)) != 1) return error.WriteFailed;
     }
-    out.flush() catch {};
+    // A failed flush means the OS still holds (or lost) data — the raw file
+    // on disk would be short and the flashed image silently wrong.
+    out.flush() catch return error.WriteFailed;
     return raw_size;
 }
 
