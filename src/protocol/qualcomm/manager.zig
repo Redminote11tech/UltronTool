@@ -416,7 +416,10 @@ pub const Manager = struct {
         var n: usize = 0;
         var attempt: u32 = 0;
         while (attempt < 3) : (attempt += 1) {
-            if (self.cancel.load(.acquire)) return;
+            if (self.cancel.load(.acquire)) {
+                pushFinished(self.channel, false, "Cancelled");
+                return;
+            }
             n = self.io.?.read(&buf, 1000) catch 0;
             if (n > 0) break;
         }
@@ -496,7 +499,10 @@ pub const Manager = struct {
         var n: usize = 0;
         var attempt: u32 = 0;
         while (attempt < 5) : (attempt += 1) {
-            if (self.cancel.load(.acquire)) return false;
+            if (self.cancel.load(.acquire)) {
+                pushFinished(self.channel, false, "Cancelled");
+                return false;
+            }
             n = self.io.?.read(&buf, 1000) catch 0;
             if (n > 0) break;
         }
