@@ -258,8 +258,10 @@ fn isBlank(s: []const u8) bool {
 }
 
 /// Escape a string for use inside a double-quoted attribute value.
-/// Returns the escaped slice within `buf` (caller must size it: 6x input worst case).
-pub fn escapeAttr(buf: []u8, s: []const u8) []const u8 {
+/// Returns the escaped slice within `buf` (caller must size it: 6x input worst
+/// case). Errors instead of truncating: a silently cut attribute (filename,
+/// start_sector) would change what the device actually operates on.
+pub fn escapeAttr(buf: []u8, s: []const u8) error{NoSpace}![]const u8 {
     var n: usize = 0;
     for (s) |ch| {
         const rep: []const u8 = switch (ch) {
@@ -269,7 +271,7 @@ pub fn escapeAttr(buf: []u8, s: []const u8) []const u8 {
             '>' => "&gt;",
             else => &[_]u8{ch},
         };
-        if (n + rep.len > buf.len) break;
+        if (n + rep.len > buf.len) return error.NoSpace;
         @memcpy(buf[n .. n + rep.len], rep);
         n += rep.len;
     }
@@ -313,5 +315,6 @@ test "parse rawprogram file" {
 
 test "escapeAttr" {
     var buf: [128]u8 = undefined;
-    try std.testing.expectEqualStrings("a&quot;b&amp;c", escapeAttr(&buf, "a\"b&c"));
+    try std.testing.expectEqualStrings("a&quot;b&amp;c", try escapeAttr(&buf, "a\"b&c"));
+    try std.testing.expectError(error.NoSpace, escapeAttr(&buf, "a\"b&cXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"));
 }

@@ -475,7 +475,7 @@ pub const Session = struct {
         var esc_buf: [128]u8 = undefined;
         var buf: [8192]u8 = undefined;
         const s = std.fmt.bufPrint(&buf, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><configure MemoryName=\"{s}\" MaxPayloadSizeToTargetInBytes=\"{d}\" Verbose=\"0\" ZlpAwareHost=\"1\" SkipStorageInit=\"{d}\" /></data>", .{
-            xml.escapeAttr(&esc_buf, self.storage.memoryName()),
+            xml.escapeAttr(&esc_buf, self.storage.memoryName()) catch return Error.Io,
             payload_size,
             @intFromBool(skip_storage_init),
         }) catch return Error.Io;
@@ -657,8 +657,8 @@ pub const Session = struct {
             sector_size,
             num_sectors,
             op.partition,
-            xml.escapeAttr(&esc1, op.start_sector),
-            xml.escapeAttr(&esc2, fname),
+            xml.escapeAttr(&esc1, op.start_sector) catch return Error.Io,
+            xml.escapeAttr(&esc2, fname) catch return Error.Io,
         }) catch return Error.Io;
 
         try self.writeRequest(req);
@@ -795,7 +795,7 @@ pub const Session = struct {
                 sector_size,
                 op.partition,
                 op.num_sectors,
-                xml.escapeAttr(&esc_buf, op.start_sector),
+                xml.escapeAttr(&esc_buf, op.start_sector) catch return Error.Io,
             }) catch return Error.Io;
         } else {
             req = std.fmt.bufPrint(&xml_buf, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><erase SECTOR_SIZE_IN_BYTES=\"{d}\" physical_partition_number=\"{d}\"/></data>", .{
@@ -833,11 +833,11 @@ pub const Session = struct {
         const req = std.fmt.bufPrint(&xml_buf, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><patch SECTOR_SIZE_IN_BYTES=\"{d}\" byte_offset=\"{d}\" filename=\"{s}\" physical_partition_number=\"{d}\" size_in_bytes=\"{d}\" start_sector=\"{s}\" value=\"{s}\"/></data>", .{
             op.sector_size,
             op.byte_offset,
-            xml.escapeAttr(&esc1, fname),
+            xml.escapeAttr(&esc1, fname) catch return Error.Io,
             op.partition,
             op.size_in_bytes,
-            xml.escapeAttr(&esc2, op.start_sector),
-            xml.escapeAttr(&esc3, op.value),
+            xml.escapeAttr(&esc2, op.start_sector) catch return Error.Io,
+            xml.escapeAttr(&esc3, op.value) catch return Error.Io,
         }) catch return Error.Io;
 
         try self.writeRequest(req);
@@ -870,7 +870,7 @@ pub const Session = struct {
             op.sector_size,
             op.num_sectors,
             op.partition,
-            xml.escapeAttr(&esc_buf, op.start_sector),
+            xml.escapeAttr(&esc_buf, op.start_sector) catch return Error.Io,
         }) catch return Error.Io;
 
         try self.writeRequest(req);
@@ -931,7 +931,7 @@ pub const Session = struct {
         var buf: [2048]u8 = undefined;
         var desc_attr: []const u8 = "";
         if (u.desc) |d| {
-            desc_attr = std.fmt.bufPrint(&desc_buf, " desc=\"{s}\"", .{xml.escapeAttr(&esc_buf, d)}) catch return Error.Io;
+            desc_attr = std.fmt.bufPrint(&desc_buf, " desc=\"{s}\"", .{xml.escapeAttr(&esc_buf, d) catch return Error.Io}) catch return Error.Io;
         }
         const body = std.fmt.bufPrint(&buf, "<ufs LUNum=\"{d}\" bLUEnable=\"{d}\" bBootLunID=\"{d}\" size_in_kb=\"{d}\" bDataReliability=\"{d}\" bLUWriteProtect=\"{d}\" bMemoryType=\"{d}\" bLogicalBlockSize=\"{d}\" bProvisioningType=\"{d}\" wContextCapabilities=\"{d}\"{s}/>", .{
             u.LUNum, u.bLUEnable, u.bBootLunID, u.size_in_kb, u.bDataReliability, u.bLUWriteProtect, u.bMemoryType, u.bLogicalBlockSize, u.bProvisioningType, u.wContextCapabilities,
@@ -1026,7 +1026,7 @@ pub const Session = struct {
             op.sector_size,
             op.num_sectors,
             op.partition,
-            xml.escapeAttr(&esc_buf, op.start_sector),
+            xml.escapeAttr(&esc_buf, op.start_sector) catch return Error.Io,
         }) catch return Error.Io;
 
         try self.writeRequest(req);
