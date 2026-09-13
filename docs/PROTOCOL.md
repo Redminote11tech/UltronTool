@@ -216,9 +216,9 @@ loader stage; VIP requires the fresh-boot loader-upload flow.
 | Drain-to-complete on refused writes | ✅ | Protected partitions fail cleanly; session survives; the drain streams the image's own remaining bytes (not zeros), so whatever lands past a refusal is real image content |
 | Stuck-programmer recovery | ✅ | nop probe → USB reset → fresh EDL → auto loader re-upload |
 | Multi-device targeting | ✅ | bus/devnum + `_SN:` product-string serial filter (qdl --serial semantics), picker appears with 2+ visible devices |
-| Multi-image Sahara archives (zip / id:file) | ⏳ planned | qdl decode_programmer |
-| RAM dump / Memory Debug (900E crash dumps) | ⏳ planned | MEM_DEBUG64 region table + dumps |
-| UFS provisioning (<ufs> XML) | ⏳ planned | destructive; bConfigDescrLock gates |
+| Multi-image Sahara archives (zip / id:file) | ⏳ planned | qdl decode_programmer; explicitly deferred |
+| RAM dump / Memory Debug (900E crash dumps) | ✅ | MEM_DEBUG64 region table + filtered dumps (minidump.elf assembly deferred) |
+| UFS provisioning (<ufs> XML) | ✅ | full qdl ufs.c port: validation pass (commit=0) then commit; the GUI's Finalize switch must match the XML's bConfigDescrLock, and OTP commits require an explicit destructive confirmation |
 | VIP (Vendor Image Programming) | ✅ | full qdl vip.c port: GUI digest generation, table streaming, single-configure rule; the vendor signing step stays external; untested against VIP hardware so far |
 | Streaming (nandprg/enandprg), Diag | ❌ n/a | NAND-target legacy paths |
 

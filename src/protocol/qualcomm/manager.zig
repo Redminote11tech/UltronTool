@@ -24,6 +24,7 @@ const sahara = @import("sahara.zig");
 const firehose = @import("firehose.zig");
 const rawprogram = @import("rawprogram.zig");
 const vip = @import("vip.zig");
+const ufs = @import("ufs.zig");
 const gpt = @import("gpt.zig");
 
 const Error = transport.Error;
@@ -79,6 +80,11 @@ pub const Request = union(enum) {
         num_sectors: u64,
         lun: u32,
         label: []const u8,
+    },
+    /// Run the UFS provisioning XML (destructive; OTP when finalize=true).
+    provision_ufs: struct {
+        path: []const u8,
+        finalize: bool,
     },
     /// Flash rawprogram/patch XML files (qdl parity; no auto-reset).
     flash_xml: struct {
@@ -228,6 +234,7 @@ pub const Manager = struct {
                 w.label = try item.dupe(w.label);
             },
             .erase_partition => |*e| e.label = try item.dupe(e.label),
+            .provision_ufs => |*p| p.path = try item.dupe(p.path),
             .flash_xml => |*f| {
                 const files = try heap.alloc([]const u8, f.files.len);
                 errdefer heap.free(files);
@@ -272,6 +279,7 @@ pub const Manager = struct {
             .read_partition => |r| self.readPartition(r.path, r.first_lba, r.num_sectors, r.lun, r.label),
             .write_partition => |w| self.writePartition(w.path, w.first_lba, w.max_sectors, w.lun, w.label),
             .erase_partition => |e| self.erasePartition(e.first_lba, e.num_sectors, e.lun, e.label),
+            .provision_ufs => |p| self.provisionUfs(p.path, p.finalize),
             .flash_xml => |fx| self.flashXml(fx.files, fx.allow_missing),
             .reset => {
                 if (self.requireSession()) |fh| {
@@ -1089,6 +1097,42 @@ pub const Manager = struct {
         }
         self.logger.err("✗ {s}: DIGEST MISMATCH — device {s} vs local {s}", .{ label, dev_hex, local_hex });
         return .mismatch;
+    }
+
+    /// UFS provisioning (qdl --finalize-provisioning semantics): validate
+    /// the config with commit=0, then commit. Ends the session with a reset.
+    fn provisionUfs(self: *Manager, path: []const u8, finalize: bool) void {
+        const fh = self.requireSession() orelse return;
+        if (self.storage != .ufs) {
+            pushFinished(self.channel, false, "UFS provisioning needs storage type UFS");
+            return;
+        }
+        if (fh.vip != null) {
+            pushFinished(self.channel, false, "UFS provisioning is unavailable in VIP sessions");
+            return;
+        }
+
+        var cfg = ufs.load(self.alloc, path, finalize, self.logger) catch {
+            pushFinished(self.channel, false, "provisioning XML rejected");
+            return;
+        };
+        defer cfg.deinit(self.alloc);
+        defer ufs.deinitDescs(&cfg, self.alloc);
+
+        self.logger.info("UFS provisioning: {d} LUN(s), bConfigDescrLock={d} ({s})", .{ cfg.bodies.items.len, cfg.common.bConfigDescrLock, if (finalize) "FINALIZE" else "no finalize" });
+
+        ufs.execute(&cfg, fh, self.logger) catch {
+            pushFinished(self.channel, false, "UFS provisioning failed");
+            return;
+        };
+
+        self.logger.info("UFS provisioning succeeded — resetting device", .{});
+        fh.reset() catch |e| {
+            self.logger.warn("reset after provisioning failed: {s}", .{@errorName(e)});
+        };
+        self.teardown();
+        self.emitState(.disconnected);
+        pushFinished(self.channel, true, "UFS provisioning finished");
     }
 
     fn flashXml(self: *Manager, files: []const []const u8, allow_missing: bool) void {

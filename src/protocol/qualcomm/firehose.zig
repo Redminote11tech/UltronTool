@@ -47,6 +47,45 @@ pub const StorageType = enum {
 
 pub const default_max_payload_size: usize = 1048576;
 
+/// UFS provisioning tag ACK timeouts (qdl firehose.c).
+pub const ufs_tag_timeout_ms: u32 = 5000;
+pub const ufs_commit_timeout_ms: u32 = 120000;
+
+pub const UfsCommon = struct {
+    bNumberLU: u32 = 0,
+    bBootEnable: u32 = 0,
+    bDescrAccessEn: u32 = 0,
+    bInitPowerMode: u32 = 0,
+    bHighPriorityLUN: u32 = 0,
+    bSecureRemovalType: u32 = 0,
+    bInitActiveICCLevel: u32 = 0,
+    wPeriodicRTCUpdate: u32 = 0,
+    /// 1 = irreversible OTP lock (the GUI must explicitly confirm).
+    bConfigDescrLock: u32 = 0,
+    wb: bool = false,
+    bWriteBoosterBufferPreserveUserSpaceEn: u32 = 0,
+    bWriteBoosterBufferType: u32 = 0,
+    shared_wb_buffer_size_in_kb: u32 = 0,
+};
+
+pub const UfsBody = struct {
+    LUNum: u32 = 0,
+    bLUEnable: u32 = 0,
+    bBootLunID: u32 = 0,
+    size_in_kb: u32 = 0,
+    bDataReliability: u32 = 0,
+    bLUWriteProtect: u32 = 0,
+    bMemoryType: u32 = 0,
+    bLogicalBlockSize: u32 = 0,
+    bProvisioningType: u32 = 0,
+    wContextCapabilities: u32 = 0,
+    desc: ?[]const u8 = null,
+};
+
+pub const UfsEpilogue = struct {
+    LUNtoGrow: u32 = 0,
+};
+
 pub const Response = struct {
     pub const Kind = enum { ack, nak, timeout, io };
     kind: Kind = .timeout,
@@ -844,6 +883,60 @@ pub const Session = struct {
         }
         // Drain any remaining log messages for the reset.
         _ = self.readResponse(1000) catch {};
+    }
+
+    // ------------------------------------------------------------------
+    // UFS provisioning (port of firehose_apply_ufs_common/body/epilogue)
+    // ------------------------------------------------------------------
+
+    fn sendSingleTag(self: *Session, xml_body: []const u8, timeout_ms: u32) Error!void {
+        var buf: [8192]u8 = undefined;
+        const req = std.fmt.bufPrint(&buf, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data>{s}</data>", .{xml_body}) catch return Error.Io;
+        try self.writeRequest(req);
+        const resp = try self.readResponse(timeout_ms);
+        if (!resp.isAck()) {
+            self.logger.err("ufs request failed", .{});
+            return Error.Io;
+        }
+    }
+
+    pub fn applyUfsCommon(self: *Session, u: *const UfsCommon) Error!void {
+        var buf: [2048]u8 = undefined;
+        var body: []const u8 = undefined;
+        if (u.wb) {
+            body = std.fmt.bufPrint(&buf, "<ufs bNumberLU=\"{d}\" bBootEnable=\"{d}\" bDescrAccessEn=\"{d}\" bInitPowerMode=\"{d}\" bHighPriorityLUN=\"{d}\" bSecureRemovalType=\"{d}\" bInitActiveICCLevel=\"{d}\" wPeriodicRTCUpdate=\"{d}\" bConfigDescrLock=\"{d}\" bWriteBoosterBufferPreserveUserSpaceEn=\"{d}\" bWriteBoosterBufferType=\"{d}\" shared_wb_buffer_size_in_kb=\"{d}\"/>", .{
+                u.bNumberLU, u.bBootEnable, u.bDescrAccessEn, u.bInitPowerMode, u.bHighPriorityLUN, u.bSecureRemovalType, u.bInitActiveICCLevel, u.wPeriodicRTCUpdate, u.bConfigDescrLock,
+                u.bWriteBoosterBufferPreserveUserSpaceEn, u.bWriteBoosterBufferType, u.shared_wb_buffer_size_in_kb,
+            }) catch return Error.Io;
+        } else {
+            body = std.fmt.bufPrint(&buf, "<ufs bNumberLU=\"{d}\" bBootEnable=\"{d}\" bDescrAccessEn=\"{d}\" bInitPowerMode=\"{d}\" bHighPriorityLUN=\"{d}\" bSecureRemovalType=\"{d}\" bInitActiveICCLevel=\"{d}\" wPeriodicRTCUpdate=\"{d}\" bConfigDescrLock=\"{d}\"/>", .{
+                u.bNumberLU, u.bBootEnable, u.bDescrAccessEn, u.bInitPowerMode, u.bHighPriorityLUN, u.bSecureRemovalType, u.bInitActiveICCLevel, u.wPeriodicRTCUpdate, u.bConfigDescrLock,
+            }) catch return Error.Io;
+        }
+        try self.sendSingleTag(body, ufs_tag_timeout_ms);
+    }
+
+    pub fn applyUfsBody(self: *Session, u: *const UfsBody) Error!void {
+        var esc_buf: [128]u8 = undefined;
+        var desc_buf: [160]u8 = undefined;
+        var buf: [2048]u8 = undefined;
+        var desc_attr: []const u8 = "";
+        if (u.desc) |d| {
+            desc_attr = std.fmt.bufPrint(&desc_buf, " desc=\"{s}\"", .{xml.escapeAttr(&esc_buf, d)}) catch return Error.Io;
+        }
+        const body = std.fmt.bufPrint(&buf, "<ufs LUNum=\"{d}\" bLUEnable=\"{d}\" bBootLunID=\"{d}\" size_in_kb=\"{d}\" bDataReliability=\"{d}\" bLUWriteProtect=\"{d}\" bMemoryType=\"{d}\" bLogicalBlockSize=\"{d}\" bProvisioningType=\"{d}\" wContextCapabilities=\"{d}\"{s}/>", .{
+            u.LUNum, u.bLUEnable, u.bBootLunID, u.size_in_kb, u.bDataReliability, u.bLUWriteProtect, u.bMemoryType, u.bLogicalBlockSize, u.bProvisioningType, u.wContextCapabilities,
+            desc_attr,
+        }) catch return Error.Io;
+        try self.sendSingleTag(body, ufs_tag_timeout_ms);
+    }
+
+    pub fn applyUfsEpilogue(self: *Session, u: *const UfsEpilogue, commit: bool) Error!void {
+        var buf: [512]u8 = undefined;
+        const body = std.fmt.bufPrint(&buf, "<ufs LUNtoGrow=\"{d}\" commit=\"{d}\"/>", .{ u.LUNtoGrow, @intFromBool(commit) }) catch return Error.Io;
+        // A commit epilogue writes the UFS configuration descriptor and can
+        // take a while; the validation pass (commit=0) is cheap.
+        try self.sendSingleTag(body, if (commit) ufs_commit_timeout_ms else ufs_tag_timeout_ms);
     }
 
     // ------------------------------------------------------------------

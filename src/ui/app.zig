@@ -55,6 +55,7 @@ const ChooserKind = union(enum) {
     digest_xml_add: void,
     digest_out_dir: void,
     ramdump_dir: void,
+    ufs_xml: void,
     read_partition: ev.PartitionRow,
     write_partition: ev.PartitionRow,
 };
@@ -100,6 +101,7 @@ pub const Ui = struct {
     storage: firehose.StorageType = .ufs,
     skip_storage_init: bool = false,
     allow_missing: bool = false,
+    ufs_xml_path: ?[]u8 = null,
 
     // Widget references.
     window: ?*adw.ApplicationWindow = null,
@@ -153,6 +155,9 @@ pub const Ui = struct {
     xml_row: ?*adw.ActionRow = null,
     flash_xml_btn: ?*gtk.Button = null,
     allow_missing_sw: ?*gtk.Switch = null,
+    ufs_row: ?*adw.ActionRow = null,
+    ufs_finalize_sw: ?*gtk.Switch = null,
+    ufs_btn: ?*gtk.Button = null,
     reset_btn: ?*gtk.Button = null,
     disconnect_btn: ?*gtk.Button = null,
 
@@ -243,6 +248,7 @@ const ConfirmKind = union(enum) {
     apply_writes: void,
     flash_xml: void,
     erase_partition: ev.PartitionRow,
+    provision_ufs: void,
 };
 
 // ----------------------------------------------------------------------
@@ -316,6 +322,7 @@ pub fn mainRun(init: std.process.Init) !void {
     if (ui.programmer_path) |p| alloc.free(p);
     if (ui.vip_dir) |p| alloc.free(p);
     if (ui.ramdump_dir) |p| alloc.free(p);
+    if (ui.ufs_xml_path) |p| alloc.free(p);
     for (ui.digest_xmls.items) |p| alloc.free(p);
     ui.digest_xmls.deinit(alloc);
     if (ui.digest_dir) |p| alloc.free(p);
@@ -776,6 +783,42 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
 
     gtk.Box.append(conn, xml_group.as(gtk.Widget));
 
+    // --- UFS provisioning (advanced, destructive) ------------------------
+    const ufs_group = adw.PreferencesGroup.new();
+    adw.PreferencesGroup.setTitle(ufs_group, "UFS provisioning (advanced)");
+    adw.PreferencesGroup.setDescription(ufs_group, "Rewrites the UFS configuration descriptor from a vendor <ufs> XML. With the OTP lock it is irreversible");
+
+    const ufs_row = adw.ActionRow.new();
+    rowTitle(ufs_row, "Provisioning XML");
+    adw.ActionRow.setSubtitle(ufs_row, "None selected — vendor-provided <ufs> layout");
+    const ufs_add_btn = gtk.Button.newWithLabel("Choose…");
+    _ = gtk.Button.signals.clicked.connect(ufs_add_btn, *Ui, &onPickUfsXml, ui, .{});
+    adw.ActionRow.addSuffix(ufs_row, ufs_add_btn.as(gtk.Widget));
+    const ufs_clear_btn = gtk.Button.newWithLabel("Clear");
+    _ = gtk.Button.signals.clicked.connect(ufs_clear_btn, *Ui, &onClearUfsXml, ui, .{});
+    adw.ActionRow.addSuffix(ufs_row, ufs_clear_btn.as(gtk.Widget));
+    adw.PreferencesGroup.add(ufs_group, ufs_row.as(gtk.Widget));
+    ui.ufs_row = ufs_row;
+
+    const ufs_fin_row = adw.ActionRow.new();
+    rowTitle(ufs_fin_row, "Finalize (OTP lock)");
+    adw.ActionRow.setSubtitle(ufs_fin_row, "Must match bConfigDescrLock=1 in the XML — IRREVERSIBLE");
+    const ufs_fin_sw = gtk.Switch.new();
+    gtk.Widget.setValign(ufs_fin_sw.as(gtk.Widget), .center);
+    adw.ActionRow.addSuffix(ufs_fin_row, ufs_fin_sw.as(gtk.Widget));
+    adw.PreferencesGroup.add(ufs_group, ufs_fin_row.as(gtk.Widget));
+    ui.ufs_finalize_sw = ufs_fin_sw;
+
+    const ufs_btn = gtk.Button.newWithLabel("Provision…");
+    gtk.Widget.addCssClass(ufs_btn.as(gtk.Widget), "destructive-action");
+    gtk.Widget.setHalign(ufs_btn.as(gtk.Widget), .start);
+    gtk.Widget.setSensitive(ufs_btn.as(gtk.Widget), 0);
+    _ = gtk.Button.signals.clicked.connect(ufs_btn, *Ui, &onUfsProvisionClicked, ui, .{});
+    ui.ufs_btn = ufs_btn;
+    adw.PreferencesGroup.add(ufs_group, ufs_btn.as(gtk.Widget));
+
+    gtk.Box.append(conn, ufs_group.as(gtk.Widget));
+
     // Session controls.
     const ctrl_box = gtk.Box.new(.horizontal, 10);
     gtk.Widget.setHalign(ctrl_box.as(gtk.Widget), .center);
@@ -1056,6 +1099,14 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
             ui.digest_dir = ui.alloc.dupe(u8, path) catch null;
             if (ui.digest_dir) |p| setSubtitleZ(ui.digest_dir_row.?, p);
             refreshDigestRow(ui);
+        },
+        .ufs_xml => {
+            if (ui.ufs_xml_path) |old| ui.alloc.free(old);
+            ui.ufs_xml_path = ui.alloc.dupe(u8, path) catch null;
+            if (ui.ufs_xml_path) |p| {
+                setSubtitleZ(ui.ufs_row.?, p);
+                gtk.Widget.setSensitive(ui.ufs_btn.?.as(gtk.Widget), @intFromBool(!ui.busy()));
+            }
         },
         .ramdump_dir => {
             if (ui.ramdump_dir) |old| ui.alloc.free(old);
@@ -1558,6 +1609,13 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
                 .label = row.name.slice(),
             } });
         },
+        .provision_ufs => {
+            if (ui.busy() or ui.manager == null) return;
+            const path = ui.ufs_xml_path orelse return;
+            const finalize = ui.ufs_finalize_sw != null and gtk.Switch.getActive(ui.ufs_finalize_sw.?) != 0;
+            ui.startJob();
+            ui.manager.?.enqueue(.{ .provision_ufs = .{ .path = path, .finalize = finalize } });
+        },
     }
 }
 
@@ -1666,6 +1724,47 @@ fn onRamdumpClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
         return;
     };
     thread.detach();
+}
+
+// ----------------------------------------------------------------------
+// UFS provisioning
+// ----------------------------------------------------------------------
+
+fn onPickUfsXml(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    openChooser(ui, .ufs_xml, "Select UFS provisioning XML", false, null);
+}
+
+fn onClearUfsXml(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (ui.ufs_xml_path) |p| ui.alloc.free(p);
+    ui.ufs_xml_path = null;
+    adw.ActionRow.setSubtitle(ui.ufs_row.?, "None selected — vendor-provided <ufs> layout");
+    gtk.Widget.setSensitive(ui.ufs_btn.?.as(gtk.Widget), 0);
+}
+
+fn onUfsProvisionClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (ui.busy()) {
+        ui.toast("Another operation is running — wait for it to finish");
+        return;
+    }
+    if (ui.ufs_xml_path == null) {
+        ui.toast("Choose the vendor provisioning XML first");
+        return;
+    }
+    readStorageSelection(ui);
+    if (ui.storage != .ufs) {
+        ui.toast("UFS provisioning needs the storage type set to UFS");
+        return;
+    }
+
+    const finalize = ui.ufs_finalize_sw != null and gtk.Switch.getActive(ui.ufs_finalize_sw.?) != 0;
+    var body_buf: [700]u8 = undefined;
+    const body = if (finalize)
+        std.fmt.bufPrint(&body_buf, "Commit the UFS configuration with bConfigDescrLock=1?\n\nThis is an OTP (one-time-programmable) operation: it CANNOT be undone and may permanently lock the storage configuration. The XML is first validated with commit=0, then committed.", .{}) catch return
+    else
+        std.fmt.bufPrint(&body_buf, "Run UFS provisioning from the selected XML?\n\nThe configuration is first validated (commit=0) and only then committed. Without the OTP lock the operation is repeatable.", .{}) catch return;
+
+    const heading: [:0]const u8 = if (finalize) "IRREVERSIBLE OTP provisioning?" else "Run UFS provisioning?";
+    confirmDialog(ui, heading, body, if (finalize) "Lock permanently" else "Provision", .destructive, .provision_ufs);
 }
 
 // ----------------------------------------------------------------------
@@ -1943,7 +2042,7 @@ fn isNotable(msg: []const u8) bool {
     for (suffixes) |sfx| {
         if (std.mem.endsWith(u8, msg, sfx)) return true;
     }
-    const names = [_][]const u8{ "device reset", "loader required", "disconnected", "connected", "digest tables created", "ramdump finished" };
+    const names = [_][]const u8{ "device reset", "loader required", "disconnected", "connected", "digest tables created", "ramdump finished", "UFS provisioning finished" };
     for (names) |n| {
         if (std.mem.eql(u8, msg, n)) return true;
     }
