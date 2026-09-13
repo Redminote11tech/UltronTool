@@ -1274,7 +1274,8 @@ fn refreshDeviceSelector(ui: *Ui) void {
     name_zs[n] = "Auto (first found)";
     n += 1;
     for (ui.devices.items) |d| {
-        if (n >= name_zs.len) break;
+        // One slot stays reserved for the null terminator below.
+        if (n >= name_zs.len - 1) break;
         const z = std.fmt.bufPrintZ(&names_buf[n], "bus {d:0>3} dev {d:0>3}  {x:0>4}:{x:0>4}", .{ d.bus, d.devnum, d.vid, d.pid }) catch continue;
         name_zs[n] = z.ptr;
         n += 1;
