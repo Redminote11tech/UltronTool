@@ -36,6 +36,13 @@ pub fn readFileAlloc(alloc: std.mem.Allocator, path: []const u8, max_size: usize
     return buf;
 }
 
+/// Best-effort unlink (temp work files).
+pub fn removeFile(path: []const u8) void {
+    var pathz_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const pathz = std.fmt.bufPrintZ(&pathz_buf, "{s}", .{path}) catch return;
+    _ = c.remove(pathz.ptr);
+}
+
 pub fn exists(path: []const u8) bool {
     var pathz_buf: [std.fs.max_path_bytes]u8 = undefined;
     const pathz = std.fmt.bufPrintZ(&pathz_buf, "{s}", .{path}) catch return false;
@@ -43,6 +50,71 @@ pub fn exists(path: []const u8) bool {
     _ = c.fclose(f);
     return true;
 }
+
+/// Dynamic temp directory for work files (e.g. sparse→raw conversions):
+/// unlimited tracked files, each unlinked on cleanup, then the directory.
+pub const TempDirDyn = struct {
+    alloc: std.mem.Allocator,
+    path_buf: [80]u8 = undefined,
+    path_len: usize = 0,
+    files: std.ArrayList([]u8) = .empty,
+
+    pub fn init(alloc: std.mem.Allocator) !TempDirDyn {
+        var pattern: [64]u8 = undefined;
+        const tmpl = std.fmt.bufPrintZ(&pattern, "/tmp/ultron-work-XXXXXX", .{}) catch return error.NameTooLong;
+        var buf: [80]u8 = undefined;
+        @memcpy(buf[0..tmpl.len], tmpl);
+        buf[tmpl.len] = 0;
+        const dir = c.mkdtemp(&buf) orelse return error.Unexpected;
+        var self = TempDirDyn{ .alloc = alloc };
+        self.path_len = std.mem.len(dir);
+        @memcpy(self.path_buf[0..self.path_len], dir[0..self.path_len]);
+        return self;
+    }
+
+    pub fn path(self: *const TempDirDyn) []const u8 {
+        return self.path_buf[0..self.path_len];
+    }
+
+    pub fn filePath(self: *const TempDirDyn, buf: []u8, name: []const u8) ![]const u8 {
+        return std.fmt.bufPrint(buf, "{s}/{s}", .{ self.path(), name });
+    }
+
+    /// Remember a file for cleanup (name copied).
+    pub fn track(self: *TempDirDyn, name: []const u8) !void {
+        const d = try self.alloc.dupe(u8, name);
+        self.files.append(self.alloc, d) catch {
+            self.alloc.free(d);
+            return error.OutOfMemory;
+        };
+    }
+
+    /// Stop tracking (after the file was consumed and removed separately).
+    pub fn untrack(self: *TempDirDyn, name: []const u8) void {
+        for (self.files.items, 0..) |f, i| {
+            if (std.mem.eql(u8, f, name)) {
+                const removed = self.files.orderedRemove(i);
+                self.alloc.free(removed);
+                return;
+            }
+        }
+    }
+
+    pub fn cleanup(self: *TempDirDyn) void {
+        for (self.files.items) |f| {
+            var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+            const fp = std.fmt.bufPrint(&pbuf, "{s}/{s}", .{ self.path(), f }) catch continue;
+            var pathz_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const pathz = std.fmt.bufPrintZ(&pathz_buf, "{s}", .{fp}) catch continue;
+            _ = c.remove(pathz.ptr);
+            self.alloc.free(f);
+        }
+        self.files.deinit(self.alloc);
+        var pathz_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const pathz = std.fmt.bufPrintZ(&pathz_buf, "{s}", .{self.path()}) catch return;
+        _ = c.rmdir(pathz.ptr);
+    }
+};
 
 /// Sequential-read file handle for streaming image data to the device.
 pub const File = struct {

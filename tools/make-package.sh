@@ -13,8 +13,8 @@ set -eu
 cd "$(dirname "$0")/.."
 
 PKGNAME=ultron
-PKGVER=0.3.0
-PKGREL=3
+PKGVER=0.4.0
+PKGREL=1
 ARCH=$(uname -m)
 STAGE="${STAGE:-$(mktemp -d)}"
 

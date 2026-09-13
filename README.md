@@ -48,6 +48,16 @@ a small, dependency-free Zig library you can audit in an afternoon.
 - **rawprogram flashing** — qdl-compatible `rawprogram*.xml` + `patch*.xml`
   with the same confirm-first flow, including sector-size probing,
   payload-size negotiation and set-bootable (`xbl`/`xbl_a`/`sbl1`)
+- **Per-partition Erase** behind the same destructive confirmation, plus
+  automatic write verification: every write is followed by a device-side
+  SHA-256 (getsha256digest) compared against the local image
+- **RAM dump page** for crash-dump (`05c6:900e`) devices — Sahara Memory
+  Debug region table, per-segment dumps with an optional glob filter
+- **UFS provisioning** — qdl's two-pass `<ufs>` XML flow (validate, then
+  commit) with an explicit OTP-lock gate for irreversible commits
+- **Huawei UPDATE.APP** — flash a whole Huawei firmware package: entries are
+  matched to GPT partitions by name, Android sparse images convert to raw
+  automatically, and every write is SHA-256-verified
 - **Persistent session** — the Firehose connection stays open across
   operations; explicit Reset device / Disconnect; cancel aborts and
   disconnects safely

@@ -25,6 +25,8 @@ const firehose = @import("firehose.zig");
 const rawprogram = @import("rawprogram.zig");
 const vip = @import("vip.zig");
 const ufs = @import("ufs.zig");
+const updateapp = @import("../../firmware/updateapp.zig");
+const sparse = @import("../../firmware/sparse.zig");
 const gpt = @import("gpt.zig");
 
 const Error = transport.Error;
@@ -35,6 +37,15 @@ const heap = std.heap.page_allocator;
 /// the libusb backend + Qualcomm policy; tests inject a sim harness.
 /// The returned Transport must support destroy() if it is heap-allocated.
 pub const OpenFn = *const fn (ctx: *anyopaque, logger: *log.Logger, target: ?transport.Target, wait_ms: u32, alloc: std.mem.Allocator) Error!transport.Transport;
+
+/// One UPDATE.APP image → partition mapping (UI-computed from the GPT).
+pub const HuaweiMapping = struct {
+    entry: []const u8, // entry name inside the container
+    first_lba: u64,
+    max_sectors: u64,
+    lun: u32,
+    label: []const u8, // partition name (progress/messages)
+};
 
 pub const Request = union(enum) {
     /// Open the transport and probe what is running. `programmer` may be
@@ -86,6 +97,12 @@ pub const Request = union(enum) {
         path: []const u8,
         finalize: bool,
     },
+    /// Flash images from a Huawei UPDATE.APP onto partitions
+    /// (rawprogram-style; the UI computed the image→partition mapping).
+    flash_huawei_app: struct {
+        path: []const u8,
+        mappings: []const HuaweiMapping,
+    },
     /// Flash rawprogram/patch XML files (qdl parity; no auto-reset).
     flash_xml: struct {
         files: []const []const u8,
@@ -106,6 +123,7 @@ const QueueItem = struct {
     req: Request,
     strings: std.ArrayList([]u8) = .empty,
     files: ?[]const []const u8 = null, // heap array for .flash_xml
+    mappings: ?[]HuaweiMapping = null, // heap array for .flash_huawei_app
 
     fn dupe(item: *QueueItem, s: []const u8) ![]const u8 {
         const d = try heap.dupe(u8, s);
@@ -124,6 +142,8 @@ const QueueItem = struct {
         item.strings.deinit(heap);
         if (item.files) |f| heap.free(f);
         item.files = null;
+        if (item.mappings) |m| heap.free(m);
+        item.mappings = null;
     }
 };
 
@@ -235,6 +255,23 @@ pub const Manager = struct {
             },
             .erase_partition => |*e| e.label = try item.dupe(e.label),
             .provision_ufs => |*p| p.path = try item.dupe(p.path),
+            .flash_huawei_app => |*f| {
+                const path = try item.dupe(f.path);
+                f.path = path;
+                const maps = try heap.alloc(HuaweiMapping, f.mappings.len);
+                errdefer heap.free(maps);
+                for (f.mappings, 0..) |m, i| {
+                    maps[i] = .{
+                        .entry = try item.dupe(m.entry),
+                        .first_lba = m.first_lba,
+                        .max_sectors = m.max_sectors,
+                        .lun = m.lun,
+                        .label = try item.dupe(m.label),
+                    };
+                }
+                f.mappings = maps;
+                item.mappings = maps;
+            },
             .flash_xml => |*f| {
                 const files = try heap.alloc([]const u8, f.files.len);
                 errdefer heap.free(files);
@@ -280,6 +317,7 @@ pub const Manager = struct {
             .write_partition => |w| self.writePartition(w.path, w.first_lba, w.max_sectors, w.lun, w.label),
             .erase_partition => |e| self.erasePartition(e.first_lba, e.num_sectors, e.lun, e.label),
             .provision_ufs => |p| self.provisionUfs(p.path, p.finalize),
+            .flash_huawei_app => |f| self.flashHuaweiApp(f.path, f.mappings),
             .flash_xml => |fx| self.flashXml(fx.files, fx.allow_missing),
             .reset => {
                 if (self.requireSession()) |fh| {
@@ -1043,13 +1081,12 @@ pub const Manager = struct {
 
     /// SHA-256 of exactly what the wire received: the file bytes from
     /// file_offset onward, zero-padded to written_sectors × sector_size.
-    fn localFileDigestHex(alloc: std.mem.Allocator, file: *fileio.File, file_offset_sectors: u64, sector_size: u64, written_sectors: u64, out: *[64]u8) !void {
+    fn localFileDigestHex(alloc: std.mem.Allocator, file: *fileio.File, start_byte: u64, total: u64, out: *[64]u8) !void {
         var sha = Sha256.init(.{});
-        try file.seekTo(file_offset_sectors * sector_size);
+        try file.seekTo(start_byte);
         const chunk = try alloc.alloc(u8, 1024 * 1024);
         defer alloc.free(chunk);
 
-        const total = written_sectors * sector_size;
         var hashed: u64 = 0;
         while (hashed < total) {
             const want: usize = @intCast(@min(@as(u64, chunk.len), total - hashed));
@@ -1099,11 +1136,14 @@ pub const Manager = struct {
         }
 
         var local_hex: [64]u8 = undefined;
-        localFileDigestHex(self.alloc, file, op.file_offset, op.sector_size, written, &local_hex) catch |e| {
+        const start_byte: u64 = if (op.file_byte_offset != 0)
+            op.file_byte_offset
+        else
+            @as(u64, op.file_offset) * op.sector_size;
+        localFileDigestHex(self.alloc, file, start_byte, written * op.sector_size, &local_hex) catch |e| {
             self.logger.warn("local digest computation failed: {s}", .{@errorName(e)});
             return .unavailable;
         };
-
         if (std.ascii.eqlIgnoreCase(&dev_hex, &local_hex)) {
             self.logger.info("✓ {s}: device SHA-256 matches the image", .{label});
             return .verified;
@@ -1146,6 +1186,170 @@ pub const Manager = struct {
         self.teardown();
         self.emitState(.disconnected);
         pushFinished(self.channel, true, "UFS provisioning finished");
+    }
+
+    fn removeTempWorkFile(tmp: *fileio.TempDirDyn, name: []const u8) void {
+        var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+        const fp = tmp.filePath(&pbuf, name) catch return;
+        fileio.removeFile(fp);
+        tmp.untrack(name);
+    }
+
+    /// Flash images from a Huawei UPDATE.APP onto partitions. Raw entries
+    /// stream straight out of the container (byte-offset carve); sparse
+    /// entries are expanded into temp raw files first. Every image is
+    /// digest-verified like a partition write.
+    fn flashHuaweiApp(self: *Manager, path: []const u8, mappings: []const HuaweiMapping) void {
+        const fh = self.requireSession() orelse return;
+        const sector_size = self.sector_size;
+        if (sector_size == 0) {
+            pushFinished(self.channel, false, "sector size unknown");
+            return;
+        }
+        if (fh.vip != null) {
+            pushFinished(self.channel, false, "UPDATE.APP flashing is unavailable in VIP sessions");
+            return;
+        }
+
+        var app = fileio.File.open(path) catch |e| {
+            self.logger.err("unable to open {s}", .{path});
+            pushFinished(self.channel, false, @errorName(e));
+            return;
+        };
+        defer app.close();
+
+        var index = updateapp.parse(self.alloc, &app, self.logger) catch |e| {
+            pushFinished(self.channel, false, @errorName(e));
+            return;
+        };
+        defer index.deinit(self.alloc);
+
+        var tmp = fileio.TempDirDyn.init(self.alloc) catch {
+            pushFinished(self.channel, false, "OutOfMemory");
+            return;
+        };
+        defer tmp.cleanup();
+
+        var ectx = ExecCtx{ .channel = self.channel, .op_total = mappings.len };
+        const saved_progress = fh.progress;
+        fh.progress = .{ .ctx = &ectx, .cb = firehoseProgressCb };
+        defer if (self.fh) |f| {
+            if (f == fh) f.progress = saved_progress;
+        };
+
+        var start_buf: [32]u8 = undefined;
+        var flashed: u32 = 0;
+        var skipped: u32 = 0;
+        for (mappings, 0..) |m, i| {
+            if (self.cancel.load(.acquire)) {
+                self.teardown();
+                self.emitState(.disconnected);
+                pushFinished(self.channel, false, "Cancelled");
+                return;
+            }
+            ectx.op_idx = i;
+
+            const entry = index.find(m.entry) orelse {
+                self.logger.err("UPDATE.APP: entry {s} not found — skipped", .{m.entry});
+                skipped += 1;
+                continue;
+            };
+            const needed: u64 = (entry.raw_size + sector_size - 1) / sector_size;
+            if (needed > m.max_sectors) {
+                self.logger.err("{s} ({d} sectors expanded) does not fit partition {s} ({d} sectors) — skipped", .{ m.entry, needed, m.label, m.max_sectors });
+                skipped += 1;
+                continue;
+            }
+
+            self.logger.info("UPDATE.APP: flashing {s} to {s} (LBA {d}, {d} sectors{s})", .{
+                m.entry,          m.label, m.first_lba, needed,
+                if (entry.is_sparse) ", sparse to raw" else "",
+            });
+
+            // Source: raw entries carve out of the container itself; sparse
+            // entries expand into a temp raw file first.
+            var src = app;
+            var start_byte: u64 = entry.data_offset;
+            var tmp_name_buf: [32]u8 = undefined;
+            var tmp_name: []u8 = &.{};
+            var using_tmp = false;
+            if (entry.is_sparse) {
+                const tn = std.fmt.bufPrint(&tmp_name_buf, "{d}.raw", .{i}) catch {
+                    skipped += 1;
+                    continue;
+                };
+                tmp_name = tmp_name_buf[0..tn.len];
+                tmp.track(tmp_name) catch {
+                    skipped += 1;
+                    continue;
+                };
+                var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+                const tmp_path = tmp.filePath(&pbuf, tmp_name) catch {
+                    skipped += 1;
+                    continue;
+                };
+                app.seekTo(entry.data_offset) catch {
+                    skipped += 1;
+                    continue;
+                };
+                const raw_size = sparse.convertToFile(self.alloc, &app, tmp_path, self.logger) catch |e| {
+                    self.logger.err("sparse conversion of {s} failed: {s}", .{ m.entry, @errorName(e) });
+                    skipped += 1;
+                    continue;
+                };
+                const conv_sectors: u64 = (raw_size + sector_size - 1) / sector_size;
+                if (conv_sectors > m.max_sectors) {
+                    self.logger.err("{s} expands to {d} sectors — does not fit {s} ({d}) — skipped", .{ m.entry, conv_sectors, m.label, m.max_sectors });
+                    skipped += 1;
+                    continue;
+                }
+                src = fileio.File.open(tmp_path) catch {
+                    skipped += 1;
+                    continue;
+                };
+                start_byte = 0;
+                using_tmp = true;
+            }
+
+            var op = rawprogram.Program{
+                .sector_size = sector_size,
+                .num_sectors = @intCast(needed),
+                .partition = m.lun,
+                .start_sector = std.fmt.bufPrint(&start_buf, "{d}", .{m.first_lba}) catch "0",
+                .filename = path,
+                .label = m.label,
+                .file_byte_offset = start_byte,
+            };
+            const written = fh.program(&op, &src) catch |e| {
+                if (using_tmp) {
+                    src.close();
+                    removeTempWorkFile(&tmp, tmp_name);
+                }
+                self.sessionError(e);
+                return;
+            };
+            switch (self.verifyWrite(fh, &op, &src, written, m.label)) {
+                .verified, .unavailable => {},
+                .mismatch => {
+                    if (using_tmp) {
+                        src.close();
+                        removeTempWorkFile(&tmp, tmp_name);
+                    }
+                    pushFinished(self.channel, false, "digest mismatch — batch stopped");
+                    return;
+                },
+            }
+            if (using_tmp) {
+                src.close();
+                removeTempWorkFile(&tmp, tmp_name);
+            }
+            flashed += 1;
+        }
+
+        var msg_buf: [128]u8 = undefined;
+        var msg = ev.FixedStr(512){};
+        msg.set(std.fmt.bufPrint(&msg_buf, "huawei app finished ({d} flashed, {d} skipped)", .{ flashed, skipped }) catch "huawei app finished");
+        self.channel.push(.{ .finished = .{ .success = true, .message = msg } });
     }
 
     fn flashXml(self: *Manager, files: []const []const u8, allow_missing: bool) void {
@@ -1529,6 +1733,128 @@ test "manager: digest mismatch fails the write" {
         if (!f.success and std.mem.indexOf(u8, f.message.slice(), "DIGEST MISMATCH") != null) saw_mismatch = true;
     }
     try std.testing.expect(saw_mismatch);
+}
+
+test "manager: flash_huawei_app carves a raw entry and verifies it" {
+    const channel = try heap.create(EventChannel);
+    channel.* = .{};
+    defer heap.destroy(channel);
+    var cancel = std.atomic.Value(bool).init(false);
+
+    const logger = try heap.create(log.Logger);
+    logger.* = .{ .mirror_stderr = false };
+
+    // A tiny UPDATE.APP with one raw "BOOT" entry (1 sector of data).
+    var payload: [512]u8 = undefined;
+    // (logger below mirrors stderr so the mismatch detail is visible)
+    for (&payload, 0..) |*b, i| b.* = @truncate(i * 9 + 5);
+
+    var app = std.ArrayList(u8).empty;
+    defer app.deinit(heap);
+    try app.appendNTimes(heap, 0, 92);
+    try app.appendSlice(heap, &[_]u8{ 0x55, 0xAA, 0x5A, 0xA5 });
+    try app.appendSlice(heap, &std.mem.toBytes(@as(u32, 98))); // header len
+    try app.appendSlice(heap, &[_]u8{0} ** 4); // unknown
+    try app.appendSlice(heap, &[_]u8{0} ** 8); // hardware id
+    try app.appendSlice(heap, &std.mem.toBytes(@as(u32, 1))); // sequence
+    try app.appendSlice(heap, &std.mem.toBytes(@as(u32, payload.len))); // size
+    try app.appendSlice(heap, &[_]u8{0} ** 32); // date + time
+    var name1: [32]u8 = @splat(0);
+    @memcpy(name1[0..4], "BOOT");
+    try app.appendSlice(heap, name1[0..32]);
+    try app.appendSlice(heap, &std.mem.toBytes(@as(u16, 0))); // header checksum
+    try app.appendSlice(heap, &std.mem.toBytes(@as(u32, 512))); // block size
+    try app.appendSlice(heap, &payload); // entry data
+
+    var tmp = try fileio.TmpDir.init();
+    defer tmp.cleanup();
+    try tmp.writeFile("UPDATE.APP", app.items);
+    var pbuf: [176]u8 = undefined;
+    const app_path = try tmp.filePath(&pbuf, "UPDATE.APP");
+
+    var sha = std.crypto.hash.sha2.Sha256.init(.{});
+    sha.update(&payload);
+    var dg: [32]u8 = undefined;
+    sha.final(&dg);
+    var digest_hex: [64]u8 = undefined;
+    const hex_chars = "0123456789abcdef";
+    for (dg, 0..) |b, i| {
+        digest_hex[i * 2] = hex_chars[b >> 4];
+        digest_hex[i * 2 + 1] = hex_chars[b & 0xf];
+    }
+    var digest_xml_buf: [256]u8 = undefined;
+    const digest_xml = try std.fmt.bufPrint(&digest_xml_buf, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><log value=\"SHA-256 digest: {s}\"/><response value=\"ACK\"/></data>", .{digest_hex});
+
+    var gpt_buf: [4096]u8 = undefined;
+    _ = gpt.sampleGpt(512, &gpt_buf);
+    const head = gpt_buf[0..1024];
+    const ents = gpt_buf[1024..1536];
+
+    const steps = [_]SimStep{
+        .{ .respond = nop_xml },
+        .{ .any_write = {} },
+        .{ .respond = ack },
+        .{ .any_write = {} },
+        .{ .respond = storage_info_log },
+        .{ .any_write = {} },
+        .{ .respond = rawmode_ack },
+        .{ .respond = head },
+        .{ .respond = ack },
+        .{ .any_write = {} },
+        .{ .respond = rawmode_ack },
+        .{ .respond = ents },
+        .{ .respond = ack },
+        // UPDATE.APP job: program setup, data carve, verification
+        .{ .any_write = {} },
+        .{ .respond = ack },
+        .{ .expect_write = &payload },
+        .{ .respond = ack },
+        .{ .any_write = {} },
+        .{ .respond = digest_xml },
+    };
+
+    var harness = try SimHarness.init(heap, &steps);
+    defer harness.deinit();
+    var opener = SimOpener{ .harness = &harness };
+
+    const mgr = try Manager.init(std.testing.allocator, logger, channel, &cancel, &SimOpener.open, &opener);
+    defer mgr.shutdown();
+    try mgr.start();
+
+    mgr.enqueue(.{ .connect = .{ .storage = .ufs, .skip_storage_init = true } });
+    var collector = Collector{};
+    defer collector.deinit();
+    var deadline: usize = 0;
+    while (deadline < 300) : (deadline += 1) {
+        channel.drain(&collector, Collector.cb);
+        if (collector.partitions != null) break;
+        glib.usleep(10 * std.time.us_per_ms);
+    }
+    if (collector.partitions == null) return error.ConnectFailed;
+
+    const mappings = [_]HuaweiMapping{.{
+        .entry = "BOOT",
+        .first_lba = 8192,
+        .max_sectors = 1,
+        .lun = 0,
+        .label = "boot",
+    }};
+    mgr.enqueue(.{ .flash_huawei_app = .{ .path = app_path, .mappings = &mappings } });
+
+    var done = false;
+    deadline = 0;
+    while (deadline < 300 and !done) : (deadline += 1) {
+        channel.drain(&collector, Collector.cb);
+        for (collector.finished.items) |f| {
+            if (std.mem.eql(u8, f.message.slice(), "huawei app finished (1 flashed, 0 skipped)")) done = true;
+        }
+        glib.usleep(10 * std.time.us_per_ms);
+    }
+    if (!done) {
+        for (collector.finished.items) |f| std.debug.print("DBG finished: success={} msg={s}\n", .{ f.success, f.message.slice() });
+        return error.TestExpectedEqual;
+    }
+    try std.testing.expect(harness.failure == null);
 }
 
 test "manager: already-in-firehose connect loads partitions" {

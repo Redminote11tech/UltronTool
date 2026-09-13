@@ -31,11 +31,12 @@ const manager_mod = @import("../protocol/qualcomm/manager.zig");
 const session_mod = @import("../protocol/qualcomm/session.zig");
 const firehose = @import("../protocol/qualcomm/firehose.zig");
 const digestgen = @import("../protocol/qualcomm/digestgen.zig");
+const updateapp = @import("../firmware/updateapp.zig");
 const usb_ids = @import("../protocol/qualcomm/usb_ids.zig");
 const style = @import("style.zig");
 
 pub const app_id = "io.github.redminote11tech.Ultron";
-pub const version = "0.3.0";
+pub const version = "0.4.0";
 
 const EventChannel = ev.Channel(ev.Event, 256);
 const storage_names: [6]?[*:0]const u8 = .{ "ufs", "emmc", "spinor", "nand", "nvme", null };
@@ -56,6 +57,7 @@ const ChooserKind = union(enum) {
     digest_out_dir: void,
     ramdump_dir: void,
     ufs_xml: void,
+    huawei_app_file: void,
     read_partition: ev.PartitionRow,
     write_partition: ev.PartitionRow,
 };
@@ -159,6 +161,11 @@ pub const Ui = struct {
     ufs_row: ?*adw.ActionRow = null,
     ufs_finalize_sw: ?*gtk.Switch = null,
     ufs_btn: ?*gtk.Button = null,
+    huawei_row: ?*adw.ActionRow = null,
+    huawei_btn: ?*gtk.Button = null,
+    huawei_path: ?[]u8 = null,
+    huawei_entries: ?ev.HuaweiAppEvent = null,
+    huawei_pending_mappings: ?std.ArrayList(manager_mod.HuaweiMapping) = null,
     reset_btn: ?*gtk.Button = null,
     disconnect_btn: ?*gtk.Button = null,
 
@@ -255,6 +262,7 @@ const ConfirmKind = union(enum) {
     flash_xml: void,
     erase_partition: ev.PartitionRow,
     provision_ufs: void,
+    huawei_app: void,
 };
 
 // ----------------------------------------------------------------------
@@ -331,6 +339,8 @@ pub fn mainRun(init: std.process.Init) !void {
     if (ui.vip_dir) |p| alloc.free(p);
     if (ui.ramdump_dir) |p| alloc.free(p);
     if (ui.ufs_xml_path) |p| alloc.free(p);
+    if (ui.huawei_path) |p| alloc.free(p);
+    freeHuaweiPending(ui);
     for (ui.digest_xmls.items) |p| alloc.free(p);
     ui.digest_xmls.deinit(alloc);
     if (ui.digest_dir) |p| alloc.free(p);
@@ -828,6 +838,33 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
 
     gtk.Box.append(conn, ufs_group.as(gtk.Widget));
 
+    // --- Huawei UPDATE.APP ------------------------------------------------
+    const huawei_group = adw.PreferencesGroup.new();
+    adw.PreferencesGroup.setTitle(huawei_group, "Huawei UPDATE.APP");
+    adw.PreferencesGroup.setDescription(huawei_group, "Flash a Huawei firmware package: images are matched to partitions by name (sparse images convert to raw)");
+
+    const huawei_row = adw.ActionRow.new();
+    rowTitle(huawei_row, "UPDATE.APP file");
+    adw.ActionRow.setSubtitle(huawei_row, "None selected");
+    const huawei_add_btn = gtk.Button.newWithLabel("Choose…");
+    _ = gtk.Button.signals.clicked.connect(huawei_add_btn, *Ui, &onPickHuaweiApp, ui, .{});
+    adw.ActionRow.addSuffix(huawei_row, huawei_add_btn.as(gtk.Widget));
+    const huawei_clear_btn = gtk.Button.newWithLabel("Clear");
+    _ = gtk.Button.signals.clicked.connect(huawei_clear_btn, *Ui, &onClearHuaweiApp, ui, .{});
+    adw.ActionRow.addSuffix(huawei_row, huawei_clear_btn.as(gtk.Widget));
+    adw.PreferencesGroup.add(huawei_group, huawei_row.as(gtk.Widget));
+    ui.huawei_row = huawei_row;
+
+    const huawei_btn = gtk.Button.newWithLabel("Flash to partitions…");
+    gtk.Widget.addCssClass(huawei_btn.as(gtk.Widget), "destructive-action");
+    gtk.Widget.setHalign(huawei_btn.as(gtk.Widget), .start);
+    gtk.Widget.setSensitive(huawei_btn.as(gtk.Widget), 0);
+    _ = gtk.Button.signals.clicked.connect(huawei_btn, *Ui, &onFlashHuaweiClicked, ui, .{});
+    ui.huawei_btn = huawei_btn;
+    adw.PreferencesGroup.add(huawei_group, huawei_btn.as(gtk.Widget));
+
+    gtk.Box.append(conn, huawei_group.as(gtk.Widget));
+
     // Session controls.
     const ctrl_box = gtk.Box.new(.horizontal, 10);
     gtk.Widget.setHalign(ctrl_box.as(gtk.Widget), .center);
@@ -1116,6 +1153,30 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
             if (ui.ufs_xml_path) |p| {
                 setSubtitleZ(ui.ufs_row.?, p);
                 gtk.Widget.setSensitive(ui.ufs_btn.?.as(gtk.Widget), @intFromBool(!ui.busy()));
+            }
+        },
+        .huawei_app_file => {
+            if (ui.huawei_path) |old| ui.alloc.free(old);
+            ui.huawei_path = ui.alloc.dupe(u8, path) catch null;
+            if (ui.huawei_path) |p| {
+                setSubtitleZ(ui.huawei_row.?, p);
+                ui.huawei_entries = null;
+                // Parse on a worker: the magic scan reads the whole file.
+                const ctx = ui.alloc.create(HuaweiParseCtx) catch return;
+                ctx.* = .{ .ui = ui, .path = undefined };
+                ctx.path = ui.alloc.dupe(u8, p) catch {
+                    ui.alloc.destroy(ctx);
+                    return;
+                };
+                ui.startJob();
+                const thread = std.Thread.spawn(.{}, huaweiParseRun, .{ctx}) catch {
+                    ui.jobDone();
+                    ui.alloc.free(ctx.path);
+                    ui.alloc.destroy(ctx);
+                    ui.toast("Failed to start worker thread");
+                    return;
+                };
+                thread.detach();
             }
         },
         .ramdump_dir => {
@@ -1590,7 +1651,25 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
     const kind = ctx.kind;
     ui.alloc.destroy(ctx);
     gtk.Window.destroy(dlg.as(gtk.Window));
-    if (!std.mem.eql(u8, std.mem.span(response), "apply")) return;
+    const applied = std.mem.eql(u8, std.mem.span(response), "apply");
+    // The pending UPDATE.APP mapping list is consumed on BOTH paths: apply
+    // hands it to the manager (which copies it), dismissal frees it.
+    var huawei_maps: ?std.ArrayList(manager_mod.HuaweiMapping) = null;
+    if (kind == .huawei_app) {
+        huawei_maps = ui.huawei_pending_mappings;
+        ui.huawei_pending_mappings = null;
+        if (!applied) {
+            if (huawei_maps) |*list| {
+                for (list.items) |m| {
+                    ui.alloc.free(m.entry);
+                    ui.alloc.free(m.label);
+                }
+                list.deinit(ui.alloc);
+            }
+            return;
+        }
+    }
+    if (!applied) return;
 
     switch (kind) {
         .apply_writes => {
@@ -1632,6 +1711,20 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
             const finalize = ui.ufs_finalize_sw != null and gtk.Switch.getActive(ui.ufs_finalize_sw.?) != 0;
             ui.startJob();
             ui.manager.?.enqueue(.{ .provision_ufs = .{ .path = path, .finalize = finalize } });
+        },
+        .huawei_app => {
+            if (ui.busy() or ui.manager == null or huawei_maps == null) return;
+            ui.startJob();
+            ui.manager.?.enqueue(.{ .flash_huawei_app = .{
+                .path = ui.huawei_path.?,
+                .mappings = huawei_maps.?.items,
+            } });
+            // The manager duplicated the strings into the queue item.
+            for (huawei_maps.?.items) |m| {
+                ui.alloc.free(m.entry);
+                ui.alloc.free(m.label);
+            }
+            huawei_maps.?.deinit(ui.alloc);
         },
     }
 }
@@ -1782,6 +1875,187 @@ fn onUfsProvisionClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
 
     const heading: [:0]const u8 = if (finalize) "IRREVERSIBLE OTP provisioning?" else "Run UFS provisioning?";
     confirmDialog(ui, heading, body, if (finalize) "Lock permanently" else "Provision", .destructive, .provision_ufs);
+}
+
+// ----------------------------------------------------------------------
+// Huawei UPDATE.APP
+// ----------------------------------------------------------------------
+
+const HuaweiParseCtx = struct {
+    ui: *Ui,
+    path: []u8,
+};
+
+fn huaweiParseRun(ctx: *HuaweiParseCtx) void {
+    const ui = ctx.ui;
+    const path = ctx.path;
+    defer ui.alloc.free(path);
+    defer ui.alloc.destroy(ctx);
+
+    var file = fileio.File.open(path) catch |e| {
+        var mbuf: [256]u8 = undefined;
+        var m = ev.FixedStr(512){};
+        m.set(std.fmt.bufPrint(&mbuf, "unable to open UPDATE.APP: {s}", .{@errorName(e)}) catch "unable to open UPDATE.APP");
+        ui.channel.push(.{ .finished = .{ .success = false, .message = m } });
+        return;
+    };
+    defer file.close();
+
+    var index = updateapp.parse(ui.alloc, &file, ui.logger) catch |e| {
+        var mbuf: [256]u8 = undefined;
+        var m = ev.FixedStr(512){};
+        m.set(std.fmt.bufPrint(&mbuf, "UPDATE.APP parse failed: {s}", .{@errorName(e)}) catch "UPDATE.APP parse failed");
+        ui.channel.push(.{ .finished = .{ .success = false, .message = m } });
+        return;
+    };
+    defer index.deinit(ui.alloc);
+
+    var event = ev.HuaweiAppEvent{};
+    for (index.entries.items) |*e| {
+        if (event.count >= ev.HuaweiAppEvent.max_entries) break;
+        event.entries[event.count] = .{
+            .name = ev.FixedStr(36).fromSlice(e.name()),
+            .data_size = e.data_size,
+            .raw_size = e.raw_size,
+            .sparse = e.is_sparse,
+        };
+        event.count += 1;
+    }
+    ui.channel.push(.{ .huawei_app = event });
+    var m = ev.FixedStr(512){};
+    m.set("update.app parsed");
+    ui.channel.push(.{ .finished = .{ .success = true, .message = m } });
+}
+
+fn onPickHuaweiApp(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    openChooser(ui, .huawei_app_file, "Select Huawei UPDATE.APP", false, null);
+}
+
+fn onClearHuaweiApp(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (ui.huawei_path) |p| ui.alloc.free(p);
+    ui.huawei_path = null;
+    ui.huawei_entries = null;
+    adw.ActionRow.setSubtitle(ui.huawei_row.?, "None selected");
+    gtk.Widget.setSensitive(ui.huawei_btn.?.as(gtk.Widget), 0);
+}
+
+/// Called when the parse worker finishes or the partition list changes.
+fn refreshHuaweiRow(ui: *Ui) void {
+    const row = ui.huawei_row orelse return;
+    if (ui.huawei_entries) |*ent| {
+        var buf: [128]u8 = undefined;
+        var sparse_count: u32 = 0;
+        for (ent.entries[0..ent.count]) |e| {
+            if (e.sparse) sparse_count += 1;
+        }
+        const s = std.fmt.bufPrint(&buf, "{d} images ({d} sparse) — match against LUN {d}", .{ ent.count, sparse_count, currentLun(ui) }) catch "indexed";
+        setSubtitleZ(row, s);
+        const have_parts = ui.parts != null;
+        gtk.Widget.setSensitive(ui.huawei_btn.?.as(gtk.Widget), @intFromBool(!ui.busy() and have_parts));
+    } else {
+        adw.ActionRow.setSubtitle(row, "None selected");
+    }
+}
+
+/// Match an UPDATE.APP entry to a partition by name (case-insensitive,
+/// ignoring ".img").
+fn matchHuaweiEntry(entries: *const ev.HuaweiAppEvent, index: usize, parts: *const ev.PartitionsEvent) ?ev.PartitionRow {
+    const ename = entries.entries[index].name.slice();
+    for (parts.parts[0..parts.count]) |row| {
+        if (updateapp.nameEql(ename, row.name.slice())) return row;
+    }
+    return null;
+}
+
+fn onFlashHuaweiClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (ui.busy()) {
+        ui.toast("Another operation is running — wait for it to finish");
+        return;
+    }
+    if (ui.huawei_path == null) return;
+    const entries = &(ui.huawei_entries orelse return);
+    const parts = &(ui.parts orelse {
+        ui.toast("Load the partition table first (Connect)");
+        return;
+    });
+
+    // Build the image → partition mapping for the current LUN. Ownership
+    // moves to huawei_pending_mappings and is consumed by the dialog
+    // response (apply) or freed on dismissal.
+    var mappings = std.ArrayList(manager_mod.HuaweiMapping).empty;
+    var unmatched: u32 = 0;
+    var too_big: u32 = 0;
+
+    var body_buf: [1600]u8 = undefined;
+    var len: usize = 0;
+    appendFmt(&body_buf, &len, "Flash the following images to LUN {d}?\n\n", .{currentLun(ui)});
+
+    var listed: u32 = 0;
+    for (entries.entries[0..entries.count], 0..) |*e, i| {
+        const row_opt = matchHuaweiEntry(entries, i, parts);
+        const row = row_opt orelse {
+            unmatched += 1;
+            continue;
+        };
+        const needed: u64 = (e.raw_size + sectorSizeOf(ui) - 1) / sectorSizeOf(ui);
+        if (needed > row.sectors()) {
+            too_big += 1;
+            continue;
+        }
+        const dup_entry = ui.alloc.dupe(u8, e.name.slice()) catch continue;
+        const dup_label = ui.alloc.dupe(u8, row.name.slice()) catch {
+            ui.alloc.free(dup_entry);
+            continue;
+        };
+        mappings.append(ui.alloc, .{
+            .entry = dup_entry,
+            .first_lba = row.first_lba,
+            .max_sectors = row.sectors(),
+            .lun = currentLun(ui),
+            .label = dup_label,
+        }) catch {
+            ui.alloc.free(dup_entry);
+            ui.alloc.free(dup_label);
+            continue;
+        };
+        if (listed < 8) {
+            var size_buf: [32]u8 = undefined;
+            const size_txt = util.formatBytes(&size_buf, e.raw_size);
+            appendFmt(&body_buf, &len, "· {s} → {s} ({s})\n", .{ e.name.slice(), row.name.slice(), size_txt });
+            listed += 1;
+        }
+    }
+    if (entries.count > listed + 0 and unmatched > 0 and listed >= 8) {
+        appendFmt(&body_buf, &len, "· …\n", .{});
+    }
+    if (mappings.items.len == 0) {
+        for (mappings.items) |m| {
+            ui.alloc.free(m.entry);
+            ui.alloc.free(m.label);
+        }
+        mappings.deinit(ui.alloc);
+        ui.toast("No UPDATE.APP image matches a partition on this LUN");
+        return;
+    }
+    if (unmatched > 0) appendFmt(&body_buf, &len, "\n{d} image(s) match no partition and will be skipped.\n", .{unmatched});
+    if (too_big > 0) appendFmt(&body_buf, &len, "{d} image(s) are larger than their partition and will be skipped.\n", .{too_big});
+    appendFmt(&body_buf, &len, "\nThis overwrites the listed partitions. IRREVERSIBLE. Sparse images are converted to raw first.", .{});
+
+    freeHuaweiPending(ui);
+    ui.huawei_pending_mappings = mappings;
+    confirmDialog(ui, "Flash Huawei UPDATE.APP?", body_buf[0..len], "Flash", .destructive, .huawei_app);
+}
+
+/// Free a stored pending mapping list (dialog dismissed or consumed).
+fn freeHuaweiPending(ui: *Ui) void {
+    if (ui.huawei_pending_mappings) |*list| {
+        for (list.items) |m| {
+            ui.alloc.free(m.entry);
+            ui.alloc.free(m.label);
+        }
+        list.deinit(ui.alloc);
+        ui.huawei_pending_mappings = null;
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -2040,6 +2314,11 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
         .partitions => |parts| {
             ui.parts = parts;
             rebuildPartitions(ui, &parts);
+            refreshHuaweiRow(ui);
+        },
+        .huawei_app => |ent| {
+            ui.huawei_entries = ent;
+            refreshHuaweiRow(ui);
         },
         .finished => |fin| {
             ui.jobDone();
@@ -2059,7 +2338,7 @@ fn isNotable(msg: []const u8) bool {
     for (suffixes) |sfx| {
         if (std.mem.endsWith(u8, msg, sfx)) return true;
     }
-    const names = [_][]const u8{ "device reset", "loader required", "disconnected", "connected", "digest tables created", "ramdump finished", "UFS provisioning finished" };
+    const names = [_][]const u8{ "device reset", "loader required", "disconnected", "connected", "digest tables created", "ramdump finished", "UFS provisioning finished", "huawei app finished" };
     for (names) |n| {
         if (std.mem.eql(u8, msg, n)) return true;
     }

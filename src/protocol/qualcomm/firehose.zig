@@ -668,7 +668,11 @@ pub const Session = struct {
             return Error.Io;
         }
 
-        file.seekTo(@as(u64, op.file_offset) * sector_size) catch return Error.Io;
+        const start_byte: u64 = if (op.file_byte_offset != 0)
+            op.file_byte_offset
+        else
+            @as(u64, op.file_offset) * sector_size;
+        file.seekTo(start_byte) catch return Error.Io;
 
         var left: u64 = num_sectors;
         var ack_seen = false; // ACK may arrive while our last chunks are in flight

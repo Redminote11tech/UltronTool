@@ -148,6 +148,10 @@ pub const Op = struct {
 };
 
 pub const Program = struct {
+    /// Absolute byte offset of the payload (set by the UPDATE.APP path,
+    /// which carves payloads out of a container). When non-zero it
+    /// overrides file_offset×sector_size for the local file seek.
+    file_byte_offset: u64 = 0,
     sector_size: u32 = 0,
     num_sectors: u32 = 0,
     partition: u32 = 0,

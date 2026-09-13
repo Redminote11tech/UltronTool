@@ -215,6 +215,7 @@ loader stage; VIP requires the fresh-boot loader-upload flow.
 | Write verification (getsha256digest) | ✅ | after every program op (partition write + rawprogram): device SHA-256 of the written range vs local image digest; skips VIP sessions (extra packet would desync the digest table) |
 | Drain-to-complete on refused writes | ✅ | Protected partitions fail cleanly; session survives; the drain streams the image's own remaining bytes (not zeros), so whatever lands past a refusal is real image content |
 | Stuck-programmer recovery | ✅ | nop probe → USB reset → fresh EDL → auto loader re-upload |
+| Huawei UPDATE.APP flashing | ✅ | container parse (55AA5AA5 chunks, splitupdate/`huextract` reference format), Android sparse→raw conversion, image→GPT-partition matching, digest-verified writes; checksum tables not verified (device-side SHA-256 covers it) |
 | Multi-device targeting | ✅ | bus/devnum + `_SN:` product-string serial filter (qdl --serial semantics), picker appears with 2+ visible devices |
 | Multi-image Sahara archives (zip / id:file) | ⏳ planned | qdl decode_programmer; explicitly deferred |
 | RAM dump / Memory Debug (900E crash dumps) | ✅ | MEM_DEBUG64 region table + filtered dumps (minidump.elf assembly deferred) |
@@ -232,3 +233,35 @@ loader stage; VIP requires the fresh-boot loader-upload flow.
 | 0e8d:0003 | MediaTek BROM | mtk (future) |
 | 0e8d:2000 / 2001 | MediaTek preloader | mtk (future) |
 | 04e8:685d / 6601 / 68c3 | Samsung download mode | samsung/odin (future) |
+
+## 8. Huawei UPDATE.APP (firmware container)
+
+Reference: the classic `splitupdate`/`split_updata.pl` community tools and
+`echo-devim/huextract` (see refs/). The file is a flat sequence of chunks;
+each starts with the magic bytes `55 AA 5A A5` and a variable-length header
+(little-endian):
+
+| offset | size | field |
+|---|---|---|
+| 0 | 4 | magic `55 AA 5A A5` |
+| 4 | 4 | header length (>= 98; payload follows it) |
+| 8 | 4 | unknown |
+| 12 | 8 | hardware id |
+| 20 | 4 | file sequence |
+| 24 | 4 | payload size |
+| 28 | 16 | date string |
+| 44 | 16 | time string |
+| 60 | 32 | entry name ("BOOT", "SYSTEM", …, NUL-padded) |
+| 92 | 2 | header checksum |
+| 94 | 4 | checksum block size |
+| 98 | len-98 | file checksum table |
+
+Ultron indexes chunks by scanning for the magic (robust against padding,
+like the Perl reference). Raw payloads stream straight out of the container
+(program supports an absolute byte offset); sparse payloads (Android sparse
+`ED26FF3A`) are expanded to raw temp files first — RAW/FILL/DON'T CARE
+chunks, holes reading back as zeros. Images are matched to the currently
+loaded GPT partitions by name (case-insensitive, ignoring `.img`), and every
+write is digest-verified like a partition write. Entries without a matching
+partition (SHA256RSA, VERLIST, …) are skipped. The container's checksum
+tables are not verified — device-side SHA-256 verification covers the flash.

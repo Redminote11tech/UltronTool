@@ -12,6 +12,8 @@ test {
     _ = @import("protocol/qualcomm/rawprogram.zig");
     _ = @import("protocol/qualcomm/sahara.zig");
     _ = @import("protocol/qualcomm/firehose.zig");
+    _ = @import("firmware/sparse.zig");
+    _ = @import("firmware/updateapp.zig");
     _ = @import("protocol/qualcomm/vip.zig");
     _ = @import("protocol/qualcomm/ufs.zig");
     _ = @import("protocol/qualcomm/digestgen.zig");

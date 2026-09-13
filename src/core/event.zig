@@ -139,6 +139,21 @@ pub const SessionState = enum {
     firehose_ready,
 };
 
+/// One image entry inside a Huawei UPDATE.APP container (parse result).
+pub const HuaweiAppEvent = struct {
+    pub const max_entries = 64;
+
+    pub const EntryInfo = struct {
+        name: FixedStr(36) = .{},
+        data_size: u64 = 0,
+        raw_size: u64 = 0,
+        sparse: bool = false,
+    };
+
+    entries: [max_entries]EntryInfo = undefined,
+    count: u32 = 0,
+};
+
 pub const Event = union(enum) {
     device_added: DeviceInfo,
     device_removed: DeviceKey,
@@ -147,6 +162,7 @@ pub const Event = union(enum) {
     finished: Finished,
     session_state: SessionState,
     partitions: PartitionsEvent,
+    huawei_app: HuaweiAppEvent,
 };
 
 /// Overwriting ring channel. Single producer, single consumer (the UI drains

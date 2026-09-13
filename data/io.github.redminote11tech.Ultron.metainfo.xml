@@ -33,6 +33,15 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.4.0" date="2026-09-13">
+      <description>
+        <p>Huawei UPDATE.APP support: flash an entire Huawei firmware package
+        to a Qualcomm EDL device — entries are matched to the loaded GPT
+        partitions by name, Android sparse images are converted to raw
+        automatically (streamed from the container where possible), and every
+        image write is verified with the device-side SHA-256.</p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-09-13">
       <description>
         <p>Verification and recovery release: per-partition Erase, automatic
