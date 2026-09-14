@@ -64,8 +64,12 @@ pub const RQT_CLOSE_REBOOT_RECOVERY: u32 = 3; // power off
 /// (Thor's OdinFailCheck: response byte 0 == 0xFF).
 const BOOTLOADER_FAIL: u32 = 0xFFFF_FFFF;
 
-pub const handshake_timeout_ms: u32 = 5000;
-pub const default_timeout_ms: u32 = 5000;
+/// odin4 uses 10 s for every command exchange (USB_TIMEOUT_CONTROL) and
+/// retries transport-level failures; devices have been observed answering
+/// the first exchange late, so patience beats a fast failure here.
+pub const handshake_timeout_ms: u32 = 10_000;
+pub const default_timeout_ms: u32 = 10_000;
+pub const handshake_attempts: u32 = 3;
 pub const pit_flash_timeout_ms: u32 = 120_000;
 pub const erase_user_data_timeout_ms: u32 = 600_000;
 /// Upper bound for a PIT dump (largest real PIT is well under 1 MiB).
@@ -118,16 +122,29 @@ pub const Session = struct {
         return self.cancel.load(.acquire);
     }
 
-    /// ASCII handshake: host sends "ODIN", Loke answers "LOKE".
+    /// ASCII handshake: host sends "ODIN", Loke answers "LOKE". Retried a
+    /// few times — a device that just entered download mode can be slow on
+    /// the first exchange, and a stale response from an earlier timed-out
+    /// session surfaces here as garbage (which the retry then flushes).
     pub fn handshake(self: *Session) Error!void {
-        _ = try self.io.write("ODIN", handshake_timeout_ms);
-        var buf: [4]u8 = undefined;
-        try self.readExact(&buf, handshake_timeout_ms);
-        if (!std.mem.eql(u8, &buf, "LOKE")) {
-            self.logger.err("Odin handshake failed: expected LOKE, got {x}", .{buf[0..4]});
-            return Error.Io;
+        var attempt: u32 = 0;
+        while (true) : (attempt += 1) {
+            if (self.cancelled()) return Error.Cancelled;
+            self.logger.info("Odin: sending handshake (attempt {d})", .{attempt + 1});
+            _ = try self.io.write("ODIN", handshake_timeout_ms);
+            var buf: [4]u8 = undefined;
+            if (self.readExact(&buf, handshake_timeout_ms)) |_| {
+                if (std.mem.eql(u8, &buf, "LOKE")) {
+                    self.logger.info("Odin: Loke handshake complete", .{});
+                    return;
+                }
+                self.logger.warn("Odin: handshake reply was not LOKE ({x}) — retrying", .{buf[0..4]});
+            } else |e| {
+                if (e != Error.Timeout) return e;
+                self.logger.warn("Odin: no handshake reply within {d} ms — retrying", .{handshake_timeout_ms});
+            }
+            if (attempt + 1 >= handshake_attempts) return Error.Timeout;
         }
-        self.logger.debug("Odin: Loke handshake complete", .{});
     }
 
     /// Read exactly buf.len bytes, accumulating partial transfers (bounded
@@ -201,7 +218,9 @@ pub const Session = struct {
         const v = Version{
             .unknown1 = @truncate(r.ack & 0xFF),
             .unknown2 = @truncate((r.ack >> 8) & 0xFF),
-            .protocol = @truncate((r.ack >> 16) & 0xFFFF),
+            // Bit 15 of the upper half is the compressed-download capability
+            // flag (odin4), not a version bit.
+            .protocol = @truncate((r.ack >> 16) & 0x7FFF),
         };
         self.protocol_version = v.protocol;
         self.logger.info("Odin: session open, bootloader protocol v{d}", .{v.protocol});
@@ -506,6 +525,29 @@ test "odin handshake and begin session (v1 and v2+)" {
         try testing.expectEqual(@as(usize, 30), sess.flash_sequence_parts);
         try testing.expectEqual(@as(u32, 120_000), sess.flash_timeout_ms);
     }
+}
+
+test "odin handshake retries after a silent attempt" {
+    var steps = std.ArrayList(Step).empty;
+    defer steps.deinit(testing.allocator);
+    // First attempt: device silent. Second: LOKE arrives.
+    try steps.append(testing.allocator, .{ .expect_write = "ODIN" });
+    try steps.append(testing.allocator, .{ .read_timeout = {} });
+    try steps.append(testing.allocator, .{ .expect_write = "ODIN" });
+    try steps.append(testing.allocator, .{ .respond = "LOKE" });
+
+    const l = try testing.allocator.create(log.Logger);
+    defer testing.allocator.destroy(l);
+    l.* = .{ .mirror_stderr = false };
+
+    var h = try Harness.init(testing.allocator, steps.items);
+    defer h.deinit();
+    var io = Io.init(testing.allocator, h.transport());
+    defer io.deinit();
+    const cancel = std.atomic.Value(bool).init(false);
+    var sess = Session{ .alloc = testing.allocator, .io = &io, .logger = l, .cancel = &cancel };
+
+    try sess.handshake();
 }
 
 test "odin dumpPit fetches blocks and the parser reads them" {

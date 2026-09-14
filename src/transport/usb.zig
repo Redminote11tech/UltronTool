@@ -48,6 +48,11 @@ pub const EpPair = struct {
     out_ep: u8,
     in_max: u16,
     out_max: u16,
+    /// bAlternateSetting of the altsetting the endpoints were found on, or
+    /// -1 to leave the active setting untouched (odin4 sets it explicitly
+    /// after claiming — CDC-Data interfaces can idle at an endpoint-less
+    /// alt setting).
+    alt_setting: i32 = -1,
 };
 
 /// Match policy provided by a protocol module (see qualcomm/usb_ids.zig).
@@ -231,6 +236,7 @@ fn findInterface(
                 if (policy.matchInterface(ifc)) |pair| {
                     var p = pair;
                     p.interface_number = a.bInterfaceNumber;
+                    p.alt_setting = a.bAlternateSetting;
                     return p;
                 }
             }
@@ -355,14 +361,32 @@ fn tryOpenCandidate(
 
     // Detach any kernel driver, then claim.
     if (c.libusb_kernel_driver_active(handle.?, pair.interface_number) == 1) {
-        _ = c.libusb_detach_kernel_driver(handle.?, pair.interface_number);
+        const det = c.libusb_detach_kernel_driver(handle.?, pair.interface_number);
+        if (det != 0) {
+            logger.info("USB: kernel driver detach failed on interface {d} ({s}) — another process may hold the device", .{ pair.interface_number, errName(det) });
+            c.libusb_close(handle);
+            handle = null;
+            return null;
+        }
     }
     if (c.libusb_claim_interface(handle.?, pair.interface_number) != 0) {
-        logger.debug("USB: failed to claim interface {d}", .{pair.interface_number});
+        logger.info("USB: failed to claim interface {d}", .{pair.interface_number});
         c.libusb_close(handle);
         handle = null;
         return null;
     }
+    // Activate the endpoint-bearing alternate setting (odin4 semantics).
+    if (pair.alt_setting >= 0) {
+        const alt = c.libusb_set_interface_alt_setting(handle.?, pair.interface_number, pair.alt_setting);
+        if (alt != 0) {
+            logger.info("USB: set alt setting {d} failed on interface {d} ({s})", .{ pair.alt_setting, pair.interface_number, errName(alt) });
+            _ = c.libusb_release_interface(handle.?, pair.interface_number);
+            c.libusb_close(handle);
+            handle = null;
+            return null;
+        }
+    }
+    logger.info("USB: claimed interface {d} (alt {d}, in 0x{x}, out 0x{x})", .{ pair.interface_number, pair.alt_setting, pair.in_ep, pair.out_ep });
 
     var usb = Usb{
         .handle = handle.?,
