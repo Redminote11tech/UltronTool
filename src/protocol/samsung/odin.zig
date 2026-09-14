@@ -340,6 +340,26 @@ pub const Session = struct {
         return pit;
     }
 
+    /// Port of Thor's FlashPIT (params confirmed against the official
+    /// binary's DownloadEngine::sendPitInfo): request, size announcement,
+    /// raw PIT stream, completion handshake.
+    pub fn flashPit(self: *Session, pit: []const u8) Error!void {
+        try self.sendRequest(RQT_PIT, RQT_PIT_SET, &.{});
+        _ = try self.response(RQT_PIT, default_timeout_ms);
+        try self.sendRequest(RQT_PIT, RQT_PIT_START, &.{@intCast(pit.len)});
+        _ = try self.response(RQT_PIT, default_timeout_ms);
+        var off: usize = 0;
+        while (off < pit.len) {
+            if (self.cancelled()) return Error.Cancelled;
+            const chunk = @min(pit.len - off, 0x4000); // official 16 KiB usbfs cap
+            _ = try self.io.write(pit[off .. off + chunk], pit_flash_timeout_ms);
+            off += chunk;
+        }
+        _ = try self.response(RQT_PIT, pit_flash_timeout_ms);
+        try self.sendRequest(RQT_PIT, RQT_PIT_COMPLETE, &.{});
+        _ = try self.response(RQT_PIT, default_timeout_ms);
+    }
+
     /// Port of FlashPartition: stream `length` bytes (from `file`, or zeros
     /// when null — Thor's erase trick) at the partition described by `entry`,
     /// in sequences of packet-size × sequence-parts. The device writes
@@ -677,6 +697,43 @@ test "odin flashPartition streams parts and closes with reset" {
     // And the reset-flash-count request was the final write.
     try testing.expectEqual(@as(u32, RQT_INIT), std.mem.readInt(u32, written[written.len - 1024 ..][0..4], .little));
     try testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, written[written.len - 1020 ..][0..4], .little));
+}
+
+test "odin flashPit streams the table and completes" {
+    var pit_bytes = std.ArrayList(u8).empty;
+    defer pit_bytes.deinit(testing.allocator);
+    try @import("pit.zig").buildPit(&pit_bytes);
+
+    var steps = std.ArrayList(Step).empty;
+    defer steps.deinit(testing.allocator);
+    try expectSessionOpen(&steps, 1);
+    try steps.append(testing.allocator, .{ .expect_write_len = 1024 }); // RQT_PIT_SET
+    const set = respBytes(RQT_PIT, 0);
+    try steps.append(testing.allocator, .{ .respond = &set });
+    try steps.append(testing.allocator, .{ .expect_write_len = 1024 }); // RQT_PIT_START(size)
+    const st = respBytes(RQT_PIT, 0);
+    try steps.append(testing.allocator, .{ .respond = &st });
+    try steps.append(testing.allocator, .{ .expect_write = pit_bytes.items }); // raw PIT
+    const got = respBytes(RQT_PIT, 0);
+    try steps.append(testing.allocator, .{ .respond = &got });
+    try steps.append(testing.allocator, .{ .expect_write_len = 1024 }); // RQT_PIT_COMPLETE
+    const done = respBytes(RQT_PIT, 0);
+    try steps.append(testing.allocator, .{ .respond = &done });
+
+    const l = try testing.allocator.create(log.Logger);
+    defer testing.allocator.destroy(l);
+    l.* = .{ .mirror_stderr = false };
+
+    var h = try Harness.init(testing.allocator, steps.items);
+    defer h.deinit();
+    var io = Io.init(testing.allocator, h.transport());
+    defer io.deinit();
+    const cancel = std.atomic.Value(bool).init(false);
+    var sess = Session{ .alloc = testing.allocator, .io = &io, .logger = l, .cancel = &cancel };
+
+    try sess.handshake();
+    _ = try sess.beginSession();
+    try sess.flashPit(pit_bytes.items);
 }
 
 test "odin flashPartition maps bootloader failure codes" {

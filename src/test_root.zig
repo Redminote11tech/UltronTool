@@ -21,6 +21,7 @@ test {
     _ = @import("protocol/samsung/pit.zig");
     _ = @import("protocol/samsung/odin.zig");
     _ = @import("protocol/samsung/usb_ids.zig");
+    _ = @import("firmware/samsungtar.zig");
     _ = @import("protocol/qualcomm/gpt.zig");
     _ = @import("protocol/qualcomm/manager.zig");
     _ = @import("device/scanner.zig");
