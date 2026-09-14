@@ -33,6 +33,15 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.5.1" date="2026-09-13">
+      <description>
+        <p>Samsung Odin hardware fix release: command timeouts raised to
+        odin4's 10 seconds with a three-attempt handshake retry, the CDC
+        alternate setting is activated after claiming the interface, and
+        kernel-driver detach failures are retried instead of ignored —
+        devices that answer the first exchange late now connect.</p>
+      </description>
+    </release>
     <release version="0.5.0" date="2026-09-13">
       <description>
         <p>Samsung Odin support (experimental): PIT dump into the partition
