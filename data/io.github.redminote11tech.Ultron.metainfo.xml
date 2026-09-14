@@ -33,6 +33,15 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.5.2" date="2026-09-13">
+      <description>
+        <p>Samsung Odin protocol corrected against the official odin4
+        binary: the data interface is now selected without a CDC class
+        filter (last bulk pair of the first interface that has both), and
+        exchange timeouts raised to the official 60 seconds with a silent-
+        read retry — fixing devices that stayed silent on the handshake.</p>
+      </description>
+    </release>
     <release version="0.5.1" date="2026-09-13">
       <description>
         <p>Samsung Odin hardware fix release: command timeouts raised to

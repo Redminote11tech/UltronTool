@@ -18,7 +18,7 @@ GPL-3.0 · Zig 0.16 · GTK4/libadwaita · Linux (Wayland/X11)
 
 ---
 
-> **Status: v0.5.1** — Qualcomm EDL is fully usable. The architecture is
+> **Status: v0.5.2** — Qualcomm EDL is fully usable. The architecture is
 > plugin-based: **MediaTek (BROM/mtkclient-style)** and **Samsung
 > (Odin/Heimdall-style)** protocol modules are planned on top of the same
 > protocol registry.
