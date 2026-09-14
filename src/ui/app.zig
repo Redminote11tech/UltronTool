@@ -33,6 +33,9 @@ const firehose = @import("../protocol/qualcomm/firehose.zig");
 const digestgen = @import("../protocol/qualcomm/digestgen.zig");
 const updateapp = @import("../firmware/updateapp.zig");
 const usb_ids = @import("../protocol/qualcomm/usb_ids.zig");
+const samsung_odin = @import("../protocol/samsung/odin.zig");
+const samsung_pit = @import("../protocol/samsung/pit.zig");
+const samsung_usb_ids = @import("../protocol/samsung/usb_ids.zig");
 const style = @import("style.zig");
 
 pub const app_id = "io.github.redminote11tech.Ultron";
@@ -187,6 +190,12 @@ pub const Ui = struct {
     huawei_thread: ?std.Thread = null,
     ramdump_thread: ?std.Thread = null,
     probe_thread: ?std.Thread = null,
+    samsung_thread: ?std.Thread = null,
+    /// Samsung Odin section (download-mode devices).
+    samsung_section: ?*gtk.Widget = null,
+    /// Image path staged for a Samsung partition flash (consumed by the
+    /// confirm dialog on both paths, like the Huawei mapping list).
+    samsung_flash_path: ?[]u8 = null,
     speed_scratch: [32]u8 = undefined,
     prog_last_ms: i64 = 0,
     prog_last_done: u64 = 0,
@@ -283,6 +292,8 @@ const ConfirmKind = union(enum) {
     erase_partition: ev.PartitionRow,
     provision_ufs: void,
     huawei_app: void,
+    samsung_flash: ev.PartitionRow,
+    samsung_factory: void,
 };
 
 // ----------------------------------------------------------------------
@@ -353,6 +364,7 @@ pub fn mainRun(init: std.process.Init) !void {
     if (ui.huawei_thread) |t| t.join();
     if (ui.ramdump_thread) |t| t.join();
     if (ui.probe_thread) |t| t.join();
+    if (ui.samsung_thread) |t| t.join();
     if (ui.manager) |m| m.shutdown();
     if (ui.scanner) |sc| sc.deinit();
     clearPendingWrites(ui);
@@ -648,6 +660,46 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     gtk.Box.append(page, ramdump_box.as(gtk.Widget));
     ui.ramdump_section = ramdump_box.as(gtk.Widget);
 
+    // --- Samsung Odin section (download-mode devices) -------------------
+    const samsung_box = gtk.Box.new(.vertical, 12);
+
+    const samsung_group = adw.PreferencesGroup.new();
+    adw.PreferencesGroup.setTitle(samsung_group, "Samsung Odin (download mode)");
+    adw.PreferencesGroup.setDescription(samsung_group, "Loke handshake, PIT dump and partition flashing over the Odin protocol");
+
+    const samsung_pit_row = adw.ActionRow.new();
+    rowTitle(samsung_pit_row, "Partition table (PIT)");
+    adw.ActionRow.setSubtitle(samsung_pit_row, "Loads the device PIT into the partition browser");
+    const samsung_pit_btn = gtk.Button.newWithLabel("Dump PIT");
+    gtk.Widget.addCssClass(samsung_pit_btn.as(gtk.Widget), "suggested-action");
+    _ = gtk.Button.signals.clicked.connect(samsung_pit_btn, *Ui, &onSamsungDumpPit, ui, .{});
+    adw.ActionRow.addSuffix(samsung_pit_row, samsung_pit_btn.as(gtk.Widget));
+    adw.PreferencesGroup.add(samsung_group, samsung_pit_row.as(gtk.Widget));
+
+    const samsung_ctrl_row = adw.ActionRow.new();
+    rowTitle(samsung_ctrl_row, "Device control");
+    const samsung_ctrl_box = gtk.Box.new(.horizontal, 6);
+    gtk.Widget.setValign(samsung_ctrl_box.as(gtk.Widget), .center);
+    const samsung_reboot_dl_btn = gtk.Button.newWithLabel("Reboot to download");
+    _ = gtk.Button.signals.clicked.connect(samsung_reboot_dl_btn, *Ui, &onSamsungRebootDownload, ui, .{});
+    gtk.Box.append(samsung_ctrl_box, samsung_reboot_dl_btn.as(gtk.Widget));
+    const samsung_reboot_btn = gtk.Button.newWithLabel("Reboot");
+    _ = gtk.Button.signals.clicked.connect(samsung_reboot_btn, *Ui, &onSamsungReboot, ui, .{});
+    gtk.Box.append(samsung_ctrl_box, samsung_reboot_btn.as(gtk.Widget));
+    adw.ActionRow.addSuffix(samsung_ctrl_row, samsung_ctrl_box.as(gtk.Widget));
+    adw.PreferencesGroup.add(samsung_group, samsung_ctrl_row.as(gtk.Widget));
+
+    const samsung_factory_btn = gtk.Button.newWithLabel("Factory reset (erase userdata)");
+    gtk.Widget.addCssClass(samsung_factory_btn.as(gtk.Widget), "destructive-action");
+    gtk.Widget.setHalign(samsung_factory_btn.as(gtk.Widget), .start);
+    _ = gtk.Button.signals.clicked.connect(samsung_factory_btn, *Ui, &onSamsungFactoryReset, ui, .{});
+    adw.PreferencesGroup.add(samsung_group, samsung_factory_btn.as(gtk.Widget));
+
+    gtk.Box.append(samsung_box, samsung_group.as(gtk.Widget));
+    gtk.Widget.setVisible(samsung_box.as(gtk.Widget), 0);
+    gtk.Box.append(page, samsung_box.as(gtk.Widget));
+    ui.samsung_section = samsung_box.as(gtk.Widget);
+
     // --- Loader section (needs_loader) ----------------------------------
     const loader_box = gtk.Box.new(.vertical, 12);
 
@@ -929,21 +981,39 @@ fn refreshMainPage(ui: *Ui) void {
     gtk.Widget.setVisible(status.as(gtk.Widget), @intFromBool(!has_device));
     gtk.Widget.setVisible(dev_card.as(gtk.Widget), @intFromBool(has_device));
 
+    const is_samsung = has_device and ui.device.?.mode == .samsung_odin;
+    const ready = ui.session == .firehose_ready or ui.session == .samsung_ready;
+
     if (ui.loader_section) |w| gtk.Widget.setVisible(w, @intFromBool(has_device and ui.session == .needs_loader));
-    if (ui.conn_section) |w| gtk.Widget.setVisible(w, @intFromBool(has_device and ui.session == .firehose_ready));
+    if (ui.conn_section) |w| gtk.Widget.setVisible(w, @intFromBool(has_device and ready));
     if (ui.ramdump_section) |w| {
         const is_crash = has_device and ui.device.?.mode == .qualcomm_crash;
         gtk.Widget.setVisible(w, @intFromBool(is_crash));
     }
+    if (ui.samsung_section) |w| gtk.Widget.setVisible(w, @intFromBool(is_samsung));
     refreshDeviceSelector(ui);
 
-    // The chip probe and Connect only make sense before a session exists.
-    if (ui.dev_chip_label) |l| gtk.Widget.setVisible(l.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
-    if (ui.chip_row) |w| gtk.Widget.setVisible(w, @intFromBool(ui.session == .disconnected));
-    if (ui.storage_drop) |d| gtk.Widget.setVisible(d.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
-    if (ui.skip_init_sw) |sw| gtk.Widget.setVisible(sw.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
-    if (ui.skip_init_row) |row| gtk.Widget.setVisible(row.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
-    if (ui.connect_btn) |b| gtk.Widget.setVisible(b.as(gtk.Widget), @intFromBool(ui.session == .disconnected));
+    // The chip probe and Connect only make sense before a session exists —
+    // and are Qualcomm concepts entirely.
+    const pre_connect = ui.session == .disconnected and !is_samsung;
+    if (ui.dev_chip_label) |l| gtk.Widget.setVisible(l.as(gtk.Widget), @intFromBool(pre_connect));
+    if (ui.chip_row) |w| gtk.Widget.setVisible(w, @intFromBool(pre_connect));
+    if (ui.storage_drop) |d| gtk.Widget.setVisible(d.as(gtk.Widget), @intFromBool(pre_connect));
+    if (ui.skip_init_sw) |sw| gtk.Widget.setVisible(sw.as(gtk.Widget), @intFromBool(pre_connect));
+    if (ui.skip_init_row) |row| gtk.Widget.setVisible(row.as(gtk.Widget), @intFromBool(pre_connect));
+    if (ui.connect_btn) |b| gtk.Widget.setVisible(b.as(gtk.Widget), @intFromBool(pre_connect));
+
+    // Qualcomm-only tools inside the connected section: hidden on Samsung.
+    if (is_samsung) {
+        if (ui.xml_row) |w| gtk.Widget.setVisible(w.as(gtk.Widget), 0);
+        if (ui.ufs_row) |w| gtk.Widget.setVisible(w.as(gtk.Widget), 0);
+        if (ui.huawei_row) |w| gtk.Widget.setVisible(w.as(gtk.Widget), 0);
+        if (ui.pending_row) |w| gtk.Widget.setVisible(w.as(gtk.Widget), 0);
+        if (ui.lun_row) |w| gtk.Widget.setVisible(w, 0);
+        inline for (.{ ui.flash_xml_btn, ui.ufs_btn, ui.huawei_btn, ui.write_all_btn, ui.refresh_btn, ui.reset_btn }) |maybe| {
+            if (maybe) |b| gtk.Widget.setVisible(b.as(gtk.Widget), 0);
+        }
+    }
 
     if (has_device) {
         const dev = ui.device.?;
@@ -963,8 +1033,11 @@ fn rebuildPartitions(ui: *Ui, parts: *const ev.PartitionsEvent) void {
 
     if (ui.parts_group) |g| {
         var info_buf: [200]u8 = undefined;
+        const is_samsung = ui.device != null and ui.device.?.mode == .samsung_odin;
         const info = if (parts.vip)
             (std.fmt.bufPrint(&info_buf, "VIP session — every packet must match the signed digest table, so partition reads/writes are unavailable", .{}) catch "")
+        else if (is_samsung)
+            (std.fmt.bufPrint(&info_buf, "PIT partition table · Write overwrites after confirmation; Erase zero-fills the partition", .{}) catch "")
         else
             (std.fmt.bufPrint(&info_buf, "LUN {d} · sector {d} B · {d} LUN(s) · Read makes a backup; Write overwrites after confirmation", .{ parts.lun, parts.sector_size, parts.luns }) catch "");
         var info_z: [220]u8 = undefined;
@@ -1006,9 +1079,12 @@ fn rebuildPartitions(ui: *Ui, parts: *const ev.PartitionsEvent) void {
         const sub = std.fmt.bufPrint(&buf, "index {d} · LBA {d}–{d} · {s}", .{ row.index, row.first_lba, row.last_lba, size_txt }) catch "";
         setSubtitleZ(action_row, sub);
 
-        const read_btn = gtk.Button.newWithLabel("Read");
-        _ = gtk.Button.signals.clicked.connect(read_btn, *RowCtx, &onReadClicked, ctx, .{});
-        adw.ActionRow.addSuffix(action_row, read_btn.as(gtk.Widget));
+        // Read-back does not exist in the Odin protocol — no Read on Samsung.
+        if (ui.device == null or ui.device.?.mode != .samsung_odin) {
+            const read_btn = gtk.Button.newWithLabel("Read");
+            _ = gtk.Button.signals.clicked.connect(read_btn, *RowCtx, &onReadClicked, ctx, .{});
+            adw.ActionRow.addSuffix(action_row, read_btn.as(gtk.Widget));
+        }
 
         const write_btn = gtk.Button.newWithLabel("Write");
         gtk.Widget.addCssClass(write_btn.as(gtk.Widget), "destructive-action");
@@ -1246,6 +1322,31 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
             } });
         },
         .write_partition => |row| {
+            if (ui.device != null and ui.device.?.mode == .samsung_odin) {
+                // Samsung: flash this image straight to the clicked partition
+                // after confirmation (no queue — each op opens its own session).
+                var size: u64 = 0;
+                if (fileio.File.open(path)) |opened| {
+                    var img = opened;
+                    defer img.close();
+                    size = img.size() catch 0;
+                } else |_| {}
+                var size_buf: [32]u8 = undefined;
+                const size_txt = util.formatBytes(&size_buf, size);
+                var body_buf: [512]u8 = undefined;
+                const body = std.fmt.bufPrint(&body_buf, "Flash \"{s}\" ({s}) to partition \"{s}\" (LBA {d}–{d})?\n\nOverwriting a partition is IRREVERSIBLE and can hard-brick the device if the image is wrong.", .{
+                    std.fs.path.basename(path),
+                    size_txt,
+                    row.name.slice(),
+                    row.first_lba,
+                    row.last_lba,
+                }) catch return;
+                const dup = ui.alloc.dupe(u8, path) catch return;
+                if (ui.samsung_flash_path) |old| ui.alloc.free(old);
+                ui.samsung_flash_path = dup;
+                confirmDialog(ui, "Flash image to partition?", body, "Flash", .destructive, .{ .samsung_flash = row });
+                return;
+            }
             const dup = ui.alloc.dupe(u8, path) catch return;
             ui.pending_writes.append(ui.alloc, .{ .row = row, .path = dup, .lun = currentLun(ui) }) catch {
                 ui.alloc.free(dup);
@@ -1361,6 +1462,7 @@ fn onRescanClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
 
 fn onConnectClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     if (ui.busy() or ui.manager == null) return;
+    if (ui.device != null and ui.device.?.mode == .samsung_odin) return; // Samsung uses its own flow
     readStorageSelection(ui);
     ui.startJob();
     ui.manager.?.enqueue(.{ .connect = .{
@@ -1545,6 +1647,10 @@ fn onReadClicked(_: *gtk.Button, ctx: *RowCtx) callconv(.c) void {
     const ui = ctx.ui;
     if (ui.busy()) {
         ui.toast("Another operation is running — wait for it to finish");
+        return;
+    }
+    if (ui.device != null and ui.device.?.mode == .samsung_odin) {
+        ui.toast("Partition read-back is not available in Samsung download mode");
         return;
     }
     var name_buf: [96]u8 = undefined;
@@ -1732,7 +1838,20 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
             } });
         },
         .erase_partition => |row| {
-            if (ui.busy() or ui.manager == null) return;
+            if (ui.busy()) return;
+            if (ui.device != null and ui.device.?.mode == .samsung_odin) {
+                // Odin erase = zero-fill the partition (Thor's ErasePartition).
+                const job = ui.alloc.create(SamsungJobCtx) catch return;
+                job.* = .{ .ui = ui, .kind = .erase, .partition = undefined, .partition_len = @min(row.name.len, job.partition.len), .length = row.sectors() * 512 };
+                @memcpy(job.partition[0..job.partition_len], row.name.slice()[0..job.partition_len]);
+                samsungStageTarget(ui, job) catch {
+                    samsungJobCtxFree(job);
+                    return;
+                };
+                spawnSamsungJob(ui, job);
+                return;
+            }
+            if (ui.manager == null) return;
             ui.startJob();
             ui.manager.?.enqueue(.{ .erase_partition = .{
                 .first_lba = row.first_lba,
@@ -1747,6 +1866,45 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
             const finalize = ui.ufs_finalize_sw != null and gtk.Switch.getActive(ui.ufs_finalize_sw.?) != 0;
             ui.startJob();
             ui.manager.?.enqueue(.{ .provision_ufs = .{ .path = path, .finalize = finalize } });
+        },
+        .samsung_flash => |row| {
+            const staged = ui.samsung_flash_path;
+            ui.samsung_flash_path = null;
+            if (!applied) {
+                if (staged) |p| ui.alloc.free(p);
+                return;
+            }
+            const path = staged orelse return;
+            if (ui.busy()) {
+                ui.alloc.free(path);
+                ui.toast("Another operation is running — wait for it to finish");
+                return;
+            }
+            const job = ui.alloc.create(SamsungJobCtx) catch {
+                ui.alloc.free(path);
+                return;
+            };
+            job.* = .{ .ui = ui, .kind = .flash, .path = path, .partition = undefined, .partition_len = @min(row.name.len, job.partition.len), .length = 0 };
+            @memcpy(job.partition[0..job.partition_len], row.name.slice()[0..job.partition_len]);
+            samsungStageTarget(ui, job) catch {
+                samsungJobCtxFree(job);
+                return;
+            };
+            spawnSamsungJob(ui, job);
+        },
+        .samsung_factory => {
+            if (!applied) return;
+            if (ui.busy()) {
+                ui.toast("Another operation is running — wait for it to finish");
+                return;
+            }
+            const job = ui.alloc.create(SamsungJobCtx) catch return;
+            job.* = .{ .ui = ui, .kind = .factory_reset, .partition = undefined, .partition_len = 0 };
+            samsungStageTarget(ui, job) catch {
+                samsungJobCtxFree(job);
+                return;
+            };
+            spawnSamsungJob(ui, job);
         },
         .huawei_app => {
             if (ui.busy() or ui.manager == null or huawei_maps == null) {
@@ -1875,6 +2033,210 @@ fn onRamdumpClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     };
     if (ui.ramdump_thread) |old| old.join();
     ui.ramdump_thread = thread;
+}
+
+// ----------------------------------------------------------------------
+// Samsung Odin (download mode, one-shot jobs)
+// ----------------------------------------------------------------------
+
+const SamsungJobKind = enum { pit_dump, flash, erase, reboot, reboot_download, factory_reset };
+
+const SamsungJobCtx = struct {
+    ui: *Ui,
+    kind: SamsungJobKind,
+    target: ?transport.Target = null,
+    target_serial_buf: ?[]u8 = null,
+    /// Image file path (flash) — owned.
+    path: ?[]u8 = null,
+    /// PIT partition name the operation targets (flash/erase).
+    partition: [40]u8 = undefined,
+    partition_len: usize = 0,
+    /// Operation length in bytes (erase: the partition's zero-fill size).
+    length: u64 = 0,
+};
+
+fn samsungJobCtxFree(ctx: *SamsungJobCtx) void {
+    const alloc = ctx.ui.alloc;
+    if (ctx.target_serial_buf) |s| alloc.free(s);
+    if (ctx.path) |p| alloc.free(p);
+    alloc.destroy(ctx);
+}
+
+fn samsungProgressCb(ctx: ?*anyopaque, name: []const u8, done: u64, total: u64) void {
+    const channel: *EventChannel = @ptrCast(@alignCast(ctx orelse return));
+    const frac: f32 = if (total == 0) -1.0 else @as(f32, @floatFromInt(done)) / @as(f32, @floatFromInt(total));
+    channel.push(.{ .progress = .{ .fraction = frac, .label = ev.FixedStr(160).fromSlice(name), .done = done, .total = total } });
+}
+
+fn samsungStageTarget(ui: *Ui, ctx: *SamsungJobCtx) !void {
+    if (activeTarget(ui)) |t| {
+        var copy = t;
+        if (t.serial) |s| {
+            const dup = try ui.alloc.dupe(u8, s);
+            ctx.target_serial_buf = dup;
+            copy.serial = dup;
+        }
+        ctx.target = copy;
+    }
+}
+
+fn spawnSamsungJob(ui: *Ui, ctx: *SamsungJobCtx) void {
+    ui.startJob();
+    const thread = std.Thread.spawn(.{}, samsungRun, .{ctx}) catch {
+        ui.jobDone();
+        samsungJobCtxFree(ctx);
+        ui.toast("Failed to start worker thread");
+        return;
+    };
+    // busy() gated the spawn, so any stored handle is a finished run.
+    if (ui.samsung_thread) |old| old.join();
+    ui.samsung_thread = thread;
+}
+
+/// Worker for every Samsung Odin operation: each job opens its own session
+/// (handshake → BeginSession → operation → EndSession), like Thor's
+/// connect/begin/end command grouping.
+fn samsungRun(ctx: *SamsungJobCtx) void {
+    const ui = ctx.ui;
+    defer samsungJobCtxFree(ctx);
+    samsungRunInner(ctx) catch |e| {
+        var mbuf: [320]u8 = undefined;
+        const name = ctx.partition[0..ctx.partition_len];
+        const msg = switch (ctx.kind) {
+            .pit_dump => std.fmt.bufPrint(&mbuf, "PIT dump failed: {s}", .{@errorName(e)}) catch "PIT dump failed",
+            .flash => std.fmt.bufPrint(&mbuf, "flash to {s} failed: {s}", .{ name, @errorName(e) }) catch "flash failed",
+            .erase => std.fmt.bufPrint(&mbuf, "erase of {s} failed: {s}", .{ name, @errorName(e) }) catch "erase failed",
+            .reboot, .reboot_download => std.fmt.bufPrint(&mbuf, "reboot failed: {s}", .{@errorName(e)}) catch "reboot failed",
+            .factory_reset => std.fmt.bufPrint(&mbuf, "factory reset failed: {s}", .{@errorName(e)}) catch "factory reset failed",
+        };
+        var m = ev.FixedStr(512){};
+        m.set(msg);
+        ui.channel.push(.{ .finished = .{ .success = false, .message = m } });
+        return;
+    };
+    var m = ev.FixedStr(512){};
+    m.set(switch (ctx.kind) {
+        .pit_dump => "PIT loaded",
+        .flash => "flash finished",
+        .erase => "erase finished",
+        .reboot, .reboot_download => "device rebooted",
+        .factory_reset => "userdata erased (factory reset)",
+    });
+    ui.channel.push(.{ .finished = .{ .success = true, .message = m } });
+}
+
+fn samsungRunInner(ctx: *SamsungJobCtx) !void {
+    const ui = ctx.ui;
+    var usb_dev = try usb.open(&samsung_usb_ids.policy, ctx.target, 8000, ui.logger, ui.alloc, &ui.cancel);
+    defer usb_dev.close();
+    // Loke does not expect the qdl-style trailing ZLP after writes.
+    usb_dev.transport().setWriteZlp(false);
+    var io = transport.Io.init(ui.alloc, usb_dev.transport());
+    defer io.deinit();
+    var sess = samsung_odin.Session{ .alloc = ui.alloc, .io = &io, .logger = ui.logger, .cancel = &ui.cancel };
+    try sess.handshake();
+    _ = try sess.beginSession();
+
+    switch (ctx.kind) {
+        .pit_dump => {
+            const dump = try sess.dumpPit(ui.alloc);
+            defer ui.alloc.free(dump);
+            var table = try samsung_pit.parse(ui.alloc, dump, ui.logger);
+            defer table.deinit(ui.alloc);
+            try sess.endSession();
+
+            var event = ev.PartitionsEvent{ .lun = 0, .sector_size = 512, .luns = 1 };
+            for (table.entries[0..table.count]) |*e| {
+                if (event.count >= ev.max_partition_rows) {
+                    ui.logger.warn("PIT has more than {d} partitions — the rest are not shown", .{ev.max_partition_rows});
+                    break;
+                }
+                event.parts[event.count] = .{
+                    .index = e.partition_id,
+                    .first_lba = e.block_size,
+                    .last_lba = e.block_size + @max(e.block_count, 1) - 1,
+                    .name = ev.FixedStr(72).fromSlice(e.nameSlice()),
+                };
+                event.count += 1;
+            }
+            ui.logger.info("✓ PIT loaded: {d} partitions", .{event.count});
+            ui.channel.push(.{ .partitions = event });
+            ui.channel.push(.{ .session_state = .samsung_ready });
+        },
+        .flash, .erase => {
+            // Thor's flow: dump the PIT to resolve the partition entry,
+            // SetTotalBytes, then stream the image (or zeros for an erase).
+            const dump = try sess.dumpPit(ui.alloc);
+            defer ui.alloc.free(dump);
+            var table = try samsung_pit.parse(ui.alloc, dump, ui.logger);
+            defer table.deinit(ui.alloc);
+            const name = ctx.partition[0..ctx.partition_len];
+            const entry = table.find(name) orelse {
+                ui.logger.err("Odin: partition \"{s}\" is not in the device PIT", .{name});
+                return error.PartitionNotFound;
+            };
+
+            var file: ?fileio.File = null;
+            defer if (file != null) file.?.close();
+            if (ctx.kind == .flash) {
+                file = try fileio.File.open(ctx.path.?);
+                ctx.length = try file.?.size();
+            }
+            try sess.setTotalBytes(ctx.length);
+            try sess.flashPartition(if (file) |*f| f else null, entry.*, ctx.length, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+            try sess.endSession();
+        },
+        .reboot => try sess.reboot(),
+        .reboot_download => try sess.rebootToDownloadMode(),
+        .factory_reset => {
+            try sess.eraseUserData();
+            try sess.endSession();
+        },
+    }
+}
+
+fn onSamsungDumpPit(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (ui.busy()) {
+        ui.toast("Another operation is running — wait for it to finish");
+        return;
+    }
+    const ctx = ui.alloc.create(SamsungJobCtx) catch return;
+    ctx.* = .{ .ui = ui, .kind = .pit_dump, .partition = undefined, .partition_len = 0 };
+    samsungStageTarget(ui, ctx) catch {
+        samsungJobCtxFree(ctx);
+        return;
+    };
+    spawnSamsungJob(ui, ctx);
+}
+
+fn onSamsungReboot(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    samsungControlClicked(ui, .reboot);
+}
+
+fn onSamsungRebootDownload(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    samsungControlClicked(ui, .reboot_download);
+}
+
+fn samsungControlClicked(ui: *Ui, kind: SamsungJobKind) void {
+    if (ui.busy()) {
+        ui.toast("Another operation is running — wait for it to finish");
+        return;
+    }
+    const ctx = ui.alloc.create(SamsungJobCtx) catch return;
+    ctx.* = .{ .ui = ui, .kind = kind, .partition = undefined, .partition_len = 0 };
+    samsungStageTarget(ui, ctx) catch {
+        samsungJobCtxFree(ctx);
+        return;
+    };
+    spawnSamsungJob(ui, ctx);
+}
+
+fn onSamsungFactoryReset(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (ui.busy()) {
+        ui.toast("Another operation is running — wait for it to finish");
+        return;
+    }
+    confirmDialog(ui, "Factory reset?", "This performs the Odin factory reset: the userdata partition is formatted. ALL DATA IS LOST. This is IRREVERSIBLE.", "Erase", .destructive, .samsung_factory);
 }
 
 // ----------------------------------------------------------------------
@@ -2285,7 +2647,9 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
             syncActiveDevice(ui);
             refreshDeviceSelector(ui);
             if (ui.device == null and ui.devices.items.len == 0) {
-                if (ui.session != .disconnected and ui.manager != null and !ui.busy()) {
+                if (ui.session == .samsung_ready) {
+                    // Samsung sessions are one-shot; nothing to tear down.
+                } else if (ui.session != .disconnected and ui.manager != null and !ui.busy()) {
                     ui.manager.?.enqueue(.{ .disconnect = {} });
                 } else if (ui.session != .disconnected) {
                     ui.cancel.store(true, .release);
@@ -2392,11 +2756,11 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
 }
 
 fn isNotable(msg: []const u8) bool {
-    const suffixes = [_][]const u8{ "read finished", "write finished", "flash finished" };
+    const suffixes = [_][]const u8{ "read finished", "write finished", "flash finished", "erase finished" };
     for (suffixes) |sfx| {
         if (std.mem.endsWith(u8, msg, sfx)) return true;
     }
-    const names = [_][]const u8{ "device reset", "loader required", "disconnected", "connected (VIP)", "partitions loaded", "digest tables created", "ramdump finished", "UFS provisioning finished", "huawei app finished" };
+    const names = [_][]const u8{ "device reset", "device rebooted", "loader required", "disconnected", "connected (VIP)", "partitions loaded", "digest tables created", "ramdump finished", "UFS provisioning finished", "huawei app finished", "userdata erased (factory reset)" };
     for (names) |n| {
         if (std.mem.eql(u8, msg, n)) return true;
     }

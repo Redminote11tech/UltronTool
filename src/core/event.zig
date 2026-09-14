@@ -126,7 +126,7 @@ pub const PartitionsEvent = struct {
     parts: [max_partition_rows]PartitionRow = undefined,
 };
 
-/// Lifecycle of the persistent Firehose session owned by the manager.
+/// Lifecycle of a protocol session (Qualcomm manager or Samsung one-shots).
 pub const SessionState = enum {
     /// No transport open (initial state, or after disconnect/reset/error).
     disconnected,
@@ -134,6 +134,8 @@ pub const SessionState = enum {
     needs_loader,
     /// Firehose programmer is alive and configured: partitions available.
     firehose_ready,
+    /// Samsung Odin: the PIT is loaded into the partition browser.
+    samsung_ready,
 };
 
 /// One image entry inside a Huawei UPDATE.APP container (parse result).
