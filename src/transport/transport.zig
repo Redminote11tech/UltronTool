@@ -59,6 +59,11 @@ pub const Transport = struct {
         /// USB-level device reset (re-enumerates; like a replug). Null for
         /// backends without reset support.
         reset: ?*const fn (ptr: *anyopaque) void = null,
+        /// Toggle the backend's automatic zero-length packet after writes
+        /// that end on a packet-size boundary. On by default (qdl's
+        /// ZlpAwareHost semantics); protocols whose devices do not expect
+        /// trailing ZLPs (Samsung Loke) turn it off after open.
+        set_write_zlp: ?*const fn (ptr: *anyopaque, enabled: bool) void = null,
     };
 
     pub fn read(self: Transport, buf: []u8, timeout_ms: u32) Error!usize {
@@ -82,6 +87,11 @@ pub const Transport = struct {
     /// unsupported.
     pub fn reset(self: Transport) void {
         if (self.vtable.reset) |r| r(self.ptr);
+    }
+
+    /// Enable/disable the automatic write ZLP; no-op when unsupported.
+    pub fn setWriteZlp(self: Transport, enabled: bool) void {
+        if (self.vtable.set_write_zlp) |f| f(self.ptr, enabled);
     }
 };
 

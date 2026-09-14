@@ -70,6 +70,10 @@ pub const Usb = struct {
     logger: *log.Logger,
     interface_number: u8,
     allocator: std.mem.Allocator,
+    /// qdl semantics: a write ending on a packet-size boundary is followed
+    /// by a ZLP. Protocols with devices that do not expect it (Samsung
+    /// Loke) disable this via the transport's set_write_zlp hook.
+    write_zlp: bool = true,
 
     pub fn transport(self: *Usb) Transport {
         return .{ .ptr = self, .vtable = &vtable };
@@ -80,6 +84,7 @@ pub const Usb = struct {
         .write = writeVt,
         .close = closeVt,
         .destroy = destroyVt,
+        .set_write_zlp = setWriteZlpVt,
     };
 
     fn readVt(ptr: *anyopaque, buf: []u8, timeout_ms: u32) Error!usize {
@@ -100,6 +105,11 @@ pub const Usb = struct {
     fn destroyVt(ptr: *anyopaque) void {
         const self: *Usb = @ptrCast(@alignCast(ptr));
         self.allocator.destroy(self);
+    }
+
+    fn setWriteZlpVt(ptr: *anyopaque, enabled: bool) void {
+        const self: *Usb = @ptrCast(@alignCast(ptr));
+        self.write_zlp = enabled;
     }
 
     fn resetVt(ptr: *anyopaque) void {
@@ -163,7 +173,7 @@ pub const Usb = struct {
             data = data[moved..];
         }
 
-        if (buf.len % self.out_maxpktsize == 0) {
+        if (self.write_zlp and buf.len % self.out_maxpktsize == 0) {
             var actual: c_int = 0;
             const ret = c.libusb_bulk_transfer(self.handle, self.out_ep, null, 0, &actual, @intCast(timeout_ms));
             if (ret < 0) return Error.Io;
