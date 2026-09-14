@@ -203,7 +203,9 @@ stage's digest payload dropdown, e.g. 16 KiB, matching what the real run
 negotiates), same SkipStorageInit setting. GUI runs pick the folder as "VIP digest tables" on the
 loader stage; VIP requires the fresh-boot loader-upload flow.
 
-## 6. Ultron support matrix & roadmap
+## 6. Ultron support matrix (Qualcomm)
+
+Cross-vendor plans live in `docs/ROADMAP.md`.
 
 | Feature | Status | Notes |
 |---|---|---|
@@ -233,6 +235,8 @@ loader stage; VIP requires the fresh-boot loader-upload flow.
 | 0e8d:0003 | MediaTek BROM | mtk (future) |
 | 0e8d:2000 / 2001 | MediaTek preloader | mtk (future) |
 | 04e8:685d / 6601 / 68c3 | Samsung download mode | samsung/odin (future) |
+| Unisoc download mode | BootROM/BSL + FDL1/FDL2 stages | unisoc (planned — IDs to confirm from references) |
+| LG download mode | LAF daemon | lg/laf (planned — IDs to confirm from references) |
 
 ## 8. Huawei UPDATE.APP (firmware container)
 
@@ -265,3 +269,17 @@ loaded GPT partitions by name (case-insensitive, ignoring `.img`), and every
 write is digest-verified like a partition write. Entries without a matching
 partition (SHA256RSA, VERLIST, …) are skipped. The container's checksum
 tables are not verified — device-side SHA-256 verification covers the flash.
+
+## 9. Planned protocol modules
+
+Priority order and per-module references live in `docs/ROADMAP.md` (owner-set). Summary:
+
+| # | Module | Direction | Primary reference |
+|---|---|---|---|
+| 1 | Samsung — Odin/Thor | download-mode flashing, PIT | `Samsung-Loki/Thor`, cross-checked with `Llucs/odin4` and Samsung's Odin4; Heimdall docs only, no code ported |
+| 2 | MediaTek — BROM/DA | BROM sync, DA upload, flash ops | `bkerler/mtkclient` |
+| 3 | Unisoc — FDL1/FDL2 | BSL session, FDL chain, flash ops | `ilyakurdyukov/spreadtrum_flash` + active fork `TomKing062/spreadtrum_flash` |
+| 4 | LG — LAF | download-mode partition ops | `Lekensteyn/lglaf` (protocol.md + dissector) |
+
+All Qualcomm-specific sections above (§1–§8) describe the shipped module and are
+unaffected by these plans.
