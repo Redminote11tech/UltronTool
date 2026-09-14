@@ -21,3 +21,6 @@ zig-pkg/
 # Agent session metadata
 .zcode/
 ultron-0.1.0.tar.gz
+
+# Agent rule-set (local, per-owner; not repo content)
+AGENTS.md
