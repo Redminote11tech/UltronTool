@@ -32,6 +32,8 @@ const session_mod = @import("../protocol/qualcomm/session.zig");
 const firehose = @import("../protocol/qualcomm/firehose.zig");
 const digestgen = @import("../protocol/qualcomm/digestgen.zig");
 const updateapp = @import("../firmware/updateapp.zig");
+const samsungtar = @import("../firmware/samsungtar.zig");
+const sparse_mod = @import("../firmware/sparse.zig");
 const usb_ids = @import("../protocol/qualcomm/usb_ids.zig");
 const samsung_odin = @import("../protocol/samsung/odin.zig");
 const samsung_pit = @import("../protocol/samsung/pit.zig");
@@ -66,6 +68,8 @@ const ChooserKind = union(enum) {
     /// from LUN B.
     read_partition: struct { row: ev.PartitionRow, lun: u32 },
     write_partition: ev.PartitionRow,
+    samsung_pit: void,
+    samsung_bundle: void,
 };
 
 /// Payload-size choices for VIP digest generation. 16 KiB is the default
@@ -196,6 +200,8 @@ pub const Ui = struct {
     /// Image path staged for a Samsung partition flash (consumed by the
     /// confirm dialog on both paths, like the Huawei mapping list).
     samsung_flash_path: ?[]u8 = null,
+    /// Staged PIT file / tar.md5 bundle path (same consumption pattern).
+    samsung_stage_path: ?[]u8 = null,
     speed_scratch: [32]u8 = undefined,
     prog_last_ms: i64 = 0,
     prog_last_done: u64 = 0,
@@ -293,6 +299,8 @@ const ConfirmKind = union(enum) {
     provision_ufs: void,
     huawei_app: void,
     samsung_flash: ev.PartitionRow,
+    samsung_pit: void,
+    samsung_bundle: void,
     samsung_factory: void,
 };
 
@@ -688,6 +696,21 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     gtk.Box.append(samsung_ctrl_box, samsung_reboot_btn.as(gtk.Widget));
     adw.ActionRow.addSuffix(samsung_ctrl_row, samsung_ctrl_box.as(gtk.Widget));
     adw.PreferencesGroup.add(samsung_group, samsung_ctrl_row.as(gtk.Widget));
+
+    const samsung_write_row = adw.ActionRow.new();
+    rowTitle(samsung_write_row, "Write to device");
+    const samsung_write_box = gtk.Box.new(.horizontal, 6);
+    gtk.Widget.setValign(samsung_write_box.as(gtk.Widget), .center);
+    const samsung_bundle_btn = gtk.Button.newWithLabel("Flash bundle (tar.md5)…");
+    gtk.Widget.addCssClass(samsung_bundle_btn.as(gtk.Widget), "destructive-action");
+    _ = gtk.Button.signals.clicked.connect(samsung_bundle_btn, *Ui, &onSamsungPickBundle, ui, .{});
+    gtk.Box.append(samsung_write_box, samsung_bundle_btn.as(gtk.Widget));
+    const samsung_pitflash_btn = gtk.Button.newWithLabel("Flash PIT…");
+    gtk.Widget.addCssClass(samsung_pit_btn.as(gtk.Widget), "destructive-action");
+    _ = gtk.Button.signals.clicked.connect(samsung_pitflash_btn, *Ui, &onSamsungPickPit, ui, .{});
+    gtk.Box.append(samsung_write_box, samsung_pit_btn.as(gtk.Widget));
+    adw.ActionRow.addSuffix(samsung_write_row, samsung_write_box.as(gtk.Widget));
+    adw.PreferencesGroup.add(samsung_group, samsung_write_row.as(gtk.Widget));
 
     const samsung_factory_btn = gtk.Button.newWithLabel("Factory reset (erase userdata)");
     gtk.Widget.addCssClass(samsung_factory_btn.as(gtk.Widget), "destructive-action");
@@ -1298,6 +1321,55 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
                 gtk.Widget.setSensitive(ui.ramdump_btn.?.as(gtk.Widget), @intFromBool(!ui.busy()));
             }
         },
+        .samsung_pit => {
+            if (ui.busy()) {
+                ui.toast("Another operation is running — wait for it to finish");
+                return;
+            }
+            const dup = ui.alloc.dupe(u8, path) catch return;
+            if (ui.samsung_stage_path) |old| ui.alloc.free(old);
+            ui.samsung_stage_path = dup;
+            confirmDialog(ui, "Flash PIT?", "Writing a PIT repartitions the device. A wrong or corrupt PIT can HARD-BRICK it. This is IRREVERSIBLE.", "Flash PIT", .destructive, .samsung_pit);
+        },
+        .samsung_bundle => {
+            if (ui.busy()) {
+                ui.toast("Another operation is running — wait for it to finish");
+                return;
+            }
+            // List the image members for the confirmation (header walk only —
+            // data is streamed later, so huge archives stay cheap).
+            var body_buf: [1200]u8 = undefined;
+            var len: usize = 0;
+            appendFmt(&body_buf, &len, "Flash the bundle's images to their PIT partitions?\n\n", .{});
+            var archive = samsungtar.list(ui.alloc, path, ui.logger) catch {
+                ui.toast("Not a valid tar.md5 bundle");
+                return;
+            };
+            defer archive.deinit(ui.alloc);
+            var listed: u32 = 0;
+            var images: u32 = 0;
+            for (archive.members[0..archive.count]) |*m| {
+                if (m.isMd5()) continue;
+                images += 1;
+                if (listed < 10) {
+                    var size_buf: [32]u8 = undefined;
+                    const size_txt = util.formatBytes(&size_buf, m.size);
+                    appendFmt(&body_buf, &len, "· {s} ({s})\n", .{ m.nameSlice(), size_txt });
+                    listed += 1;
+                }
+            }
+            if (images == 0) {
+                ui.toast("The bundle contains no image members");
+                return;
+            }
+            if (images > listed) appendFmt(&body_buf, &len, "· … and {d} more\n", .{images - listed});
+            appendFmt(&body_buf, &len, "\nImages without a PIT file-name match are skipped. Overwriting partitions is IRREVERSIBLE.", .{});
+
+            const dup = ui.alloc.dupe(u8, path) catch return;
+            if (ui.samsung_stage_path) |old| ui.alloc.free(old);
+            ui.samsung_stage_path = dup;
+            confirmDialog(ui, "Flash firmware bundle?", body_buf[0..len], "Flash", .destructive, .samsung_bundle);
+        },
         .xml_add => {
             const dup = ui.alloc.dupe(u8, path) catch return;
             ui.xml_paths.append(ui.alloc, dup) catch {
@@ -1892,6 +1964,30 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
             };
             spawnSamsungJob(ui, job);
         },
+        .samsung_pit, .samsung_bundle => {
+            const job_kind: SamsungJobKind = if (kind == .samsung_pit) .flash_pit else .bundle;
+            const staged = ui.samsung_stage_path;
+            ui.samsung_stage_path = null;
+            if (!applied) {
+                if (staged) |p| ui.alloc.free(p);
+                return;
+            }
+            if (ui.busy()) {
+                if (staged) |p| ui.alloc.free(p);
+                ui.toast("Another operation is running — wait for it to finish");
+                return;
+            }
+            const job = ui.alloc.create(SamsungJobCtx) catch {
+                if (staged) |p| ui.alloc.free(p);
+                return;
+            };
+            job.* = .{ .ui = ui, .kind = job_kind, .path = staged, .partition = undefined, .partition_len = 0 };
+            samsungStageTarget(ui, job) catch {
+                samsungJobCtxFree(job);
+                return;
+            };
+            spawnSamsungJob(ui, job);
+        },
         .samsung_factory => {
             if (!applied) return;
             if (ui.busy()) {
@@ -2039,7 +2135,7 @@ fn onRamdumpClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
 // Samsung Odin (download mode, one-shot jobs)
 // ----------------------------------------------------------------------
 
-const SamsungJobKind = enum { pit_dump, flash, erase, reboot, reboot_download, factory_reset };
+const SamsungJobKind = enum { pit_dump, flash, erase, reboot, reboot_download, factory_reset, flash_pit, bundle };
 
 const SamsungJobCtx = struct {
     ui: *Ui,
@@ -2108,6 +2204,8 @@ fn samsungRun(ctx: *SamsungJobCtx) void {
             .erase => std.fmt.bufPrint(&mbuf, "erase of {s} failed: {s}", .{ name, @errorName(e) }) catch "erase failed",
             .reboot, .reboot_download => std.fmt.bufPrint(&mbuf, "reboot failed: {s}", .{@errorName(e)}) catch "reboot failed",
             .factory_reset => std.fmt.bufPrint(&mbuf, "factory reset failed: {s}", .{@errorName(e)}) catch "factory reset failed",
+            .flash_pit => std.fmt.bufPrint(&mbuf, "PIT flash failed: {s}", .{@errorName(e)}) catch "PIT flash failed",
+            .bundle => std.fmt.bufPrint(&mbuf, "bundle flash failed: {s}", .{@errorName(e)}) catch "bundle flash failed",
         };
         var m = ev.FixedStr(512){};
         m.set(msg);
@@ -2121,6 +2219,8 @@ fn samsungRun(ctx: *SamsungJobCtx) void {
         .erase => "erase finished",
         .reboot, .reboot_download => "device rebooted",
         .factory_reset => "userdata erased (factory reset)",
+        .flash_pit => "PIT flash finished",
+        .bundle => "bundle flash finished",
     });
     ui.channel.push(.{ .finished = .{ .success = true, .message = m } });
 }
@@ -2186,6 +2286,109 @@ fn samsungRunInner(ctx: *SamsungJobCtx) !void {
             try sess.flashPartition(if (file) |*f| f else null, entry.*, ctx.length, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
             try sess.endSession();
         },
+        .flash_pit => {
+            const data = try fileio.readFileAlloc(ui.alloc, ctx.path.?, 1024 * 1024);
+            defer ui.alloc.free(data);
+            try sess.flashPit(data);
+            try sess.endSession();
+        },
+        .bundle => {
+            var archive = try samsungtar.list(ui.alloc, ctx.path.?, ui.logger);
+            defer archive.deinit(ui.alloc);
+            const dump = try sess.dumpPit(ui.alloc);
+            defer ui.alloc.free(dump);
+            var table = try samsung_pit.parse(ui.alloc, dump, ui.logger);
+            defer table.deinit(ui.alloc);
+
+            // Resolve every image member against the PIT's file names and
+            // verify its .md5 companion before anything touches the device.
+            const Job = struct {
+                member: *const samsungtar.Member,
+                entry: samsung_pit.Entry,
+                md5: ?*const samsungtar.Member,
+            };
+            var jobs = std.ArrayList(Job).empty;
+            defer jobs.deinit(ui.alloc);
+            for (archive.members[0..archive.count]) |*m| {
+                if (m.isMd5()) continue;
+                var matched: ?samsung_pit.Entry = null;
+                for (table.entries[0..table.count]) |*e| {
+                    if (std.ascii.eqlIgnoreCase(e.fileNameSlice(), m.nameSlice())) {
+                        matched = e.*;
+                        break;
+                    }
+                }
+                const entry = matched orelse {
+                    ui.logger.warn("bundle: \"{s}\" matches no PIT file name — skipped", .{m.nameSlice()});
+                    continue;
+                };
+                const md5_member = blk: {
+                    var name_buf: [136]u8 = undefined;
+                    const md5_name = std.fmt.bufPrint(&name_buf, "{s}.md5", .{m.nameSlice()}) catch break :blk null;
+                    break :blk archive.find(md5_name);
+                };
+                if (md5_member) |mm| {
+                    var file = try fileio.File.open(ctx.path.?);
+                    defer file.close();
+                    var hex_buf: [64]u8 = undefined;
+                    file.seekTo(mm.data_offset) catch return error.Io;
+                    const n = try file.readAll(hex_buf[0..]);
+                    const ok = try samsungtar.verifyMd5(ui.alloc, ctx.path.?, m, hex_buf[0..n], ui.logger);
+                    if (!ok) {
+                        ui.logger.err("bundle: \"{s}\" failed its md5 checksum — aborting before any write", .{m.nameSlice()});
+                        return error.ChecksumMismatch;
+                    }
+                    ui.logger.info("bundle: \"{s}\" md5 verified", .{m.nameSlice()});
+                }
+                try jobs.append(ui.alloc, .{ .member = m, .entry = entry, .md5 = md5_member });
+            }
+            if (jobs.items.len == 0) {
+                ui.logger.err("bundle: no image member matched a PIT file name", .{});
+                return error.NothingToFlash;
+            }
+
+            var tar_file = try fileio.File.open(ctx.path.?);
+            defer tar_file.close();
+
+            var tmp = try fileio.TempDirDyn.init(ui.alloc);
+            defer tmp.cleanup();
+
+            const total_jobs: u64 = jobs.items.len;
+            var done_jobs: u64 = 0;
+            for (jobs.items) |j| {
+                if (ui.cancel.load(.acquire)) return error.Cancelled;
+                ui.logger.info("bundle: flashing {s} ({d}/{d})", .{ j.member.nameSlice(), done_jobs + 1, total_jobs });
+                try tar_file.seekTo(j.member.data_offset);
+
+                var member_file: ?fileio.File = null;
+                defer if (member_file != null) member_file.?.close();
+                var raw_len: u64 = j.member.size;
+
+                var probe: [4]u8 = undefined;
+                _ = try tar_file.readAll(&probe);
+                try tar_file.seekTo(j.member.data_offset);
+                const is_sparse = sparse_mod.isSparse(&probe);
+
+                if (is_sparse) {
+                    // Android sparse member: expand to a raw temp file first.
+                    var raw_path_buf: [300]u8 = undefined;
+                    const raw_path = try tmp.filePath(&raw_path_buf, "member.raw");
+                    tmp.track("member.raw") catch {};
+                    const raw_size = try sparse_mod.convertToFile(ui.alloc, &tar_file, raw_path, ui.logger);
+                    member_file = try fileio.File.open(raw_path);
+                    raw_len = raw_size;
+                    ui.logger.info("bundle: \"{s}\" sparse → raw ({d} bytes)", .{ j.member.nameSlice(), raw_size });
+                } else {
+                    member_file = tar_file;
+                }
+
+                try sess.setTotalBytes(raw_len);
+                try sess.flashPartition(&member_file.?, j.entry, raw_len, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                done_jobs += 1;
+            }
+            try sess.endSession();
+            ui.logger.info("✓ bundle flashed: {d}/{d} image(s)", .{ done_jobs, total_jobs });
+        },
         .reboot => try sess.reboot(),
         .reboot_download => try sess.rebootToDownloadMode(),
         .factory_reset => {
@@ -2229,6 +2432,14 @@ fn samsungControlClicked(ui: *Ui, kind: SamsungJobKind) void {
         return;
     };
     spawnSamsungJob(ui, ctx);
+}
+
+fn onSamsungPickPit(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    openChooser(ui, .samsung_pit, "Select PIT file to flash", false, null);
+}
+
+fn onSamsungPickBundle(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    openChooser(ui, .samsung_bundle, "Select firmware bundle (tar.md5)", false, null);
 }
 
 fn onSamsungFactoryReset(_: *gtk.Button, ui: *Ui) callconv(.c) void {
