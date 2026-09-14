@@ -64,12 +64,15 @@ pub const RQT_CLOSE_REBOOT_RECOVERY: u32 = 3; // power off
 /// (Thor's OdinFailCheck: response byte 0 == 0xFF).
 const BOOTLOADER_FAIL: u32 = 0xFFFF_FFFF;
 
-/// odin4 uses 10 s for every command exchange (USB_TIMEOUT_CONTROL) and
-/// retries transport-level failures; devices have been observed answering
-/// the first exchange late, so patience beats a fast failure here.
-pub const handshake_timeout_ms: u32 = 10_000;
-pub const default_timeout_ms: u32 = 10_000;
-pub const handshake_attempts: u32 = 3;
+/// The OFFICIAL odin4 binary (setupConnection/requestAndResponse,
+/// disassembled) waits 60 s per bulk read — the handshake read and every
+/// command response alike — and requestAndResponse retries a silent read
+/// once. Devices have been observed answering the first exchange late, so
+/// patience beats a fast failure here.
+pub const handshake_timeout_ms: u32 = 60_000;
+pub const default_timeout_ms: u32 = 60_000;
+pub const response_attempts: u32 = 2;
+pub const handshake_attempts: u32 = 2;
 pub const pit_flash_timeout_ms: u32 = 120_000;
 pub const erase_user_data_timeout_ms: u32 = 600_000;
 /// Upper bound for a PIT dump (largest real PIT is well under 1 MiB).
@@ -175,10 +178,22 @@ pub const Session = struct {
     }
 
     /// Read an 8-byte response, fail on the bootloader-fail sentinel or a
-    /// wrong region id (odin4's is_valid_response semantics).
+    /// wrong region id. Port of requestAndResponse's read: a 64-byte buffer
+    /// with the exchange retried once when the device stays silent.
     fn response(self: *Session, expected: u32, timeout_ms: u32) Error!Response {
         var buf: [8]u8 = undefined;
-        try self.readExact(&buf, timeout_ms);
+        var attempt: u32 = 0;
+        while (attempt < response_attempts) : (attempt += 1) {
+            if (self.cancelled()) return Error.Cancelled;
+            if (self.readExact(&buf, timeout_ms)) |_| {
+                break;
+            } else |e| {
+                if (e != Error.Timeout or attempt + 1 >= response_attempts) return e;
+                self.logger.warn("Odin: no response within {d} ms — retrying the read", .{timeout_ms});
+            }
+        } else {
+            return Error.Timeout; // loop exhausted without a full response
+        }
         const r = Response{
             .id = std.mem.readInt(u32, buf[0..4], .little),
             .ack = std.mem.readInt(u32, buf[4..8], .little),

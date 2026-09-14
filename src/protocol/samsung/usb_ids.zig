@@ -1,10 +1,12 @@
 //! Samsung download-mode USB identity policy.
 //!
-//! Ported from TheAirBlow.Thor.Library Platform/Linux.cs (MIT): the device
-//! in Odin download mode exposes a CDC-Data interface (class 0x0a) with one
-//! bulk IN + one bulk OUT. Thor matches every Samsung VID, but the scanner
-//! sees phones in normal mode too (MTP/ADB share the vendor id), so the
-//! device-level rule is restricted to the download-mode PIDs.
+//! Device rule: VID 04e8 restricted to the download-mode PIDs (the scanner
+//! must not tag MTP/ADB phones). Interface rule ported from the OFFICIAL
+//! odin4 binary (UsbDeviceImpl constructor, disassembled): no interface
+//! class filter — the first interface carrying at least one bulk IN and one
+//! bulk OUT wins, taking the LAST bulk endpoint of each direction. (Thor's
+//! class-0x0a CDC filter can pick a log/console interface on devices that
+//! expose several bulk interfaces; the official tool does not filter.)
 
 const usb = @import("../../transport/usb.zig");
 const proto_mod = @import("../protocol.zig");
@@ -28,18 +30,17 @@ pub fn matchDevice(desc: usb.DeviceDesc) bool {
 }
 
 pub fn matchInterface(ifc: usb.InterfaceDesc) ?usb.EpPair {
-    // USB_CLASS_CDC_DATA — the interface Loke serves the Odin protocol on.
-    if (ifc.class != 0x0a) return null;
-
+    // Official odin4 selection: no class filter; the LAST bulk endpoint of
+    // each direction on the interface wins.
     var in_ep: ?usb.EndpointDesc = null;
     var out_ep: ?usb.EndpointDesc = null;
     for (ifc.endpoints) |ep| {
         const is_bulk = (ep.attributes & 0x03) == 0x02; // USB transfer type bulk
         if (!is_bulk) continue;
         if (ep.address & 0x80 != 0) {
-            if (in_ep == null) in_ep = ep;
+            in_ep = ep;
         } else {
-            if (out_ep == null) out_ep = ep;
+            out_ep = ep;
         }
     }
 
@@ -73,7 +74,7 @@ pub const protocol = proto_mod.Protocol{
     .classify = classify,
 };
 
-test "matchInterface accepts the CDC-Data bulk pair" {
+test "matchInterface accepts any class with a bulk pair" {
     const eps = [_]usb.EndpointDesc{
         .{ .address = 0x81, .attributes = 0x02, .max_packet_size = 512 },
         .{ .address = 0x01, .attributes = 0x02, .max_packet_size = 512 },
@@ -81,14 +82,32 @@ test "matchInterface accepts the CDC-Data bulk pair" {
     const pair = matchInterface(.{ .class = 0x0a, .subclass = 0x00, .protocol = 0x00, .endpoints = &eps }).?;
     try std.testing.expectEqual(@as(u8, 0x81), pair.in_ep);
     try std.testing.expectEqual(@as(u8, 0x01), pair.out_ep);
+    // Vendor-specific interfaces are equally valid (official odin4 behavior).
+    const pair2 = matchInterface(.{ .class = 0xff, .subclass = 0x02, .protocol = 0x01, .endpoints = &eps }).?;
+    try std.testing.expectEqual(@as(u8, 0x81), pair2.in_ep);
 }
 
-test "matchInterface rejects other interface classes" {
-    const bulk = [_]usb.EndpointDesc{
+test "matchInterface takes the last bulk endpoint of each direction" {
+    const eps = [_]usb.EndpointDesc{
         .{ .address = 0x81, .attributes = 0x02, .max_packet_size = 512 },
+        .{ .address = 0x02, .attributes = 0x02, .max_packet_size = 512 },
+        .{ .address = 0x83, .attributes = 0x02, .max_packet_size = 512 },
+        .{ .address = 0x03, .attributes = 0x02, .max_packet_size = 512 },
+    };
+    const pair = matchInterface(.{ .class = 0x0a, .subclass = 0x00, .protocol = 0x00, .endpoints = &eps }).?;
+    try std.testing.expectEqual(@as(u8, 0x83), pair.in_ep);
+    try std.testing.expectEqual(@as(u8, 0x03), pair.out_ep);
+}
+
+test "matchInterface rejects interfaces without both bulk directions" {
+    const irq_only = [_]usb.EndpointDesc{
+        .{ .address = 0x82, .attributes = 0x03, .max_packet_size = 64 },
+    };
+    try std.testing.expectEqual(@as(?usb.EpPair, null), matchInterface(.{ .class = 0x02, .subclass = 0x02, .protocol = 0x01, .endpoints = &irq_only }));
+    const out_only = [_]usb.EndpointDesc{
         .{ .address = 0x01, .attributes = 0x02, .max_packet_size = 512 },
     };
-    try std.testing.expectEqual(@as(?usb.EpPair, null), matchInterface(.{ .class = 0xff, .subclass = 0x02, .protocol = 0x01, .endpoints = &bulk }));
+    try std.testing.expectEqual(@as(?usb.EpPair, null), matchInterface(.{ .class = 0x0a, .subclass = 0x00, .protocol = 0x00, .endpoints = &out_only }));
 }
 
 test "classify tags download-mode PIDs only" {
