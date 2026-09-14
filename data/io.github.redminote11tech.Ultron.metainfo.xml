@@ -33,6 +33,15 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.5.0" date="2026-09-13">
+      <description>
+        <p>Samsung Odin support (experimental): PIT dump into the partition
+        browser, image-to-partition flashing and partition erase over the
+        Thor protocol, device reboot controls and a gated factory reset.
+        Also: write-ZLP is now a transport option and the protocol registry
+        gained its second vendor module. Hardware validation pending.</p>
+      </description>
+    </release>
     <release version="0.4.1" date="2026-09-13">
       <description>
         <p>Hardening release from a five-agent code audit: worker threads are
