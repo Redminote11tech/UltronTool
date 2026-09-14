@@ -19,9 +19,12 @@ hardware.
 
 ---
 
-## 1. Samsung — Odin / Thor protocol (next up)
+## 1. Samsung — Odin / Thor protocol (phases 1–3 landed)
 
-**Status:** planned · Detection IDs already in the table (`04e8:685d/6601/68c3`).
+**Status:** protocol module, USB policy and GUI shipped (`src/protocol/samsung/`,
+`docs/PROTOCOL.md` §10); **hardware validation pending**. Remaining phases: 4
+(repartition with PIT, PIT flashing) and 5 (tar.md5 firmware bundles), plus the
+v2+ compressed-download path.
 
 **References (working, in trust order):**
 - `Samsung-Loki/Thor` — from-scratch C#/.NET implementation of the Thor/Odin USB protocol,

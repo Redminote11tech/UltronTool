@@ -224,6 +224,7 @@ Cross-vendor plans live in `docs/ROADMAP.md`.
 | UFS provisioning (<ufs> XML) | ✅ | full qdl ufs.c port: validation pass (commit=0) then commit; the GUI's Finalize switch must match the XML's bConfigDescrLock, and OTP commits require an explicit destructive confirmation |
 | VIP (Vendor Image Programming) | ✅ | full qdl vip.c port: GUI digest generation, table streaming, single-configure rule; the vendor signing step stays external; untested against VIP hardware so far |
 | Streaming (nandprg/enandprg), Diag | ❌ n/a | NAND-target legacy paths |
+| Samsung Odin (Thor protocol) | ⚠️ implemented, hardware untested | PIT dump → partition browser, image→partition flash, partition zero-fill erase, reboot / reboot-to-download, factory reset; protocol v0/1 and v2+ (1 MiB parts) per Thor; compressed download (v2+ flag) not implemented |
 
 ## 7. Detection table (Ultron device scanner)
 
@@ -234,7 +235,7 @@ Cross-vendor plans live in `docs/ROADMAP.md`.
 | 05c6:* (any other PID, vendor-specific interface) | Qualcomm | qualcomm |
 | 0e8d:0003 | MediaTek BROM | mtk (future) |
 | 0e8d:2000 / 2001 | MediaTek preloader | mtk (future) |
-| 04e8:685d / 6601 / 68c3 | Samsung download mode | samsung/odin (future) |
+| 04e8:685d / 6601 / 68c3 | Samsung download mode | samsung/odin |
 | Unisoc download mode | BootROM/BSL + FDL1/FDL2 stages | unisoc (planned — IDs to confirm from references) |
 | LG download mode | LAF daemon | lg/laf (planned — IDs to confirm from references) |
 
@@ -283,3 +284,50 @@ Priority order and per-module references live in `docs/ROADMAP.md` (owner-set). 
 
 All Qualcomm-specific sections above (§1–§8) describe the shipped module and are
 unaffected by these plans.
+
+## 10. Samsung Odin (Thor protocol) — `protocol/samsung/`
+
+Ported from `Samsung-Loki/Thor` (C#, MIT) `Protocols/Odin.cs` + `PIT/*` +
+`Platform/Linux.cs`, cross-checked against odin4's `src/protocol/thor_protocol.h`.
+
+USB: VID 04e8, download-mode PIDs 685d/6601/68c3; the Loke bootloader serves the
+protocol on a **CDC-Data interface (class 0x0a)** with one bulk IN + one bulk OUT.
+The host must NOT send qdl-style trailing ZLPs — the transport's write ZLP is
+disabled for Samsung sessions (`set_write_zlp`).
+
+Handshake: host sends ASCII `ODIN` (4 bytes), device answers `LOKE`.
+
+Requests are 1024-byte zero-padded boxes `[region u32][param u32][int args…]`
+(little-endian); responses are 8 bytes `[id u32][ack u32]`. `id = 0xFFFFFFFF`
+marks a bootloader failure with the code in `ack` (Thor's OdinFailCheck); a
+wrong region id is also rejected (odin4). Regions:
+
+| Region | Params (ack meaning) |
+|---|---|
+| `0x64` init | 0 = BeginSession (ack packs `[unk1 u8][unk2 u8][protocol i16]`), 1 = reset flash counter, 2 = SetTotalBytes (u64 arg), 5 = announce part size (v2+), 7 = erase userdata (10 min timeout) |
+| `0x65` PIT | 0 = flash PIT, 1 = dump request (ack = PIT size), 2 = one 500-byte block / begin, 3 = complete |
+| `0x66` xmit | 0 = request file flash, 2 = request sequence (arg: aligned size), 3 = end sequence |
+| `0x67` close | 0 = end session, 1 = reboot, 2 = reboot to download mode, 3 = power off |
+
+Protocol versions: the host offers `0x7FFFFFFF` and the bootloader reports its own
+(0/1 → 128 KiB parts, 240-part sequences, 30 s end-sequence timeout; v2+ → 1 MiB
+parts announced by the host, 30-part sequences, 120 s). The v2+ compressed-download
+capability flag (ack bit 15) is documented but not implemented.
+
+File transfer: per sequence — request (aligned size) → N part writes, each ACKed
+with the part index (mismatch = hard error) → end sequence packet. Phone
+partitions: `[0x66][3][0][realSize][binaryType][deviceType][partitionId][last]
+[efsClear][bootloaderUpdate]`; modem partitions (binary type 1) use the short
+form without partition id. The device writes nothing until end sequence.
+Failure codes at end sequence: -2 write-protected, -3 erase, -4 write,
+-5 auth, -6 size, -7 ext4 — mapped to typed transport errors (session survives).
+
+Erase = flash zeros of the partition size with a null file (Thor's
+ErasePartition). Every flash/erase job re-dumps the PIT in-session to resolve
+the entry, exactly like Thor's CLI flow.
+
+PIT format: magic `0x12349876`, u32 entry count, 8-byte unknown, 8-byte project,
+u32 reserved; then 132-byte entries: binary type, device type, partition id,
+attributes, update attributes, block size, block count, file offset, file size
+(u32 LE each) + partition/file/delta names (32-byte ASCII). Blocks are 512-byte
+device blocks on eMMC/UFS targets.

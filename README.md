@@ -58,6 +58,12 @@ a small, dependency-free Zig library you can audit in an afternoon.
 - **Huawei UPDATE.APP** — flash a whole Huawei firmware package: entries are
   matched to GPT partitions by name, Android sparse images convert to raw
   automatically, and every write is SHA-256-verified
+- **Samsung Odin** — for devices in download mode (`04e8:685d`): PIT dump into
+  the partition browser, image → partition flashing and partition zero-fill
+  erase over the Thor protocol (ported from the Thor flash utility, cross-
+  checked against odin4), reboot / reboot-to-download and factory reset.
+  Protocol v0/1 and v2+ (1 MiB parts); compressed download pending.
+  Hardware validation is still pending — treat as experimental.
 - **Persistent session** — the Firehose connection stays open across
   operations; explicit Reset device / Disconnect; cancel aborts and
   disconnects safely
