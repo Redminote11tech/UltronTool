@@ -18,6 +18,7 @@ test {
     _ = @import("protocol/qualcomm/ufs.zig");
     _ = @import("protocol/qualcomm/digestgen.zig");
     _ = @import("protocol/qualcomm/session.zig");
+    _ = @import("protocol/samsung/pit.zig");
     _ = @import("protocol/qualcomm/gpt.zig");
     _ = @import("protocol/qualcomm/manager.zig");
     _ = @import("device/scanner.zig");
