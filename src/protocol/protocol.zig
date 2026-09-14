@@ -34,8 +34,8 @@ pub const Protocol = struct {
 /// The plugin registry. Order matters only for overlapping classifiers.
 pub const registry = [_]Protocol{
     @import("qualcomm/usb_ids.zig").protocol,
+    @import("samsung/usb_ids.zig").protocol,
     // Future: @import("mtk/usb_ids.zig").protocol,
-    // Future: @import("samsung/usb_ids.zig").protocol,
 };
 
 /// Run the registry over a discovered device; first non-unknown wins.
