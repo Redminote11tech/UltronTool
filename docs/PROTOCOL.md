@@ -224,7 +224,10 @@ Cross-vendor plans live in `docs/ROADMAP.md`.
 | UFS provisioning (<ufs> XML) | ✅ | full qdl ufs.c port: validation pass (commit=0) then commit; the GUI's Finalize switch must match the XML's bConfigDescrLock, and OTP commits require an explicit destructive confirmation |
 | VIP (Vendor Image Programming) | ✅ | full qdl vip.c port: GUI digest generation, table streaming, single-configure rule; the vendor signing step stays external; untested against VIP hardware so far |
 | Streaming (nandprg/enandprg), Diag | ❌ n/a | NAND-target legacy paths |
-| Samsung Odin (Thor protocol) | ⚠️ implemented, hardware untested | PIT dump → partition browser, image→partition flash, partition zero-fill erase, reboot / reboot-to-download, factory reset; protocol v0/1 and v2+ (1 MiB parts) per Thor; compressed download (v2+ flag) not implemented |
+| Samsung Odin (Thor protocol) | ⚠️ implemented, hardware untested | PIT dump → partition browser, image→partition flash, PIT flash, partition zero-fill erase, reboot / reboot-to-download, factory reset, tar.md5 bundle flashing (md5-verified, sparse-aware); protocol v0/1 and v2+ (1 MiB parts); compressed download (v2+ flag) not implemented |
+| LG LAF (download mode) | ⚠️ implemented, hardware untested | GPT read → partition browser, partition backup (read-back works), image→partition flash, ERSE/TRIM erase (lands on reboot), reboot/power-off; chunked at the reference's 15.5 KiB; shell EXEC deliberately not implemented |
+| MediaTek BROM | ⚠️ probe only | inverted-echo sync, GET_HW_CODE + GET_HW_SW_VER, CDC VCOM setup (921600 8N1 + RTS); DA upload/flashing = next phase |
+| Unisoc BSL bootrom | ⚠️ probe only | HDLC framing (CRC-16/XMODEM bootrom stage), CHECK_BAUD version string, CONNECT; FDL1/FDL2 upload/flashing = next phase |
 
 ## 7. Detection table (Ultron device scanner)
 
@@ -233,9 +236,11 @@ Cross-vendor plans live in `docs/ROADMAP.md`.
 | 05c6:9008 | Qualcomm EDL | qualcomm |
 | 05c6:900e | Qualcomm crash-dump | qualcomm |
 | 05c6:* (any other PID, vendor-specific interface) | Qualcomm | qualcomm |
-| 0e8d:0003 | MediaTek BROM | mtk (future) |
-| 0e8d:2000 / 2001 | MediaTek preloader | mtk (future) |
+| 0e8d:0003 | MediaTek BROM | mtk |
+| 0e8d:2000 / 2001 | MediaTek preloader | mtk |
 | 04e8:685d / 6601 / 68c3 | Samsung download mode | samsung/odin |
+| 1004:633e | LG download mode (LAF) | lg/laf |
+| 1782:4d00 | Unisoc bootrom (BSL) | spd |
 | Unisoc download mode | BootROM/BSL + FDL1/FDL2 stages | unisoc (planned — IDs to confirm from references) |
 | LG download mode | LAF daemon | lg/laf (planned — IDs to confirm from references) |
 
@@ -331,3 +336,47 @@ u32 reserved; then 132-byte entries: binary type, device type, partition id,
 attributes, update attributes, block size, block count, file offset, file size
 (u32 LE each) + partition/file/delta names (32-byte ASCII). Blocks are 512-byte
 device blocks on eMMC/UFS targets.
+
+## 11. LG LAF — `protocol/lg/`
+
+Ported from `Lekensteyn/lglaf` (lglaf.py + protocol.md, MIT).
+
+USB: VID 1004 PID 633e; LAF runs as a bulk pair (CDC-Data interface on the
+reference dumps). Interface matching is structural (bulk IN + OUT), not
+class-bound.
+
+Framing: 32-byte header — command[4], four u32 arguments, body length u32,
+CRC-16-CCITT reflected (poly 0x8408, init/final XOR 0xFFFF) stored in a 4-byte
+field, and a bit-wise inversion of the command — followed by the body. `FAIL`
+responses carry the error code in arg1. Commands: HELO (version 0x01000001,
+re-sent per the reference), OPEN (empty body = /dev/block/mmcblk0 rw) → fd,
+CLSE, READ (arg2 = 512-byte block offset, arg3 = length, ≤ 15.5 KiB chunks —
+larger reads hang lafd), WRTE (response byte offset must match, wrapping),
+ERSE (TRIM — old data reads back until reboot), CTRL (RSET/POFF/ONRS). Writes
+refuse the GPT area (first 34 sectors) — reference guard, extended to erases.
+Shell EXEC is deliberately not implemented.
+
+## 12. MediaTek BROM — `protocol/mtk/`
+
+Ported from `bkerler/mtkclient` (Port.py run_handshake/mtk_cmd, mtk_preloader
+Cmd table).
+
+USB: VID 0e8d, PIDs 0003 (BROM) / 2000, 2001 (preloader), structural bulk pair.
+CDC VCOM setup before sync: SET_LINE_CODING 921600 8N1 + SET_CONTROL_LINE_STATE
+RTS (control-transfer hook; degrades to a debug note when unsupported).
+
+Sync: bytes A0 0A 50 05 sent one at a time, each echoed bit-inverted
+(5F F5 AF FA); 30 attempts with stale-byte drain. Commands are echoed then
+answered big-endian: GET_HW_CODE (0xFD) → hwcode u16 + hw_sub_code u16,
+GET_HW_SW_VER (0xFC) → four u16. DA upload/flashing is the next phase.
+
+## 13. Unisoc BSL bootrom — `protocol/spd/`
+
+Ported from `ilyakurdyukov/spreadtrum_flash` (spd_dump.c + spd_cmd.h, MIT).
+
+USB: VID 1782 PID 4d00 (bootrom). CDC SET_CONTROL_LINE_STATE with wValue
+0x601 first (smartphone bootroms require it). Frames: type u16 BE, length u16
+BE, payload, checksum u16 BE — bootrom uses CRC-16/XMODEM (poly 0x1021), FDL2
+uses a folded byte sum — HDLC-encoded with 0x7E delimiters and 0x7D stuffing.
+Probe: CHECK_BAUD (bare 0x7E bytes) → BSL_REP_VER version string, CONNECT →
+ACK. FDL1/FDL2 upload and flash operations are the next phase.

@@ -19,12 +19,14 @@ hardware.
 
 ---
 
-## 1. Samsung — Odin / Thor protocol (phases 1–3 landed)
+## 1. Samsung — Odin / Thor protocol (phases 1–5 landed)
 
 **Status:** protocol module, USB policy and GUI shipped (`src/protocol/samsung/`,
-`docs/PROTOCOL.md` §10); **hardware validation pending**. Remaining phases: 4
-(repartition with PIT, PIT flashing) and 5 (tar.md5 firmware bundles), plus the
-v2+ compressed-download path.
+`docs/PROTOCOL.md` §10): PIT dump, image→partition flash, partition erase, PIT
+flashing, tar.md5 bundle flashing (md5-verified, sparse-aware), reboot controls,
+factory reset. **Hardware validation pending** (silent-device handshake issue
+traced and fixed against the official odin4 binary). Remaining: v2+ compressed
+download, repartition UX polish.
 
 **References (working, in trust order):**
 - `Samsung-Loki/Thor` — from-scratch C#/.NET implementation of the Thor/Odin USB protocol,
@@ -46,7 +48,9 @@ v2+ compressed-download path.
 
 ## 2. MediaTek — BROM / Download Agent
 
-**Status:** planned · Detection IDs already in the table (`0e8d:0003/2000/2001`).
+**Status:** probe phase landed (`src/protocol/mtk/`, `docs/PROTOCOL.md` §12):
+BROM sync + chip identification with a GUI section. Remaining: SLA/DAA auth,
+preloader + DA1/DA2 upload, partition ops over the DA (phases 2–4).
 
 **References:**
 - `bkerler/mtkclient` — the only complete open-source reference (active). Port BROM sync,
@@ -63,8 +67,10 @@ v2+ compressed-download path.
 
 ## 3. Unisoc — FDL1/FDL2 (Factory Download)
 
-**Status:** planned · Detection IDs to be confirmed from references during implementation
-(bootrom/BSL vs FDL1 vs FDL2 present different VID:PID pairs).
+**Status:** probe phase landed (`src/protocol/spd/`, `docs/PROTOCOL.md` §13):
+BSL bootrom handshake + version string (VID 1782 PID 4d00 confirmed from
+spd_dump). Remaining: FDL1 upload (bootrom stage), FDL2 upload, partition ops
+(phases 2–4), PAC parsing.
 
 **References:**
 - `ilyakurdyukov/spreadtrum_flash` (`spd_dump`) — original Linux FDL tool (archived but
@@ -80,7 +86,9 @@ partition ops → PAC parsing as a separate later feature (Huawei-style containe
 
 ## 4. LG — LAF (Download Mode)
 
-**Status:** planned, lowest priority (applies to LG devices only; community tooling is dated).
+**Status:** landed (`src/protocol/lg/`, `docs/PROTOCOL.md` §11): full LAF
+session — GPT browsing, partition backup, flash, TRIM erase, reboot/power-off.
+Hardware validation pending; EXEC deliberately not implemented.
 
 **References:**
 - `Lekensteyn/lglaf` (LGLAF.py, MIT) — the LAF protocol: 32-byte header (command, args,
