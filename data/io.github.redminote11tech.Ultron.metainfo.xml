@@ -33,6 +33,16 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.6.0" date="2026-09-15">
+      <description>
+        <p>Multi-vendor release: Samsung Odin completes (PIT flashing and
+        tar.md5 firmware bundles with md5 verification and sparse
+        expansion), LG download mode lands (GPT browsing, partition
+        backup, flash, TRIM erase, reboot controls), plus MediaTek BROM
+        and Unisoc bootrom chip-identification probes. Transport gained
+        control transfers; the protocol registry now covers four vendors.</p>
+      </description>
+    </release>
     <release version="0.5.2" date="2026-09-13">
       <description>
         <p>Samsung Odin protocol corrected against the official odin4
