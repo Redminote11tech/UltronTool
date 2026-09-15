@@ -40,6 +40,7 @@ pub const ModeTag = enum {
     mtk_brom,
     mtk_preloader,
     samsung_odin,
+    lg_laf,
     unknown,
 
     pub fn displayName(self: ModeTag) []const u8 {
@@ -49,6 +50,7 @@ pub const ModeTag = enum {
             .mtk_brom => "MediaTek BROM",
             .mtk_preloader => "MediaTek preloader",
             .samsung_odin => "Samsung download mode",
+            .lg_laf => "LG download mode (LAF)",
             .unknown => "Unknown USB device",
         };
     }
@@ -136,6 +138,8 @@ pub const SessionState = enum {
     firehose_ready,
     /// Samsung Odin: the PIT is loaded into the partition browser.
     samsung_ready,
+    /// LG LAF: the GPT is loaded into the partition browser.
+    lg_ready,
 };
 
 /// One image entry inside a Huawei UPDATE.APP container (parse result).

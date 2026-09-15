@@ -38,6 +38,9 @@ const usb_ids = @import("../protocol/qualcomm/usb_ids.zig");
 const samsung_odin = @import("../protocol/samsung/odin.zig");
 const samsung_pit = @import("../protocol/samsung/pit.zig");
 const samsung_usb_ids = @import("../protocol/samsung/usb_ids.zig");
+const lg_laf = @import("../protocol/lg/laf.zig");
+const lg_usb_ids = @import("../protocol/lg/usb_ids.zig");
+const gpt_mod = @import("../protocol/qualcomm/gpt.zig");
 const style = @import("style.zig");
 
 pub const app_id = "io.github.redminote11tech.Ultron";
@@ -197,6 +200,9 @@ pub const Ui = struct {
     samsung_thread: ?std.Thread = null,
     /// Samsung Odin section (download-mode devices).
     samsung_section: ?*gtk.Widget = null,
+    /// LG LAF section (download-mode devices).
+    lg_section: ?*gtk.Widget = null,
+    lg_thread: ?std.Thread = null,
     /// Image path staged for a Samsung partition flash (consumed by the
     /// confirm dialog on both paths, like the Huawei mapping list).
     samsung_flash_path: ?[]u8 = null,
@@ -292,6 +298,9 @@ const ConfirmCtx = struct {
     kind: ConfirmKind,
 };
 
+/// Row staged across a pending LG confirm dialog (single dialog at a time).
+var lg_stage_row: ev.PartitionRow = .{};
+
 const ConfirmKind = union(enum) {
     apply_writes: void,
     flash_xml: void,
@@ -302,6 +311,8 @@ const ConfirmKind = union(enum) {
     samsung_pit: void,
     samsung_bundle: void,
     samsung_factory: void,
+    lg_erase: ev.PartitionRow,
+    lg_write: ev.PartitionRow,
 };
 
 // ----------------------------------------------------------------------
@@ -373,6 +384,7 @@ pub fn mainRun(init: std.process.Init) !void {
     if (ui.ramdump_thread) |t| t.join();
     if (ui.probe_thread) |t| t.join();
     if (ui.samsung_thread) |t| t.join();
+    if (ui.lg_thread) |t| t.join();
     if (ui.manager) |m| m.shutdown();
     if (ui.scanner) |sc| sc.deinit();
     clearPendingWrites(ui);
@@ -723,6 +735,41 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     gtk.Box.append(page, samsung_box.as(gtk.Widget));
     ui.samsung_section = samsung_box.as(gtk.Widget);
 
+    // --- LG LAF section (download-mode devices) -------------------------
+    const lg_box = gtk.Box.new(.vertical, 12);
+
+    const lg_group = adw.PreferencesGroup.new();
+    adw.PreferencesGroup.setTitle(lg_group, "LG download mode (LAF)");
+    adw.PreferencesGroup.setDescription(lg_group, "LAF protocol: GPT browsing, partition backup, flash and TRIM erase");
+
+    const lg_gpt_row = adw.ActionRow.new();
+    rowTitle(lg_gpt_row, "Partition table (GPT)");
+    adw.ActionRow.setSubtitle(lg_gpt_row, "Reads the GPT of the eMMC into the partition browser");
+    const lg_gpt_btn = gtk.Button.newWithLabel("Load GPT");
+    gtk.Widget.addCssClass(lg_gpt_btn.as(gtk.Widget), "suggested-action");
+    _ = gtk.Button.signals.clicked.connect(lg_gpt_btn, *Ui, &onLgLoadGpt, ui, .{});
+    adw.ActionRow.addSuffix(lg_gpt_row, lg_gpt_btn.as(gtk.Widget));
+    adw.PreferencesGroup.add(lg_group, lg_gpt_row.as(gtk.Widget));
+
+    const lg_ctrl_row = adw.ActionRow.new();
+    rowTitle(lg_ctrl_row, "Device control");
+    const lg_ctrl_box = gtk.Box.new(.horizontal, 6);
+    gtk.Widget.setValign(lg_ctrl_box.as(gtk.Widget), .center);
+    const lg_poweroff_btn = gtk.Button.newWithLabel("Power off");
+    gtk.Widget.addCssClass(lg_poweroff_btn.as(gtk.Widget), "destructive-action");
+    _ = gtk.Button.signals.clicked.connect(lg_poweroff_btn, *Ui, &onLgPowerOff, ui, .{});
+    gtk.Box.append(lg_ctrl_box, lg_poweroff_btn.as(gtk.Widget));
+    const lg_reboot_btn = gtk.Button.newWithLabel("Reboot");
+    _ = gtk.Button.signals.clicked.connect(lg_reboot_btn, *Ui, &onLgReboot, ui, .{});
+    gtk.Box.append(lg_ctrl_box, lg_reboot_btn.as(gtk.Widget));
+    adw.ActionRow.addSuffix(lg_ctrl_row, lg_ctrl_box.as(gtk.Widget));
+    adw.PreferencesGroup.add(lg_group, lg_ctrl_row.as(gtk.Widget));
+
+    gtk.Box.append(lg_box, lg_group.as(gtk.Widget));
+    gtk.Widget.setVisible(lg_box.as(gtk.Widget), 0);
+    gtk.Box.append(page, lg_box.as(gtk.Widget));
+    ui.lg_section = lg_box.as(gtk.Widget);
+
     // --- Loader section (needs_loader) ----------------------------------
     const loader_box = gtk.Box.new(.vertical, 12);
 
@@ -1005,7 +1052,9 @@ fn refreshMainPage(ui: *Ui) void {
     gtk.Widget.setVisible(dev_card.as(gtk.Widget), @intFromBool(has_device));
 
     const is_samsung = has_device and ui.device.?.mode == .samsung_odin;
-    const ready = ui.session == .firehose_ready or ui.session == .samsung_ready;
+    const is_lg = has_device and ui.device.?.mode == .lg_laf;
+    const vendor = is_samsung or is_lg;
+    const ready = ui.session == .firehose_ready or ui.session == .samsung_ready or ui.session == .lg_ready;
 
     if (ui.loader_section) |w| gtk.Widget.setVisible(w, @intFromBool(has_device and ui.session == .needs_loader));
     if (ui.conn_section) |w| gtk.Widget.setVisible(w, @intFromBool(has_device and ready));
@@ -1014,11 +1063,12 @@ fn refreshMainPage(ui: *Ui) void {
         gtk.Widget.setVisible(w, @intFromBool(is_crash));
     }
     if (ui.samsung_section) |w| gtk.Widget.setVisible(w, @intFromBool(is_samsung));
+    if (ui.lg_section) |w| gtk.Widget.setVisible(w, @intFromBool(is_lg));
     refreshDeviceSelector(ui);
 
     // The chip probe and Connect only make sense before a session exists —
     // and are Qualcomm concepts entirely.
-    const pre_connect = ui.session == .disconnected and !is_samsung;
+    const pre_connect = ui.session == .disconnected and !vendor;
     if (ui.dev_chip_label) |l| gtk.Widget.setVisible(l.as(gtk.Widget), @intFromBool(pre_connect));
     if (ui.chip_row) |w| gtk.Widget.setVisible(w, @intFromBool(pre_connect));
     if (ui.storage_drop) |d| gtk.Widget.setVisible(d.as(gtk.Widget), @intFromBool(pre_connect));
@@ -1026,8 +1076,9 @@ fn refreshMainPage(ui: *Ui) void {
     if (ui.skip_init_row) |row| gtk.Widget.setVisible(row.as(gtk.Widget), @intFromBool(pre_connect));
     if (ui.connect_btn) |b| gtk.Widget.setVisible(b.as(gtk.Widget), @intFromBool(pre_connect));
 
-    // Qualcomm-only tools inside the connected section: hidden on Samsung.
-    if (is_samsung) {
+    // Qualcomm-only tools inside the connected section: hidden on Samsung
+    // and LG.
+    if (vendor) {
         if (ui.xml_row) |w| gtk.Widget.setVisible(w.as(gtk.Widget), 0);
         if (ui.ufs_row) |w| gtk.Widget.setVisible(w.as(gtk.Widget), 0);
         if (ui.huawei_row) |w| gtk.Widget.setVisible(w.as(gtk.Widget), 0);
@@ -1384,6 +1435,29 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
                 ui.toast("Another operation is running — wait for it to finish");
                 return;
             }
+            if (ui.device != null and ui.device.?.mode == .lg_laf) {
+                const ctx = ui.alloc.create(LgJobCtx) catch return;
+                ctx.* = .{ .ui = ui, .kind = .read, .row = rp.row };
+                ctx.path = ui.alloc.dupe(u8, path) catch {
+                    lgJobCtxFree(ctx);
+                    return;
+                };
+                lgStageTarget(ui, ctx) catch {
+                    lgJobCtxFree(ctx);
+                    return;
+                };
+                ui.startJob();
+                // The busy gate ran above; spawn directly here.
+                const thread = std.Thread.spawn(.{}, lgRun, .{ctx}) catch {
+                    ui.jobDone();
+                    lgJobCtxFree(ctx);
+                    ui.toast("Failed to start worker thread");
+                    return;
+                };
+                if (ui.lg_thread) |old| old.join();
+                ui.lg_thread = thread;
+                return;
+            }
             ui.startJob();
             ui.manager.?.enqueue(.{ .read_partition = .{
                 .path = path,
@@ -1394,6 +1468,24 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
             } });
         },
         .write_partition => |row| {
+            if (ui.device != null and ui.device.?.mode == .lg_laf) {
+                var size_buf: [32]u8 = undefined;
+                const size_txt = util.formatBytes(&size_buf, row.sectors() * 512);
+                var body_buf: [512]u8 = undefined;
+                const body = std.fmt.bufPrint(&body_buf, "Flash \"{s}\" to partition \"{s}\" (LBA {d}–{d}, {s})?\n\nOverwriting a partition is IRREVERSIBLE and can hard-brick the device if the image is wrong.", .{
+                    std.fs.path.basename(path),
+                    row.name.slice(),
+                    row.first_lba,
+                    row.last_lba,
+                    size_txt,
+                }) catch return;
+                const dup = ui.alloc.dupe(u8, path) catch return;
+                if (ui.samsung_flash_path) |old| ui.alloc.free(old);
+                ui.samsung_flash_path = dup; // shared staging slot (modes are exclusive)
+                lg_stage_row = row;
+                confirmDialog(ui, "Flash image to partition?", body, "Flash", .destructive, .{ .lg_write = row });
+                return;
+            }
             if (ui.device != null and ui.device.?.mode == .samsung_odin) {
                 // Samsung: flash this image straight to the clicked partition
                 // after confirmation (no queue — each op opens its own session).
@@ -1721,10 +1813,20 @@ fn onReadClicked(_: *gtk.Button, ctx: *RowCtx) callconv(.c) void {
         ui.toast("Another operation is running — wait for it to finish");
         return;
     }
-    if (ui.device != null and ui.device.?.mode == .samsung_odin) {
-        ui.toast("Partition read-back is not available in Samsung download mode");
-        return;
-    }
+    if (ui.device) |d| switch (d.mode) {
+        .samsung_odin => {
+            ui.toast("Partition read-back is not available in Samsung download mode");
+            return;
+        },
+        .lg_laf => {
+            // LG supports read-back: straight to the save chooser.
+            var name_buf: [96]u8 = undefined;
+            const suggested = std.fmt.bufPrintZ(&name_buf, "{s}.img", .{ctx.row.name.slice()}) catch "partition.img";
+            openChooser(ui, .{ .read_partition = .{ .row = ctx.row, .lun = 0 } }, "Save partition backup", true, suggested);
+            return;
+        },
+        else => {},
+    };
     var name_buf: [96]u8 = undefined;
     const suggested = std.fmt.bufPrintZ(&name_buf, "{s}.img", .{ctx.row.name.slice()}) catch "partition.img";
     openChooser(ui, .{ .read_partition = .{ .row = ctx.row, .lun = currentLun(ui) } }, "Save partition backup", true, suggested);
@@ -1742,9 +1844,13 @@ fn onEraseClicked(_: *gtk.Button, ctx: *RowCtx) callconv(.c) void {
     }
     var size_buf: [32]u8 = undefined;
     const size_txt = util.formatBytes(&size_buf, ctx.row.sectors() * sectorSizeOf(ui));
+    const is_lg = ui.device != null and ui.device.?.mode == .lg_laf;
     var body_buf: [512]u8 = undefined;
-    const body = std.fmt.bufPrint(&body_buf, "Erase \"{s}\" ({s}, LBA {d}–{d}) on LUN {d}?\n\nEverything in this partition is lost. This is IRREVERSIBLE.", .{ ctx.row.name.slice(), size_txt, ctx.row.first_lba, ctx.row.last_lba, currentLun(ui) }) catch return;
-    confirmDialog(ui, "Erase partition?", body, "Erase", .destructive, .{ .erase_partition = ctx.row });
+    const body = if (is_lg)
+        std.fmt.bufPrint(&body_buf, "Erase \"{s}\" ({s}, LBA {d}–{d})?\n\nEverything in this partition is lost (TRIM lands on reboot). This is IRREVERSIBLE.", .{ ctx.row.name.slice(), size_txt, ctx.row.first_lba, ctx.row.last_lba }) catch return
+    else
+        std.fmt.bufPrint(&body_buf, "Erase \"{s}\" ({s}, LBA {d}–{d}) on LUN {d}?\n\nEverything in this partition is lost. This is IRREVERSIBLE.", .{ ctx.row.name.slice(), size_txt, ctx.row.first_lba, ctx.row.last_lba, currentLun(ui) }) catch return;
+    confirmDialog(ui, "Erase partition?", body, "Erase", .destructive, if (is_lg) .{ .lg_erase = ctx.row } else .{ .erase_partition = ctx.row });
 }
 
 fn onClearWritesClicked(_: *gtk.Button, ui: *Ui) callconv(.c) void {
@@ -1963,6 +2069,44 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
                 return;
             };
             spawnSamsungJob(ui, job);
+        },
+        .lg_erase => |row| {
+            if (!applied) return;
+            if (ui.busy()) {
+                ui.toast("Another operation is running — wait for it to finish");
+                return;
+            }
+            const job = ui.alloc.create(LgJobCtx) catch return;
+            job.* = .{ .ui = ui, .kind = .erase, .row = row };
+            lgStageTarget(ui, job) catch {
+                lgJobCtxFree(job);
+                return;
+            };
+            spawnLgJob(ui, job);
+        },
+        .lg_write => |row| {
+            const staged = ui.samsung_flash_path;
+            ui.samsung_flash_path = null;
+            if (!applied) {
+                if (staged) |p| ui.alloc.free(p);
+                return;
+            }
+            const path = staged orelse return;
+            if (ui.busy()) {
+                ui.alloc.free(path);
+                ui.toast("Another operation is running — wait for it to finish");
+                return;
+            }
+            const job = ui.alloc.create(LgJobCtx) catch {
+                ui.alloc.free(path);
+                return;
+            };
+            job.* = .{ .ui = ui, .kind = .write, .path = path, .row = row };
+            lgStageTarget(ui, job) catch {
+                lgJobCtxFree(job);
+                return;
+            };
+            spawnLgJob(ui, job);
         },
         .samsung_pit, .samsung_bundle => {
             const job_kind: SamsungJobKind = if (kind == .samsung_pit) .flash_pit else .bundle;
@@ -2451,6 +2595,229 @@ fn onSamsungFactoryReset(_: *gtk.Button, ui: *Ui) callconv(.c) void {
 }
 
 // ----------------------------------------------------------------------
+// LG LAF (download mode, one-shot jobs)
+// ----------------------------------------------------------------------
+
+const LgJobKind = enum { gpt, read, write, erase, reboot, poweroff };
+
+const LgJobCtx = struct {
+    ui: *Ui,
+    kind: LgJobKind,
+    target: ?transport.Target = null,
+    target_serial_buf: ?[]u8 = null,
+    /// Local file path (read destination / write source) — owned.
+    path: ?[]u8 = null,
+    row: ev.PartitionRow = .{},
+};
+
+fn lgJobCtxFree(ctx: *LgJobCtx) void {
+    const alloc = ctx.ui.alloc;
+    if (ctx.target_serial_buf) |b| alloc.free(b);
+    if (ctx.path) |p| alloc.free(p);
+    alloc.destroy(ctx);
+}
+
+fn lgStageTarget(ui: *Ui, ctx: *LgJobCtx) !void {
+    if (activeTarget(ui)) |t| {
+        var copy = t;
+        if (t.serial) |ser| {
+            const dup = try ui.alloc.dupe(u8, ser);
+            ctx.target_serial_buf = dup;
+            copy.serial = dup;
+        }
+        ctx.target = copy;
+    }
+}
+
+fn spawnLgJob(ui: *Ui, ctx: *LgJobCtx) void {
+    ui.startJob();
+    const thread = std.Thread.spawn(.{}, lgRun, .{ctx}) catch {
+        ui.jobDone();
+        lgJobCtxFree(ctx);
+        ui.toast("Failed to start worker thread");
+        return;
+    };
+    if (ui.lg_thread) |old| old.join();
+    ui.lg_thread = thread;
+}
+
+/// Open a LAF session on the block device: hello → OPEN (empty path =
+/// /dev/block/mmcblk0 read-write). The caller closes the session.
+fn lgOpenDisk(ctx: *LgJobCtx, sess: *lg_laf.Session) transport.Error!u32 {
+    const ui = ctx.ui;
+    var usb_dev = try usb.open(&lg_usb_ids.policy, ctx.target, 8000, ui.logger, ui.alloc, &ui.cancel);
+    defer usb_dev.close();
+    var io = transport.Io.init(ui.alloc, usb_dev.transport());
+    errdefer io.deinit();
+    sess.* = .{ .alloc = ui.alloc, .io = &io, .logger = ui.logger, .cancel = &ui.cancel };
+    try sess.init();
+    try sess.hello();
+    return try sess.openDevice("");
+}
+
+fn lgRun(ctx: *LgJobCtx) void {
+    const ui = ctx.ui;
+    defer lgJobCtxFree(ctx);
+    lgRunInner(ctx) catch |e| {
+        var mbuf: [320]u8 = undefined;
+        const msg = switch (ctx.kind) {
+            .gpt => std.fmt.bufPrint(&mbuf, "GPT read failed: {s}", .{@errorName(e)}) catch "GPT read failed",
+            .read => std.fmt.bufPrint(&mbuf, "read of {s} failed: {s}", .{ ctx.row.name.slice(), @errorName(e) }) catch "read failed",
+            .write => std.fmt.bufPrint(&mbuf, "write to {s} failed: {s}", .{ ctx.row.name.slice(), @errorName(e) }) catch "write failed",
+            .erase => std.fmt.bufPrint(&mbuf, "erase of {s} failed: {s}", .{ ctx.row.name.slice(), @errorName(e) }) catch "erase failed",
+            .reboot, .poweroff => std.fmt.bufPrint(&mbuf, "control command failed: {s}", .{@errorName(e)}) catch "control failed",
+        };
+        var m = ev.FixedStr(512){};
+        m.set(msg);
+        ui.channel.push(.{ .finished = .{ .success = false, .message = m } });
+        return;
+    };
+    var m = ev.FixedStr(512){};
+    m.set(switch (ctx.kind) {
+        .gpt => "partitions loaded",
+        .read => "read finished",
+        .write => "write finished",
+        .erase => "erase finished",
+        .reboot => "device rebooted",
+        .poweroff => "device powered off",
+    });
+    ui.channel.push(.{ .finished = .{ .success = true, .message = m } });
+}
+
+fn lgRunInner(ctx: *LgJobCtx) !void {
+    const ui = ctx.ui;
+    var sess: lg_laf.Session = undefined;
+    var sess_open = false;
+    errdefer if (sess_open) sess.deinit();
+    const fd = blk: {
+        defer sess_open = true;
+        break :blk try lgOpenDisk(ctx, &sess);
+    };
+    defer sess.deinit();
+
+    switch (ctx.kind) {
+        .gpt => {
+            // 34 sectors at LBA 0: protective MBR + GPT header + entry array.
+            var buf: [34 * 512]u8 = undefined;
+            try sess.readAt(fd, 0, &buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+            const header = gpt_mod.parseHeader(&buf, 512) catch |e| {
+                ui.logger.err("LG: no valid GPT on the eMMC: {s}", .{@errorName(e)});
+                return e;
+            };
+            const list = try gpt_mod.parseEntries(ui.alloc, buf[2 * 512 ..], header, 512);
+            defer list.deinit(ui.alloc);
+
+            var event = ev.PartitionsEvent{ .lun = 0, .sector_size = 512, .luns = 1 };
+            for (list.items()) |p| {
+                if (event.count >= ev.max_partition_rows) break;
+                event.parts[event.count] = .{
+                    .index = p.index,
+                    .first_lba = p.first_lba,
+                    .last_lba = p.last_lba,
+                    .name = ev.FixedStr(72).fromSlice(p.nameSlice()),
+                };
+                event.count += 1;
+            }
+            ui.logger.info("✓ GPT loaded: {d} partitions", .{event.count});
+            ui.channel.push(.{ .partitions = event });
+            ui.channel.push(.{ .session_state = .lg_ready });
+            try sess.close(fd);
+        },
+        .read => {
+            var out = try fileio.File.create(ctx.path.?);
+            defer out.close();
+            const total: u64 = ctx.row.sectors() * 512;
+            var done: u64 = 0;
+            var buf: [lg_laf.chunk_max]u8 = undefined;
+            while (done < total) {
+                if (ui.cancel.load(.acquire)) return error.Cancelled;
+                const want: usize = @intCast(@min(total - done, lg_laf.chunk_max));
+                try sess.readAt(fd, ctx.row.first_lba + done / 512, buf[0..want], .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                if ((try out.writeAll(buf[0..want])) != want) return error.Io;
+                done += want;
+            }
+            try sess.close(fd);
+            ui.logger.info("✓ read {s} ({d} bytes) to {s}", .{ ctx.row.name.slice(), total, ctx.path.? });
+        },
+        .write => {
+            var img = try fileio.File.open(ctx.path.?);
+            defer img.close();
+            const img_size = try img.size();
+            const part_size: u64 = ctx.row.sectors() * 512;
+            if (img_size > part_size) {
+                ui.logger.err("LG: image ({d} bytes) is larger than {s} ({d} bytes)", .{ img_size, ctx.row.name.slice(), part_size });
+                return error.ImageTooLarge;
+            }
+            if (ctx.row.first_lba < 34) {
+                ui.logger.err("LG: refusing to write inside the GPT area", .{});
+                return error.Io;
+            }
+            var done: u64 = 0;
+            var buf: [lg_laf.chunk_max]u8 = undefined;
+            while (done < img_size) {
+                if (ui.cancel.load(.acquire)) return error.Cancelled;
+                const want: usize = @intCast(@min(img_size - done, lg_laf.chunk_max));
+                if ((try img.readAll(buf[0..want])) != want) return error.Io;
+                try sess.writeAt(fd, ctx.row.first_lba + done / 512, buf[0..want], .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                done += want;
+            }
+            try sess.close(fd);
+            ui.logger.info("✓ wrote {d} bytes to {s}", .{ img_size, ctx.row.name.slice() });
+        },
+        .erase => {
+            // TRIM: the reference notes old data reads back until reboot.
+            try sess.eraseSectors(fd, @intCast(ctx.row.first_lba), @intCast(ctx.row.sectors()));
+            try sess.close(fd);
+            ui.logger.info("✓ TRIM issued for {s} — the erase lands on reboot", .{ctx.row.name.slice()});
+        },
+        .reboot => {
+            try sess.ctrl("RSET");
+            ui.logger.info("✓ reboot requested", .{});
+        },
+        .poweroff => {
+            try sess.ctrl("POFF");
+            ui.logger.info("✓ power-off requested", .{});
+        },
+    }
+}
+
+fn onLgLoadGpt(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (ui.busy()) {
+        ui.toast("Another operation is running — wait for it to finish");
+        return;
+    }
+    const ctx = ui.alloc.create(LgJobCtx) catch return;
+    ctx.* = .{ .ui = ui, .kind = .gpt };
+    lgStageTarget(ui, ctx) catch {
+        lgJobCtxFree(ctx);
+        return;
+    };
+    spawnLgJob(ui, ctx);
+}
+
+fn onLgReboot(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    lgControlClicked(ui, .reboot);
+}
+
+fn onLgPowerOff(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    lgControlClicked(ui, .poweroff);
+}
+
+fn lgControlClicked(ui: *Ui, kind: LgJobKind) void {
+    if (ui.busy()) {
+        ui.toast("Another operation is running — wait for it to finish");
+        return;
+    }
+    const ctx = ui.alloc.create(LgJobCtx) catch return;
+    ctx.* = .{ .ui = ui, .kind = kind };
+    lgStageTarget(ui, ctx) catch {
+        lgJobCtxFree(ctx);
+        return;
+    };
+    spawnLgJob(ui, ctx);
+}
+
+// ----------------------------------------------------------------------
 // UFS provisioning
 // ----------------------------------------------------------------------
 
@@ -2858,8 +3225,8 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
             syncActiveDevice(ui);
             refreshDeviceSelector(ui);
             if (ui.device == null and ui.devices.items.len == 0) {
-                if (ui.session == .samsung_ready) {
-                    // Samsung sessions are one-shot; nothing to tear down.
+                if (ui.session == .samsung_ready or ui.session == .lg_ready) {
+                    // Samsung/LG sessions are one-shot; nothing to tear down.
                 } else if (ui.session != .disconnected and ui.manager != null and !ui.busy()) {
                     ui.manager.?.enqueue(.{ .disconnect = {} });
                 } else if (ui.session != .disconnected) {

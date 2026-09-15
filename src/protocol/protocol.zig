@@ -35,6 +35,7 @@ pub const Protocol = struct {
 pub const registry = [_]Protocol{
     @import("qualcomm/usb_ids.zig").protocol,
     @import("samsung/usb_ids.zig").protocol,
+    @import("lg/usb_ids.zig").protocol,
     // Future: @import("mtk/usb_ids.zig").protocol,
 };
 
