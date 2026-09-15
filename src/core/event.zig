@@ -41,6 +41,7 @@ pub const ModeTag = enum {
     mtk_preloader,
     samsung_odin,
     lg_laf,
+    spd_brom,
     unknown,
 
     pub fn displayName(self: ModeTag) []const u8 {
@@ -51,6 +52,7 @@ pub const ModeTag = enum {
             .mtk_preloader => "MediaTek preloader",
             .samsung_odin => "Samsung download mode",
             .lg_laf => "LG download mode (LAF)",
+            .spd_brom => "Unisoc download mode",
             .unknown => "Unknown USB device",
         };
     }

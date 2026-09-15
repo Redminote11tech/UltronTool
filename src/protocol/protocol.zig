@@ -37,6 +37,7 @@ pub const registry = [_]Protocol{
     @import("samsung/usb_ids.zig").protocol,
     @import("lg/usb_ids.zig").protocol,
     @import("mtk/usb_ids.zig").protocol,
+    @import("spd/usb_ids.zig").protocol,
 };
 
 /// Run the registry over a discovered device; first non-unknown wins.
