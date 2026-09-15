@@ -61,7 +61,8 @@ pub const Session = struct {
             self.logger.debug("MTK: SET_LINE_CODING failed ({s}) — continuing", .{@errorName(e)});
         };
         // SET_CONTROL_LINE_STATE: RTS on (DTR off), like mtkclient.
-        _ = self.io.transport.control(0x21, 0x22, 0x0002, 0, &{}) catch |e| {
+        var none: [0]u8 = .{};
+        _ = self.io.transport.control(0x21, 0x22, 0x0002, 0, &none) catch |e| {
             self.logger.debug("MTK: SET_CONTROL_LINE_STATE failed ({s}) — continuing", .{@errorName(e)});
         };
     }

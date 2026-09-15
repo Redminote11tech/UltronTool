@@ -40,6 +40,10 @@ const samsung_pit = @import("../protocol/samsung/pit.zig");
 const samsung_usb_ids = @import("../protocol/samsung/usb_ids.zig");
 const lg_laf = @import("../protocol/lg/laf.zig");
 const lg_usb_ids = @import("../protocol/lg/usb_ids.zig");
+const mtk_brom = @import("../protocol/mtk/brom.zig");
+const mtk_usb_ids = @import("../protocol/mtk/usb_ids.zig");
+const spd_bsl = @import("../protocol/spd/bsl.zig");
+const spd_usb_ids = @import("../protocol/spd/usb_ids.zig");
 const gpt_mod = @import("../protocol/qualcomm/gpt.zig");
 const style = @import("style.zig");
 
@@ -203,6 +207,10 @@ pub const Ui = struct {
     /// LG LAF section (download-mode devices).
     lg_section: ?*gtk.Widget = null,
     lg_thread: ?std.Thread = null,
+    mtk_section: ?*gtk.Widget = null,
+    mtk_thread: ?std.Thread = null,
+    spd_section: ?*gtk.Widget = null,
+    spd_thread: ?std.Thread = null,
     /// Image path staged for a Samsung partition flash (consumed by the
     /// confirm dialog on both paths, like the Huawei mapping list).
     samsung_flash_path: ?[]u8 = null,
@@ -385,6 +393,8 @@ pub fn mainRun(init: std.process.Init) !void {
     if (ui.probe_thread) |t| t.join();
     if (ui.samsung_thread) |t| t.join();
     if (ui.lg_thread) |t| t.join();
+    if (ui.mtk_thread) |t| t.join();
+    if (ui.spd_thread) |t| t.join();
     if (ui.manager) |m| m.shutdown();
     if (ui.scanner) |sc| sc.deinit();
     clearPendingWrites(ui);
@@ -770,6 +780,46 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     gtk.Box.append(page, lg_box.as(gtk.Widget));
     ui.lg_section = lg_box.as(gtk.Widget);
 
+    // --- MediaTek BROM section ------------------------------------------
+    const mtk_box = gtk.Box.new(.vertical, 12);
+    const mtk_group = adw.PreferencesGroup.new();
+    adw.PreferencesGroup.setTitle(mtk_group, "MediaTek BROM");
+    adw.PreferencesGroup.setDescription(mtk_group, "Boot ROM sync and chip identification (DA upload comes in a later phase)");
+
+    const mtk_probe_row = adw.ActionRow.new();
+    rowTitle(mtk_probe_row, "Chip identification");
+    adw.ActionRow.setSubtitle(mtk_probe_row, "Sync + hardware code and software version over the BROM");
+    const mtk_probe_btn = gtk.Button.newWithLabel("Read chip info");
+    gtk.Widget.addCssClass(mtk_probe_btn.as(gtk.Widget), "suggested-action");
+    _ = gtk.Button.signals.clicked.connect(mtk_probe_btn, *Ui, &onMtkProbe, ui, .{});
+    adw.ActionRow.addSuffix(mtk_probe_row, mtk_probe_btn.as(gtk.Widget));
+    adw.PreferencesGroup.add(mtk_group, mtk_probe_row.as(gtk.Widget));
+
+    gtk.Box.append(mtk_box, mtk_group.as(gtk.Widget));
+    gtk.Widget.setVisible(mtk_box.as(gtk.Widget), 0);
+    gtk.Box.append(page, mtk_box.as(gtk.Widget));
+    ui.mtk_section = mtk_box.as(gtk.Widget);
+
+    // --- Unisoc bootrom section -----------------------------------------
+    const spd_box = gtk.Box.new(.vertical, 12);
+    const spd_group = adw.PreferencesGroup.new();
+    adw.PreferencesGroup.setTitle(spd_group, "Unisoc download mode");
+    adw.PreferencesGroup.setDescription(spd_group, "BSL bootrom handshake and version identification (FDL upload comes in a later phase)");
+
+    const spd_probe_row = adw.ActionRow.new();
+    rowTitle(spd_probe_row, "Bootrom identification");
+    adw.ActionRow.setSubtitle(spd_probe_row, "Baud check + version string over the BSL protocol");
+    const spd_probe_btn = gtk.Button.newWithLabel("Read bootrom version");
+    gtk.Widget.addCssClass(spd_probe_btn.as(gtk.Widget), "suggested-action");
+    _ = gtk.Button.signals.clicked.connect(spd_probe_btn, *Ui, &onSpdProbe, ui, .{});
+    adw.ActionRow.addSuffix(spd_probe_row, spd_probe_btn.as(gtk.Widget));
+    adw.PreferencesGroup.add(spd_group, spd_probe_row.as(gtk.Widget));
+
+    gtk.Box.append(spd_box, spd_group.as(gtk.Widget));
+    gtk.Widget.setVisible(spd_box.as(gtk.Widget), 0);
+    gtk.Box.append(page, spd_box.as(gtk.Widget));
+    ui.spd_section = spd_box.as(gtk.Widget);
+
     // --- Loader section (needs_loader) ----------------------------------
     const loader_box = gtk.Box.new(.vertical, 12);
 
@@ -1053,7 +1103,9 @@ fn refreshMainPage(ui: *Ui) void {
 
     const is_samsung = has_device and ui.device.?.mode == .samsung_odin;
     const is_lg = has_device and ui.device.?.mode == .lg_laf;
-    const vendor = is_samsung or is_lg;
+    const is_mtk = has_device and ui.device.?.mode == .mtk_brom;
+    const is_spd = has_device and ui.device.?.mode == .spd_brom;
+    const vendor = is_samsung or is_lg or is_mtk or is_spd;
     const ready = ui.session == .firehose_ready or ui.session == .samsung_ready or ui.session == .lg_ready;
 
     if (ui.loader_section) |w| gtk.Widget.setVisible(w, @intFromBool(has_device and ui.session == .needs_loader));
@@ -1064,6 +1116,8 @@ fn refreshMainPage(ui: *Ui) void {
     }
     if (ui.samsung_section) |w| gtk.Widget.setVisible(w, @intFromBool(is_samsung));
     if (ui.lg_section) |w| gtk.Widget.setVisible(w, @intFromBool(is_lg));
+    if (ui.mtk_section) |w| gtk.Widget.setVisible(w, @intFromBool(is_mtk));
+    if (ui.spd_section) |w| gtk.Widget.setVisible(w, @intFromBool(is_spd));
     refreshDeviceSelector(ui);
 
     // The chip probe and Connect only make sense before a session exists —
@@ -2815,6 +2869,155 @@ fn lgControlClicked(ui: *Ui, kind: LgJobKind) void {
         return;
     };
     spawnLgJob(ui, ctx);
+}
+
+// ----------------------------------------------------------------------
+// MediaTek / Unisoc probe jobs
+// ----------------------------------------------------------------------
+
+const MtkProbeCtx = struct {
+    ui: *Ui,
+    target: ?transport.Target = null,
+    target_serial_buf: ?[]u8 = null,
+
+    fn free(self: *MtkProbeCtx) void {
+        const alloc = self.ui.alloc;
+        if (self.target_serial_buf) |b| alloc.free(b);
+        alloc.destroy(self);
+    }
+};
+
+fn mtkProbeRun(ctx: *MtkProbeCtx) void {
+    const ui = ctx.ui;
+    defer ctx.free();
+    mtkProbeInner(ctx) catch |e| {
+        var m = ev.FixedStr(512){};
+        m.set(std.fmt.bufPrint(&m2_buf, "MTK probe failed: {s}", .{@errorName(e)}) catch "MTK probe failed");
+        ui.channel.push(.{ .finished = .{ .success = false, .message = m } });
+        return;
+    };
+    var m = ev.FixedStr(512){};
+    m.set("chip info read");
+    ui.channel.push(.{ .finished = .{ .success = true, .message = m } });
+}
+
+var m2_buf: [128]u8 = undefined;
+
+fn mtkProbeInner(ctx: *MtkProbeCtx) !void {
+    const ui = ctx.ui;
+    var usb_dev = try usb.open(&mtk_usb_ids.policy, ctx.target, 8000, ui.logger, ui.alloc, &ui.cancel);
+    defer usb_dev.close();
+    var io = transport.Io.init(ui.alloc, usb_dev.transport());
+    defer io.deinit();
+    var sess = mtk_brom.Session{ .alloc = ui.alloc, .io = &io, .logger = ui.logger, .cancel = &ui.cancel };
+    try sess.configurePort();
+    var info = try sess.getHwCode();
+    try sess.getHwSwVer(&info);
+    ui.logger.info("✓ MTK chip: HW code 0x{X:0>4} (sub 0x{X:0>4}), SW version {d}.{d}.{d}.{d}", .{
+        info.hw_code, info.hw_sub_code, info.sw_ver[0], info.sw_ver[1], info.sw_ver[2], info.sw_ver[3],
+    });
+}
+
+fn onMtkProbe(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (ui.busy()) {
+        ui.toast("Another operation is running — wait for it to finish");
+        return;
+    }
+    const ctx = ui.alloc.create(MtkProbeCtx) catch return;
+    ctx.* = .{ .ui = ui };
+    if (activeTarget(ui)) |t| {
+        var copy = t;
+        if (t.serial) |ser| {
+            const dup = ui.alloc.dupe(u8, ser) catch {
+                ui.alloc.destroy(ctx);
+                return;
+            };
+            ctx.target_serial_buf = dup;
+            copy.serial = dup;
+        }
+        ctx.target = copy;
+    }
+    ui.startJob();
+    const thread = std.Thread.spawn(.{}, mtkProbeRun, .{ctx}) catch {
+        ui.jobDone();
+        ctx.free();
+        ui.toast("Failed to start worker thread");
+        return;
+    };
+    if (ui.mtk_thread) |old| old.join();
+    ui.mtk_thread = thread;
+}
+
+const SpdProbeCtx = struct {
+    ui: *Ui,
+    target: ?transport.Target = null,
+    target_serial_buf: ?[]u8 = null,
+
+    fn free(self: *SpdProbeCtx) void {
+        const alloc = self.ui.alloc;
+        if (self.target_serial_buf) |b| alloc.free(b);
+        alloc.destroy(self);
+    }
+};
+
+fn spdProbeRun(ctx: *SpdProbeCtx) void {
+    const ui = ctx.ui;
+    defer ctx.free();
+    spdProbeInner(ctx) catch |e| {
+        var m = ev.FixedStr(512){};
+        m.set(std.fmt.bufPrint(&m3_buf, "Unisoc probe failed: {s}", .{@errorName(e)}) catch "Unisoc probe failed");
+        ui.channel.push(.{ .finished = .{ .success = false, .message = m } });
+        return;
+    };
+    var m = ev.FixedStr(512){};
+    m.set("bootrom version read");
+    ui.channel.push(.{ .finished = .{ .success = true, .message = m } });
+}
+
+var m3_buf: [160]u8 = undefined;
+
+fn spdProbeInner(ctx: *SpdProbeCtx) !void {
+    const ui = ctx.ui;
+    var usb_dev = try usb.open(&spd_usb_ids.policy, ctx.target, 8000, ui.logger, ui.alloc, &ui.cancel);
+    defer usb_dev.close();
+    var io = transport.Io.init(ui.alloc, usb_dev.transport());
+    defer io.deinit();
+    var sess = spd_bsl.Session{ .alloc = ui.alloc, .io = &io, .logger = ui.logger, .cancel = &ui.cancel };
+    defer sess.deinit();
+    try sess.configurePort();
+    var ver_buf: [64]u8 = undefined;
+    const n = try sess.probe(&ver_buf);
+    ui.logger.info("✓ Unisoc bootrom: {s}", .{ver_buf[0..n]});
+}
+
+fn onSpdProbe(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (ui.busy()) {
+        ui.toast("Another operation is running — wait for it to finish");
+        return;
+    }
+    const ctx = ui.alloc.create(SpdProbeCtx) catch return;
+    ctx.* = .{ .ui = ui };
+    if (activeTarget(ui)) |t| {
+        var copy = t;
+        if (t.serial) |ser| {
+            const dup = ui.alloc.dupe(u8, ser) catch {
+                ui.alloc.destroy(ctx);
+                return;
+            };
+            ctx.target_serial_buf = dup;
+            copy.serial = dup;
+        }
+        ctx.target = copy;
+    }
+    ui.startJob();
+    const thread = std.Thread.spawn(.{}, spdProbeRun, .{ctx}) catch {
+        ui.jobDone();
+        ctx.free();
+        ui.toast("Failed to start worker thread");
+        return;
+    };
+    if (ui.spd_thread) |old| old.join();
+    ui.spd_thread = thread;
 }
 
 // ----------------------------------------------------------------------

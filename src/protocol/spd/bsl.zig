@@ -112,7 +112,8 @@ pub const Session = struct {
     /// CDC SET_CONTROL_LINE_STATE wValue 0x601 — required by smartphone
     /// bootroms (spd_dump.c's control transfer).
     pub fn configurePort(self: *Session) Error!void {
-        _ = self.io.transport.control(0x21, 34, 0x601, 0, &{}) catch |e| {
+        var none: [0]u8 = .{};
+        _ = self.io.transport.control(0x21, 34, 0x601, 0, &none) catch |e| {
             self.logger.debug("SPD: SET_CONTROL_LINE_STATE failed ({s}) — continuing", .{@errorName(e)});
         };
     }
