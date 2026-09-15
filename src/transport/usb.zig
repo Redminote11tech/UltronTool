@@ -90,6 +90,7 @@ pub const Usb = struct {
         .close = closeVt,
         .destroy = destroyVt,
         .set_write_zlp = setWriteZlpVt,
+        .control = controlVt,
     };
 
     fn readVt(ptr: *anyopaque, buf: []u8, timeout_ms: u32) Error!usize {
@@ -115,6 +116,18 @@ pub const Usb = struct {
     fn setWriteZlpVt(ptr: *anyopaque, enabled: bool) void {
         const self: *Usb = @ptrCast(@alignCast(ptr));
         self.write_zlp = enabled;
+    }
+
+    fn controlVt(ptr: *anyopaque, request_type: u8, request: u8, value: u16, index: u16, data: []u8) Error!usize {
+        const self: *Usb = @ptrCast(@alignCast(ptr));
+        var actual: c_int = 0;
+        const ret = c.libusb_control_transfer(self.handle, request_type, request, value, index, if (data.len > 0) @ptrCast(data.ptr) else null, @intCast(data.len), 1000);
+        if (ret < 0) {
+            self.logger.err("USB: control transfer failed: {s}", .{errName(ret)});
+            return if (ret == c.LIBUSB_ERROR_NO_DEVICE) Error.Gone else Error.Io;
+        }
+        actual = ret;
+        return @intCast(actual);
     }
 
     fn resetVt(ptr: *anyopaque) void {

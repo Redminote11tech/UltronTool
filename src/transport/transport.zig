@@ -64,6 +64,9 @@ pub const Transport = struct {
         /// ZlpAwareHost semantics); protocols whose devices do not expect
         /// trailing ZLPs (Samsung Loke) turn it off after open.
         set_write_zlp: ?*const fn (ptr: *anyopaque, enabled: bool) void = null,
+        /// Class/vendor control transfer (bmRequestType, bRequest, wValue,
+        /// wIndex, data). Null for backends without control support.
+        control: ?*const fn (ptr: *anyopaque, request_type: u8, request: u8, value: u16, index: u16, data: []u8) Error!usize = null,
     };
 
     pub fn read(self: Transport, buf: []u8, timeout_ms: u32) Error!usize {
@@ -92,6 +95,12 @@ pub const Transport = struct {
     /// Enable/disable the automatic write ZLP; no-op when unsupported.
     pub fn setWriteZlp(self: Transport, enabled: bool) void {
         if (self.vtable.set_write_zlp) |f| f(self.ptr, enabled);
+    }
+
+    /// Send a control transfer; errors when the backend lacks support.
+    pub fn control(self: Transport, request_type: u8, request: u8, value: u16, index: u16, data: []u8) Error!usize {
+        const f = self.vtable.control orelse return Error.Io;
+        return f(self.ptr, request_type, request, value, index, data);
     }
 };
 
