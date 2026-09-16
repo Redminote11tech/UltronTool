@@ -226,8 +226,8 @@ Cross-vendor plans live in `docs/ROADMAP.md`.
 | Streaming (nandprg/enandprg), Diag | ❌ n/a | NAND-target legacy paths |
 | Samsung Odin (Thor protocol) | ⚠️ implemented, hardware untested | PIT dump → partition browser, image→partition flash, PIT flash, partition zero-fill erase, reboot / reboot-to-download, factory reset, tar.md5 bundle flashing (md5-verified, sparse-aware); protocol v0/1 and v2+ (1 MiB parts); compressed download (v2+ flag) not implemented |
 | LG LAF (download mode) | ⚠️ implemented, hardware untested | GPT read → partition browser, partition backup (read-back works), image→partition flash, ERSE/TRIM erase (lands on reboot), reboot/power-off; chunked at the reference's 15.5 KiB; shell EXEC deliberately not implemented |
-| MediaTek BROM | ⚠️ probe only | inverted-echo sync, GET_HW_CODE + GET_HW_SW_VER, CDC VCOM setup (921600 8N1 + RTS); DA upload/flashing = next phase |
-| Unisoc BSL bootrom | ⚠️ probe only | HDLC framing (CRC-16/XMODEM bootrom stage), CHECK_BAUD version string, CONNECT; FDL1/FDL2 upload/flashing = next phase |
+| MediaTek BROM | ⚠️ sync/DA upload | inverted-echo sync, GET_HW_CODE + GET_HW_SW_VER, CDC VCOM setup, SEND_DA (XOR checksum, ZLP pacing) + JUMP_DA; legacy-DA flash ops = next phase |
+| Unisoc BSL | ⚠️ implemented, hardware untested | bootrom handshake + version, FDL1/FDL2 upload (528-byte chunks, stage checksum switch), flash read/write/erase by address, HDLC framing; virtual-partition (name) ops = next phase |
 
 ## 7. Detection table (Ultron device scanner)
 
@@ -368,7 +368,12 @@ RTS (control-transfer hook; degrades to a debug note when unsupported).
 Sync: bytes A0 0A 50 05 sent one at a time, each echoed bit-inverted
 (5F F5 AF FA); 30 attempts with stale-byte drain. Commands are echoed then
 answered big-endian: GET_HW_CODE (0xFD) → hwcode u16 + hw_sub_code u16,
-GET_HW_SW_VER (0xFC) → four u16. DA upload/flashing is the next phase.
+GET_HW_SW_VER (0xFC) → four u16. SEND_DA (0xD7): BE address/size/sig_len
+echo-verified, u16 status (0x1D0D = SLA locked — refused), XOR-of-LE-words
+checksum, EP-paced streaming with ZLPs every 0x2000 + the final one, then
+BE u16 checksum+status. JUMP_DA (0xD5): BE address echoed back + u16 status.
+Legacy-DA flash operations (partition table, read/write/erase over the DA
+protocol) are the next phase.
 
 ## 13. Unisoc BSL bootrom — `protocol/spd/`
 
@@ -379,4 +384,11 @@ USB: VID 1782 PID 4d00 (bootrom). CDC SET_CONTROL_LINE_STATE with wValue
 BE, payload, checksum u16 BE — bootrom uses CRC-16/XMODEM (poly 0x1021), FDL2
 uses a folded byte sum — HDLC-encoded with 0x7E delimiters and 0x7D stuffing.
 Probe: CHECK_BAUD (bare 0x7E bytes) → BSL_REP_VER version string, CONNECT →
-ACK. FDL1/FDL2 upload and flash operations are the next phase.
+ACK. FDL upload: START_DATA (BE addr + size) → 528-byte MIDST chunks →
+END_DATA → EXEC_DATA (15 s boot delay; the INCOMPATIBLE_PARTITION answer is
+tolerated). Checksum stage: the bootrom speaks CRC-16/XMODEM, FDL2 speaks a
+folded byte sum with byte-swap on even lengths. Flash ops (FDL2): READ_FLASH
+(BE addr/size/offset, 1024-byte chunks, BSL_REP_READ_FLASH payloads),
+START/MIDST/END writes, ERASE_FLASH (BE addr + size). FDL2 also exposes
+virtual partitions by UTF-16LE name (36 u16 + size) — name-addressed ops are
+the next phase.

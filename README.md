@@ -70,10 +70,12 @@ a small, dependency-free Zig library you can audit in an afternoon.
 - **LG download mode (LAF)** — for `1004:633e`: GPT browsing, partition
   backup (read-back works), image → partition flash, TRIM erase, reboot /
   power-off (ported from lglaf).
-- **MediaTek BROM** (`0e8d:0003`) — BROM sync + chip identification (hardware
-  code, software version); DA upload and flashing in a later phase.
-- **Unisoc bootrom** (`1782:4d00`) — BSL handshake + bootrom version string;
-  FDL upload and flashing in a later phase.
+- **MediaTek BROM** (`0e8d:0003`) — BROM sync + chip identification, and DA
+  upload (SEND_DA/JUMP_DA with checksum verification) for user-supplied DA
+  binaries; legacy-DA flash operations in a later phase.
+- **Unisoc flashing** (`1782:4d00`) — BSL bootrom handshake, FDL1/FDL2 upload
+  and address-based flash read/write/erase (ported from spreadtrum_flash);
+  partition-name ops in a later phase.
 - **Persistent session** — the Firehose connection stays open across
   operations; explicit Reset device / Disconnect; cancel aborts and
   disconnects safely

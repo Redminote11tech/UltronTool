@@ -48,9 +48,10 @@ download, repartition UX polish.
 
 ## 2. MediaTek — BROM / Download Agent
 
-**Status:** probe phase landed (`src/protocol/mtk/`, `docs/PROTOCOL.md` §12):
-BROM sync + chip identification with a GUI section. Remaining: SLA/DAA auth,
-preloader + DA1/DA2 upload, partition ops over the DA (phases 2–4).
+**Status:** sync + identification + DA upload landed (`src/protocol/mtk/`,
+`docs/PROTOCOL.md` §12): BROM sync, chip identification, SEND_DA/JUMP_DA for
+user-supplied DA binaries. Remaining: SLA/DAA auth, legacy-DA partition ops
+(read/write/erase over the running DA).
 
 **References:**
 - `bkerler/mtkclient` — the only complete open-source reference (active). Port BROM sync,
@@ -67,10 +68,10 @@ preloader + DA1/DA2 upload, partition ops over the DA (phases 2–4).
 
 ## 3. Unisoc — FDL1/FDL2 (Factory Download)
 
-**Status:** probe phase landed (`src/protocol/spd/`, `docs/PROTOCOL.md` §13):
-BSL bootrom handshake + version string (VID 1782 PID 4d00 confirmed from
-spd_dump). Remaining: FDL1 upload (bootrom stage), FDL2 upload, partition ops
-(phases 2–4), PAC parsing.
+**Status:** FDL upload + flash ops landed (`src/protocol/spd/`,
+`docs/PROTOCOL.md` §13): bootrom handshake, FDL1/FDL2 upload with the
+checksum stage switch, address-based flash read/write/erase. Remaining:
+virtual-partition (name) ops, PAC parsing.
 
 **References:**
 - `ilyakurdyukov/spreadtrum_flash` (`spd_dump`) — original Linux FDL tool (archived but
