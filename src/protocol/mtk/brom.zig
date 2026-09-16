@@ -23,6 +23,12 @@ pub const sync_cmd = [4]u8{ 0xA0, 0x0A, 0x50, 0x05 };
 pub const cmd_get_hw_code: u8 = 0xFD;
 pub const cmd_get_hw_sw_ver: u8 = 0xFC;
 pub const cmd_get_bl_ver: u8 = 0xFE;
+pub const cmd_send_da: u8 = 0xD7;
+pub const cmd_jump_da: u8 = 0xD5;
+/// mtkclient's upload pace: a ZLP every 0x2000 bytes, then a final one.
+pub const upload_zlp_interval: usize = 0x2000;
+/// DA_CHUNK (mtkclient uploads in EP-size pieces; we use a fixed 512 B).
+pub const upload_chunk: usize = 512;
 /// mtkclient Port.run_handshake's retry budget per connection.
 pub const sync_attempts: u32 = 30;
 pub const cmd_timeout_ms: u32 = 1000;
@@ -148,6 +154,116 @@ pub const Session = struct {
             info.sw_ver[i] = std.mem.readInt(u16, buf[i * 2 ..][0..2], .big);
         }
     }
+
+    /// Stream raw bytes in upload_chunk pieces with a ZLP every 0x2000
+    /// (Port.upload_data's pacing).
+    fn uploadStream(self: *Session, data: []const u8, progress: ProgressHook) Error!void {
+        var off: usize = 0;
+        while (off < data.len) {
+            if (self.cancelled()) return Error.Cancelled;
+            const n = @min(data.len - off, upload_chunk);
+            _ = try self.io.write(data[off .. off + n], cmd_timeout_ms);
+            off += n;
+            if (off % upload_zlp_interval == 0) {
+                _ = self.io.write(&.{}, cmd_timeout_ms) catch 0;
+            }
+            progress.report("uploading", off, data.len);
+        }
+        if (data.len % upload_zlp_interval != 0) {
+            _ = self.io.write(&.{}, cmd_timeout_ms) catch 0;
+        }
+    }
+
+    /// SEND_DA (0xD7): echo cmd/address/size/sig_len as big-endian words,
+    /// read the u16 status, then stream the DA with the LE-word XOR
+    /// checksum the bootrom verifies. SLA-locked devices answer 0x1D0D —
+    /// refused with a clear error (auth is out of scope).
+    pub fn sendDa(self: *Session, address: u32, data: []const u8, sig_len: u32, progress: ProgressHook) Error!void {
+        var be: [4]u8 = undefined;
+
+        try self.sendCmd(cmd_send_da);
+        std.mem.writeInt(u32, &be, address, .big);
+        _ = try self.io.write(&be, cmd_timeout_ms);
+        var echo: [4]u8 = undefined;
+        try self.readExact(&echo);
+        if (!std.mem.eql(u8, &echo, &be)) {
+            self.logger.err("MTK: SEND_DA address echo mismatch", .{});
+            return Error.Io;
+        }
+
+        std.mem.writeInt(u32, &be, @intCast(data.len), .big);
+        _ = try self.io.write(&be, cmd_timeout_ms);
+        try self.readExact(&echo);
+        if (!std.mem.eql(u8, &echo, &be)) {
+            self.logger.err("MTK: SEND_DA size echo mismatch", .{});
+            return Error.Io;
+        }
+
+        std.mem.writeInt(u32, &be, sig_len, .big);
+        _ = try self.io.write(&be, cmd_timeout_ms);
+        try self.readExact(&echo);
+        if (!std.mem.eql(u8, &echo, &be)) {
+            self.logger.err("MTK: SEND_DA sig_len echo mismatch", .{});
+            return Error.Io;
+        }
+
+        var st: [2]u8 = undefined;
+        try self.readExact(&st);
+        const status = std.mem.readInt(u16, &st, .big);
+        if (status == 0x1d0d) {
+            self.logger.err("MTK: the bootrom demands SLA authentication — upload refused", .{});
+            return Error.Io;
+        }
+        if (status > 0xff) {
+            self.logger.err("MTK: SEND_DA status 0x{X:0>4}", .{status});
+            return Error.Io;
+        }
+
+        // LE-word XOR checksum over the padded data (prepare_data).
+        var chk: u16 = 0;
+        var i: usize = 0;
+        while (i + 2 <= data.len) : (i += 2) {
+            chk ^= std.mem.readInt(u16, data[i..][0..2], .little);
+        }
+        if (i < data.len) chk ^= data[i];
+
+        try self.uploadStream(data, progress);
+        var resp: [4]u8 = undefined;
+        try self.readExact(&resp);
+        const rx_chk = std.mem.readInt(u16, resp[0..2], .big);
+        const rx_status = std.mem.readInt(u16, resp[2..4], .big);
+        if (rx_chk != chk and rx_chk != 0) {
+            self.logger.warn("MTK: DA upload checksum mismatch (got 0x{X:0>4}, expected 0x{X:0>4})", .{ rx_chk, chk });
+        }
+        if (rx_status > 0xff) {
+            self.logger.err("MTK: DA upload status 0x{X:0>4}", .{rx_status});
+            return Error.Io;
+        }
+        self.logger.info("✓ DA uploaded ({d} bytes, checksum 0x{X:0>4})", .{ data.len, rx_chk });
+    }
+
+    /// JUMP_DA (0xD5): echo cmd, BE address, the bootrom echoes the address
+    /// back and answers with a u16 status (0 = running).
+    pub fn jumpDa(self: *Session, address: u32) Error!void {
+        try self.sendCmd(cmd_jump_da);
+        var be: [4]u8 = undefined;
+        std.mem.writeInt(u32, &be, address, .big);
+        _ = try self.io.write(&be, cmd_timeout_ms);
+        var resp: [4]u8 = undefined;
+        try self.readExact(&resp);
+        if (!std.mem.eql(u8, &resp, &be)) {
+            self.logger.err("MTK: JUMP_DA address echo mismatch", .{});
+            return Error.Io;
+        }
+        var st: [2]u8 = undefined;
+        try self.readExact(&st);
+        const status = std.mem.readInt(u16, &st, .big);
+        if (status != 0) {
+            self.logger.err("MTK: JUMP_DA status 0x{X:0>4}", .{status});
+            return Error.Io;
+        }
+        self.logger.info("✓ DA jumped to 0x{X:0>8} — the device has left BROM mode", .{address});
+    }
 };
 
 // ----------------------------------------------------------------------
@@ -157,6 +273,90 @@ pub const Session = struct {
 const testing = std.testing;
 const Harness = @import("../../transport/sim.zig").Harness;
 const Step = @import("../../transport/sim.zig").Step;
+
+test "sendDa streams the DA and jumpDa closes the handshake" {
+    var steps = std.ArrayList(Step).empty;
+    defer steps.deinit(testing.allocator);
+
+    const l = try testing.allocator.create(log.Logger);
+    defer testing.allocator.destroy(l);
+    l.* = .{ .mirror_stderr = false };
+    const cancel = std.atomic.Value(bool).init(false);
+
+    const da = "MTK_DA_IMAGE"; // 12 bytes, even
+
+    // sync
+    const w0 = [_]u8{sync_cmd[0]};
+    const r0 = [_]u8{~sync_cmd[0]};
+    const w1 = [_]u8{sync_cmd[1]};
+    const r1 = [_]u8{~sync_cmd[1]};
+    const w2 = [_]u8{sync_cmd[2]};
+    const r2 = [_]u8{~sync_cmd[2]};
+    const w3 = [_]u8{sync_cmd[3]};
+    const r3 = [_]u8{~sync_cmd[3]};
+    try steps.append(testing.allocator, .{ .expect_write = &w0 });
+    try steps.append(testing.allocator, .{ .respond = &r0 });
+    try steps.append(testing.allocator, .{ .expect_write = &w1 });
+    try steps.append(testing.allocator, .{ .respond = &r1 });
+    try steps.append(testing.allocator, .{ .expect_write = &w2 });
+    try steps.append(testing.allocator, .{ .respond = &r2 });
+    try steps.append(testing.allocator, .{ .expect_write = &w3 });
+    try steps.append(testing.allocator, .{ .respond = &r3 });
+
+    // SEND_DA header: cmd echo, addr echo, size echo, sig_len echo, status
+    const wd7 = [_]u8{cmd_send_da};
+    const rd7 = [_]u8{cmd_send_da};
+    try steps.append(testing.allocator, .{ .expect_write = &wd7 });
+    try steps.append(testing.allocator, .{ .respond = &rd7 });
+    var addr_be: [4]u8 = undefined;
+    std.mem.writeInt(u32, &addr_be, 0x00200000, .big);
+    try steps.append(testing.allocator, .{ .expect_write = &addr_be });
+    try steps.append(testing.allocator, .{ .respond = &addr_be });
+    var size_be: [4]u8 = undefined;
+    std.mem.writeInt(u32, &size_be, @intCast(da.len), .big);
+    try steps.append(testing.allocator, .{ .expect_write = &size_be });
+    try steps.append(testing.allocator, .{ .respond = &size_be });
+    const sig0 = [_]u8{ 0, 0, 0, 0 };
+    try steps.append(testing.allocator, .{ .expect_write = &sig0 });
+    try steps.append(testing.allocator, .{ .respond = &sig0 });
+    const ok_status = [_]u8{ 0, 0 };
+    try steps.append(testing.allocator, .{ .respond = &ok_status });
+
+    // Data upload: one 512-B chunk window with our 12 bytes + ZLP.
+    // The exact write is da.len bytes (one chunk).
+    try steps.append(testing.allocator, .{ .expect_write_len = da.len });
+    // Final ZLP (12 % 0x2000 != 0): the sim ignores zero-length writes,
+    // so script it as any_write.
+    try steps.append(testing.allocator, .{ .any_write = {} });
+    // checksum + status
+    var chk: u16 = 0;
+    var i: usize = 0;
+    while (i + 2 <= da.len) : (i += 2) chk ^= std.mem.readInt(u16, da[i..][0..2], .little);
+    var resp: [4]u8 = undefined;
+    std.mem.writeInt(u16, resp[0..2], chk, .big);
+    std.mem.writeInt(u16, resp[2..4], 0, .big);
+    try steps.append(testing.allocator, .{ .respond = &resp });
+
+    // JUMP_DA
+    const wd5 = [_]u8{cmd_jump_da};
+    const rd5 = [_]u8{cmd_jump_da};
+    try steps.append(testing.allocator, .{ .expect_write = &wd5 });
+    try steps.append(testing.allocator, .{ .respond = &rd5 });
+    try steps.append(testing.allocator, .{ .expect_write = &addr_be });
+    try steps.append(testing.allocator, .{ .respond = &addr_be });
+    const jump_ok = [_]u8{ 0, 0 };
+    try steps.append(testing.allocator, .{ .respond = &jump_ok });
+
+    var h = try Harness.init(testing.allocator, steps.items);
+    defer h.deinit();
+    var io = Io.init(testing.allocator, h.transport());
+    defer io.deinit();
+    var sess = Session{ .alloc = testing.allocator, .io = &io, .logger = l, .cancel = &cancel };
+
+    try sess.sync();
+    try sess.sendDa(0x00200000, da, 0, .{});
+    try sess.jumpDa(0x00200000);
+}
 
 test "brom sync, hw code and sw version against scripted echo" {
     var steps = std.ArrayList(Step).empty;
