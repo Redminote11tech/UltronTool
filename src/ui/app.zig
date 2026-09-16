@@ -80,6 +80,7 @@ const ChooserKind = union(enum) {
     spd_fdl1: void,
     spd_fdl2: void,
     spd_write: void,
+    mtk_da: void,
 };
 
 /// Payload-size choices for VIP digest generation. 16 KiB is the default
@@ -212,6 +213,9 @@ pub const Ui = struct {
     lg_thread: ?std.Thread = null,
     mtk_section: ?*gtk.Widget = null,
     mtk_thread: ?std.Thread = null,
+    mtk_da_row: ?*adw.ActionRow = null,
+    mtk_da_path: ?[]u8 = null,
+    mtk_da_addr_entry: ?*gtk.Entry = null,
     spd_section: ?*gtk.Widget = null,
     spd_thread: ?std.Thread = null,
     spd_fdl1_row: ?*adw.ActionRow = null,
@@ -812,6 +816,33 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     _ = gtk.Button.signals.clicked.connect(mtk_probe_btn, *Ui, &onMtkProbe, ui, .{});
     adw.ActionRow.addSuffix(mtk_probe_row, mtk_probe_btn.as(gtk.Widget));
     adw.PreferencesGroup.add(mtk_group, mtk_probe_row.as(gtk.Widget));
+
+    const mtk_da_row = adw.ActionRow.new();
+    rowTitle(mtk_da_row, "Download Agent (DA)");
+    adw.ActionRow.setSubtitle(mtk_da_row, "None selected — device-specific DA binary");
+    const mtk_da_btn = gtk.Button.newWithLabel("Choose…");
+    _ = gtk.Button.signals.clicked.connect(mtk_da_btn, *Ui, &onMtkPickDa, ui, .{});
+    adw.ActionRow.addSuffix(mtk_da_row, mtk_da_btn.as(gtk.Widget));
+    adw.PreferencesGroup.add(mtk_group, mtk_da_row.as(gtk.Widget));
+    ui.mtk_da_row = mtk_da_row;
+
+    const mtk_addr_row = adw.ActionRow.new();
+    rowTitle(mtk_addr_row, "DA load address (hex)");
+    const mtk_addr_entry = gtk.Entry.new();
+    gtk.Entry.setPlaceholderText(mtk_addr_entry, "0x00200000");
+    gtk.Widget.setHexpand(mtk_addr_entry.as(gtk.Widget), 1);
+    adw.ActionRow.addSuffix(mtk_addr_row, mtk_addr_entry.as(gtk.Widget));
+    adw.PreferencesGroup.add(mtk_group, mtk_addr_row.as(gtk.Widget));
+    ui.mtk_da_addr_entry = mtk_addr_entry;
+
+    const mtk_upload_row = adw.ActionRow.new();
+    rowTitle(mtk_upload_row, "DA upload");
+    adw.ActionRow.setSubtitle(mtk_upload_row, "SEND_DA + JUMP_DA — the device leaves BROM mode on success");
+    const mtk_upload_btn = gtk.Button.newWithLabel("Upload DA");
+    gtk.Widget.addCssClass(mtk_upload_btn.as(gtk.Widget), "suggested-action");
+    _ = gtk.Button.signals.clicked.connect(mtk_upload_btn, *Ui, &onMtkUploadDa, ui, .{});
+    adw.ActionRow.addSuffix(mtk_upload_row, mtk_upload_btn.as(gtk.Widget));
+    adw.PreferencesGroup.add(mtk_group, mtk_upload_row.as(gtk.Widget));
 
     gtk.Box.append(mtk_box, mtk_group.as(gtk.Widget));
     gtk.Widget.setVisible(mtk_box.as(gtk.Widget), 0);
@@ -1528,6 +1559,12 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
             if (ui.spd_fdl1_path) |old| ui.alloc.free(old);
             ui.spd_fdl1_path = dup;
             setSubtitleZ(ui.spd_fdl1_row.?, path);
+        },
+        .mtk_da => {
+            const dup = ui.alloc.dupe(u8, path) catch return;
+            if (ui.mtk_da_path) |old| ui.alloc.free(old);
+            ui.mtk_da_path = dup;
+            setSubtitleZ(ui.mtk_da_row.?, path);
         },
         .spd_fdl2 => {
             const dup = ui.alloc.dupe(u8, path) catch return;
@@ -3042,14 +3079,22 @@ fn lgControlClicked(ui: *Ui, kind: LgJobKind) void {
 // MediaTek / Unisoc probe jobs
 // ----------------------------------------------------------------------
 
+const MtkJobKind = enum { probe, da_upload };
+
 const MtkProbeCtx = struct {
     ui: *Ui,
+    kind: MtkJobKind = .probe,
     target: ?transport.Target = null,
     target_serial_buf: ?[]u8 = null,
+    /// DA file path (da_upload) — owned.
+    path: ?[]u8 = null,
+    /// DA load address (hex entry, main-thread parsed).
+    addr: u32 = 0x00200000,
 
     fn free(self: *MtkProbeCtx) void {
         const alloc = self.ui.alloc;
         if (self.target_serial_buf) |b| alloc.free(b);
+        if (self.path) |p| alloc.free(p);
         alloc.destroy(self);
     }
 };
@@ -3064,7 +3109,10 @@ fn mtkProbeRun(ctx: *MtkProbeCtx) void {
         return;
     };
     var m = ev.FixedStr(512){};
-    m.set("chip info read");
+    m.set(switch (ctx.kind) {
+        .probe => "chip info read",
+        .da_upload => "DA uploaded and started",
+    });
     ui.channel.push(.{ .finished = .{ .success = true, .message = m } });
 }
 
@@ -3083,6 +3131,71 @@ fn mtkProbeInner(ctx: *MtkProbeCtx) !void {
     ui.logger.info("✓ MTK chip: HW code 0x{X:0>4} (sub 0x{X:0>4}), SW version {d}.{d}.{d}.{d}", .{
         info.hw_code, info.hw_sub_code, info.sw_ver[0], info.sw_ver[1], info.sw_ver[2], info.sw_ver[3],
     });
+
+    switch (ctx.kind) {
+        .probe => {},
+        .da_upload => {
+            const data = try fileio.readFileAlloc(ui.alloc, ctx.path.?, 64 * 1024 * 1024);
+            defer ui.alloc.free(data);
+            ui.logger.info("MTK: uploading DA ({d} bytes) to 0x{X:0>8}…", .{ data.len, ctx.addr });
+            try sess.sendDa(ctx.addr, data, 0, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+            try sess.jumpDa(ctx.addr);
+        },
+    }
+}
+
+fn onMtkPickDa(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    openChooser(ui, .mtk_da, "Select Download Agent (DA)", false, null);
+}
+
+fn mtkStageTarget(ui: *Ui, ctx: *MtkProbeCtx) !void {
+    if (activeTarget(ui)) |t| {
+        var copy = t;
+        if (t.serial) |ser| {
+            const dup = try ui.alloc.dupe(u8, ser);
+            ctx.target_serial_buf = dup;
+            copy.serial = dup;
+        }
+        ctx.target = copy;
+    }
+}
+
+fn onMtkUploadDa(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (ui.busy()) {
+        ui.toast("Another operation is running — wait for it to finish");
+        return;
+    }
+    const path = ui.mtk_da_path orelse {
+        ui.toast("Choose a Download Agent (DA) file first");
+        return;
+    };
+    var addr: u32 = 0x00200000;
+    if (ui.mtk_da_addr_entry) |e| {
+        const raw = gtk.Editable.getText(@ptrCast(e));
+        addr = std.fmt.parseInt(u32, std.mem.trim(u8, std.mem.span(raw), " "), 0) catch {
+            ui.toast("Invalid DA load address");
+            return;
+        };
+    }
+    const ctx = ui.alloc.create(MtkProbeCtx) catch return;
+    ctx.* = .{ .ui = ui, .kind = .da_upload, .addr = addr };
+    ctx.path = ui.alloc.dupe(u8, path) catch {
+        ctx.free();
+        return;
+    };
+    mtkStageTarget(ui, ctx) catch {
+        ctx.free();
+        return;
+    };
+    ui.startJob();
+    const thread = std.Thread.spawn(.{}, mtkProbeRun, .{ctx}) catch {
+        ui.jobDone();
+        ctx.free();
+        ui.toast("Failed to start worker thread");
+        return;
+    };
+    if (ui.mtk_thread) |old| old.join();
+    ui.mtk_thread = thread;
 }
 
 fn onMtkProbe(_: *gtk.Button, ui: *Ui) callconv(.c) void {
