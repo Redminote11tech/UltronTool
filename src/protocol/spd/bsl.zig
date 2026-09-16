@@ -26,12 +26,26 @@ pub const hdlc_escape: u8 = 0x7d;
 // Bootrom commands (spd_cmd.h).
 pub const BSL_CMD_CHECK_BAUD: u16 = 0x7e;
 pub const BSL_CMD_CONNECT: u16 = 0x00;
+pub const BSL_CMD_START_DATA: u16 = 0x01;
+pub const BSL_CMD_MIDST_DATA: u16 = 0x02;
+pub const BSL_CMD_END_DATA: u16 = 0x03;
+pub const BSL_CMD_EXEC_DATA: u16 = 0x04;
+pub const BSL_CMD_READ_FLASH: u16 = 0x06;
+pub const BSL_REP_READ_FLASH: u16 = 0x07;
+pub const BSL_CMD_ERASE_FLASH: u16 = 0x0a;
+pub const BSL_CMD_READ_START: u16 = 0x10;
 pub const BSL_REP_ACK: u16 = 0x80;
 pub const BSL_REP_VER: u16 = 0x81;
 
 pub const timeout_ms: u32 = 5000;
+/// Feature phones respond to EXEC immediately; smartphones may take a
+/// second — spd_dump waits 15 s for the FDL2 exec acknowledgment.
+pub const exec_timeout_ms: u32 = 15_000;
 pub const raw_frame_max = 1024;
 pub const enc_frame_max = 2 * raw_frame_max + 2;
+/// spd_dump's transfer steps: reads use 1024, writes 528.
+pub const read_step: u32 = 1024;
+pub const write_step: u32 = 528;
 
 pub const ProgressHook = struct {
     ctx: ?*anyopaque = null,
@@ -70,9 +84,10 @@ pub fn byteSum(data_in: []const u8) u16 {
     crc = (crc >> 16) + (crc & 0xffff);
     crc += crc >> 16;
     const inv = ~crc & 0xffff;
-    if (len < 1) return @intCast(inv);
-    // odd length: byteswap (CHK_FIXZERO pads conceptually to even)
-    return @intCast((inv >> 8) | ((inv & 0xff) << 8));
+    // C's `if (len < final)`: even totals (remaining 0) are byte-swapped,
+    // odd totals (remaining 1) are not.
+    if (len < 1) return @intCast((inv >> 8) | ((inv & 0xff) << 8));
+    return @intCast(inv);
 }
 
 fn transcode(dst: []u8, src: []const u8) usize {
@@ -90,6 +105,8 @@ fn transcode(dst: []u8, src: []const u8) usize {
     return n;
 }
 
+pub const Frame = struct { type: u16, len: usize };
+
 pub const Session = struct {
     alloc: std.mem.Allocator,
     io: *Io,
@@ -97,6 +114,7 @@ pub const Session = struct {
     cancel: *const std.atomic.Value(bool),
 
     use_crc16: bool = true, // bootrom stage; FDL2 uses the byte sum
+    recv_timeout_ms: u32 = timeout_ms,
     raw: [raw_frame_max]u8 = undefined,
     enc: [enc_frame_max]u8 = undefined,
     enc_len: usize = 0,
@@ -151,13 +169,17 @@ pub const Session = struct {
 
     /// Read one HDLC frame, decode, and return (type, payload length).
     /// The decoded payload stays in self.raw.
-    pub fn recv(self: *Session) Error!struct { type: u16, len: usize } {
+    pub fn recv(self: *Session) Error!Frame {
+        return self.recvTimeout(self.recv_timeout_ms);
+    }
+
+    pub fn recvTimeout(self: *Session, timeout: u32) Error!Frame {
         // Read until a 0x7E header byte.
         var start: u8 = 0;
         while (true) {
             if (self.cancelled()) return Error.Cancelled;
             var b: [1]u8 = undefined;
-            try self.readExact(&b);
+            try self.readExactTimeout(&b, timeout);
             start = b[0];
             if (start == hdlc_header) break;
         }
@@ -167,8 +189,10 @@ pub const Session = struct {
             if (self.cancelled()) return Error.Cancelled;
             if (got >= self.enc.len - 1) return Error.Io;
             var b: [1]u8 = undefined;
-            try self.readExact(&b);
-            if (b[0] == hdlc_header and got > 0) break;
+            try self.readExactTimeout(&b, timeout);
+            // The opening delimiter is dropped, not stored (the reference
+            // discards everything up to and including a header byte).
+            if (b[0] == hdlc_header) break;
             self.enc[got] = b[0];
             got += 1;
         }
@@ -202,12 +226,21 @@ pub const Session = struct {
     }
 
     fn readExact(self: *Session, buf: []u8) Error!void {
+        try self.readExactTimeout(buf, timeout_ms);
+    }
+
+    fn readExactTimeout(self: *Session, buf: []u8, timeout: u32) Error!void {
         var got: usize = 0;
         while (got < buf.len) {
             if (self.cancelled()) return Error.Cancelled;
-            const n = try self.io.read(buf[got..], timeout_ms);
+            const n = try self.io.read(buf[got..], timeout);
             got += n;
         }
+    }
+
+    /// 16-bit big-endian length of the last received frame's payload.
+    pub fn lastPayloadLen(self: *const Session) u16 {
+        return std.mem.readInt(u16, self.raw[2..4], .big);
     }
 
     pub fn sendAndCheck(self: *Session, msg_type: u16, data: []const u8) Error!void {
@@ -235,6 +268,156 @@ pub const Session = struct {
         try self.sendAndCheck(BSL_CMD_CONNECT, &.{});
         return n;
     }
+
+    // ------------------------------------------------------------------
+    // FDL upload + flash operations (spd_dump send_buf/read_flash/...)
+    // ------------------------------------------------------------------
+
+    /// Stage switch: the bootrom speaks CRC-16, FDL2 speaks the byte sum.
+    pub fn setStage(self: *Session, bootrom: bool) void {
+        self.use_crc16 = bootrom;
+    }
+
+    /// UTF-16LE partition selection packet (select_partition): name padded
+    /// to 36 u16, then size (LE u32, plus high word for 64-bit mode).
+    fn partitionPkt(self: *Session, name: []const u8, size: u64, cmd: u16) Error!void {
+        var pkt = std.mem.zeroes([36 * 2 + 4 + 4 + 8]u8);
+        const u16len = @min(name.len, 36);
+        var i: usize = 0;
+        while (i < u16len) : (i += 1) {
+            const cp = std.unicode.utf8Decode(name[i .. i + 1]) catch name[i];
+            var tmp: [2]u8 = undefined;
+            std.mem.writeInt(u16, &tmp, cp, .little);
+            @memcpy(pkt[i * 2 ..][0..2], &tmp);
+        }
+        std.mem.writeInt(u32, pkt[72..76], @truncate(size), .little);
+        std.mem.writeInt(u32, pkt[76..80], @intCast(size >> 32), .little);
+        const pkt_len: usize = if (size >> 32 != 0) 80 else 76;
+        try self.encodeMsg(cmd, pkt[0..pkt_len]);
+        try self.send();
+        const r = try self.recv();
+        if (r.type != BSL_REP_ACK) {
+            self.logger.err("SPD: partition \"{s}\" select answered 0x{X:0>4} (not ACK)", .{ name, r.type });
+            return Error.Io;
+        }
+    }
+
+    /// Upload one FDL: START_DATA(addr, size) → 528-byte MIDST chunks →
+    /// END_DATA → EXEC_DATA. `exec_timeout` covers the FDL2 boot delay.
+    pub fn fdlUpload(self: *Session, data: []const u8, addr: u32, exec_timeout: u32) Error!void {
+        if (data.len > 0xffff_0000) return Error.Io;
+        var hdr: [8]u8 = undefined;
+        std.mem.writeInt(u32, hdr[0..4], addr, .big);
+        std.mem.writeInt(u32, hdr[4..8], @intCast(data.len), .big);
+        try self.encodeMsg(BSL_CMD_START_DATA, &hdr);
+        try self.send();
+        var r = try self.recv();
+        if (r.type != BSL_REP_ACK) return Error.Io;
+
+        var off: usize = 0;
+        while (off < data.len) {
+            if (self.cancelled()) return Error.Cancelled;
+            const n = @min(data.len - off, write_step);
+            try self.encodeMsg(BSL_CMD_MIDST_DATA, data[off .. off + n]);
+            try self.send();
+            r = try self.recv();
+            if (r.type != BSL_REP_ACK) return Error.Io;
+            off += n;
+        }
+        try self.encodeMsg(BSL_CMD_END_DATA, &.{});
+        try self.send();
+        r = try self.recv();
+        if (r.type != BSL_REP_ACK) return Error.Io;
+
+        try self.encodeMsg(BSL_CMD_EXEC_DATA, &.{});
+        try self.send();
+        self.recv_timeout_ms = exec_timeout;
+        defer self.recv_timeout_ms = timeout_ms;
+        r = try self.recv();
+        // Feature phones ACK; some FDL2 builds answer INCOMPATIBLE_PARTITION
+        // which spd_dump tolerates.
+        if (r.type != BSL_REP_ACK and r.type != 0x8d) {
+            self.logger.err("SPD: EXEC_DATA answered 0x{X:0>4}", .{r.type});
+            return Error.Io;
+        }
+    }
+
+    /// Address-based flash read (spd_dump read_flash): 1024-byte chunks,
+    /// each answered with BSL_REP_READ_FLASH carrying the data.
+    pub fn flashRead(self: *Session, addr: u32, offset: u32, len: u32, out: []u8, progress: ProgressHook) Error!void {
+        if (out.len < len) return Error.Io;
+        var off: u32 = offset;
+        var done: u32 = 0;
+        while (done < len) {
+            if (self.cancelled()) return Error.Cancelled;
+            var n: u32 = len - done;
+            if (n > read_step) n = read_step;
+            var hdr: [12]u8 = undefined;
+            std.mem.writeInt(u32, hdr[0..4], addr, .big);
+            std.mem.writeInt(u32, hdr[4..8], n, .big);
+            std.mem.writeInt(u32, hdr[8..12], off, .big);
+            try self.encodeMsg(BSL_CMD_READ_FLASH, &hdr);
+            try self.send();
+            const r = try self.recv();
+            if (r.type != BSL_REP_READ_FLASH) {
+                self.logger.err("SPD: READ_FLASH answered 0x{X:0>4}", .{r.type});
+                return Error.Io;
+            }
+            const nread = self.lastPayloadLen();
+            if (nread > n) return Error.Io;
+            @memcpy(out[done .. done + nread], self.raw[4 .. 4 + nread]);
+            done += nread;
+            off += nread;
+            if (nread != n) break;
+            progress.report("reading", done, len);
+        }
+        if (done != len) {
+            self.logger.err("SPD: short read ({d}/{d})", .{ done, len });
+            return Error.Io;
+        }
+    }
+
+    /// Address-based flash write (spd_dump send_buf): START_DATA(addr,
+    /// size) → 528-byte MIDST chunks → END_DATA.
+    pub fn flashWrite(self: *Session, addr: u32, data: []const u8, progress: ProgressHook) Error!void {
+        if (data.len > 0xffff_0000) return Error.Io;
+        var hdr: [8]u8 = undefined;
+        std.mem.writeInt(u32, hdr[0..4], addr, .big);
+        std.mem.writeInt(u32, hdr[4..8], @intCast(data.len), .big);
+        try self.encodeMsg(BSL_CMD_START_DATA, &hdr);
+        try self.send();
+        var r = try self.recv();
+        if (r.type != BSL_REP_ACK) return Error.Io;
+        var off: usize = 0;
+        while (off < data.len) {
+            if (self.cancelled()) return Error.Cancelled;
+            const n = @min(data.len - off, write_step);
+            try self.encodeMsg(BSL_CMD_MIDST_DATA, data[off .. off + n]);
+            try self.send();
+            r = try self.recv();
+            if (r.type != BSL_REP_ACK) return Error.Io;
+            off += n;
+            progress.report("writing", off, data.len);
+        }
+        try self.encodeMsg(BSL_CMD_END_DATA, &.{});
+        try self.send();
+        r = try self.recv();
+        if (r.type != BSL_REP_ACK) return Error.Io;
+    }
+
+    /// Address-based flash erase (spd_dump erase_flash).
+    pub fn flashErase(self: *Session, addr: u32, size: u32) Error!void {
+        var hdr: [8]u8 = undefined;
+        std.mem.writeInt(u32, hdr[0..4], addr, .big);
+        std.mem.writeInt(u32, hdr[4..8], size, .big);
+        try self.encodeMsg(BSL_CMD_ERASE_FLASH, &hdr);
+        try self.send();
+        const r = try self.recv();
+        if (r.type != BSL_REP_ACK) {
+            self.logger.err("SPD: ERASE_FLASH answered 0x{X:0>4}", .{r.type});
+            return Error.Io;
+        }
+    }
 };
 
 // ----------------------------------------------------------------------
@@ -249,8 +432,8 @@ test "crc16_xmodem and byteSum check out" {
     // CRC-16/XMODEM("123456789") = 0x31C3 (well-known check value).
     try testing.expectEqual(@as(u16, 0x31c3), crc16_xmodem("123456789"));
     // spd_checksum of {0x01,0x02,0x03,0x04}: words 0x0201+0x0403 = 0x0604,
-    // folded, inverted, swapped for the odd... even length → ~0x0604.
-    try testing.expectEqual(@as(u16, ~@as(u16, 0x0604)), byteSum(&.{ 1, 2, 3, 4 }));
+    // folded, inverted, byte-swapped (even length) → 0xfbf9.
+    try testing.expectEqual(@as(u16, 0xfbf9), byteSum(&.{ 1, 2, 3, 4 }));
 }
 
 test "bootrom probe: baud check and connect against scripted frames" {
@@ -310,4 +493,87 @@ test "bootrom probe: baud check and connect against scripted frames" {
     var ver_buf: [32]u8 = undefined;
     const n = try sess.probe(&ver_buf);
     try testing.expectEqualStrings("SPRD3", ver_buf[0..n]);
+}
+
+test "fdl upload and flash ops against scripted frames" {
+    const l = try testing.allocator.create(log.Logger);
+    defer testing.allocator.destroy(l);
+    l.* = .{ .mirror_stderr = false };
+    const cancel = std.atomic.Value(bool).init(false);
+
+    const payload = "FDLDATA__";
+
+    // Encode the full expected command sequence with a throwaway session,
+    // then script those bytes as expectations with ACK/data responses.
+    var enc = Session{ .alloc = testing.allocator, .io = undefined, .logger = l, .cancel = &cancel };
+    defer enc.deinit();
+    enc.use_crc16 = false;
+
+    var steps = std.ArrayList(Step).empty;
+    defer steps.deinit(testing.allocator);
+
+    var hdr: [8]u8 = undefined;
+    std.mem.writeInt(u32, hdr[0..4], 0x80000000, .big);
+    std.mem.writeInt(u32, hdr[4..8], @intCast(payload.len), .big);
+    var ack_raw: [6]u8 = undefined;
+    std.mem.writeInt(u16, ack_raw[0..2], BSL_REP_ACK, .big);
+    std.mem.writeInt(u16, ack_raw[2..4], 0, .big);
+    std.mem.writeInt(u16, ack_raw[4..6], byteSum(ack_raw[0..4][0..]), .big);
+    var ack_frame: [8]u8 = undefined;
+    ack_frame[0] = 0x7e;
+    @memcpy(ack_frame[1..7], &ack_raw);
+    ack_frame[7] = 0x7e;
+
+    const seq = [_]struct { t: u16, data: []const u8 }{
+        .{ .t = BSL_CMD_START_DATA, .data = &hdr },
+        .{ .t = BSL_CMD_MIDST_DATA, .data = payload },
+        .{ .t = BSL_CMD_END_DATA, .data = &.{} },
+        .{ .t = BSL_CMD_EXEC_DATA, .data = &.{} },
+    };
+    var snaps: [4][]u8 = undefined;
+    for (seq, 0..) |cmd, si| {
+        try enc.encodeMsg(cmd.t, cmd.data);
+        snaps[si] = try testing.allocator.dupe(u8, enc.enc[0..enc.enc_len]);
+        try steps.append(testing.allocator, .{ .expect_write = snaps[si] });
+        try steps.append(testing.allocator, .{ .respond = &ack_frame });
+    }
+    defer for (snaps) |sn| testing.allocator.free(sn);
+
+    // READ_FLASH request (encoded by the caller per spd_dump framing).
+    var rreq: [16]u8 = undefined;
+    std.mem.writeInt(u16, rreq[0..2], BSL_CMD_READ_FLASH, .big);
+    std.mem.writeInt(u16, rreq[2..4], 12, .big);
+    std.mem.writeInt(u32, rreq[4..8], 0x80000000, .big);
+    std.mem.writeInt(u32, rreq[8..12], @intCast(payload.len), .big);
+    std.mem.writeInt(u32, rreq[12..16], 0, .big);
+    var rframe: [1 + rreq.len + 2 + 1]u8 = undefined;
+    rframe[0] = 0x7e;
+    @memcpy(rframe[1 .. 1 + rreq.len], &rreq);
+    std.mem.writeInt(u16, rframe[1 + rreq.len ..][0..2], byteSum(rreq[0..]), .big);
+    rframe[rframe.len - 1] = 0x7e;
+    try steps.append(testing.allocator, .{ .expect_write = &rframe });
+
+    var data_raw: [4 + 9 + 2]u8 = undefined;
+    std.mem.writeInt(u16, data_raw[0..2], BSL_REP_READ_FLASH, .big);
+    std.mem.writeInt(u16, data_raw[2..4], @intCast(payload.len), .big);
+    @memcpy(data_raw[4 .. 4 + payload.len], payload);
+    std.mem.writeInt(u16, data_raw[4 + payload.len ..][0..2], byteSum(data_raw[0 .. 4 + payload.len][0..]), .big);
+    var data_frame: [2 + data_raw.len]u8 = undefined;
+    data_frame[0] = 0x7e;
+    @memcpy(data_frame[1 .. 1 + data_raw.len], &data_raw);
+    data_frame[data_frame.len - 1] = 0x7e;
+    try steps.append(testing.allocator, .{ .respond = &data_frame });
+
+    var h = try Harness.init(testing.allocator, steps.items);
+    defer h.deinit();
+    var io = Io.init(testing.allocator, h.transport());
+    defer io.deinit();
+    var sess = Session{ .alloc = testing.allocator, .io = &io, .logger = l, .cancel = &cancel };
+    defer sess.deinit();
+    sess.use_crc16 = false;
+
+    try sess.fdlUpload(payload, 0x80000000, exec_timeout_ms);
+    var out: [9]u8 = undefined;
+    try sess.flashRead(0x80000000, 0, @intCast(payload.len), &out, .{});
+    try testing.expectEqualStrings(payload, &out);
 }
