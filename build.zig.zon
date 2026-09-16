@@ -1,6 +1,6 @@
 .{
     .name = .ultron,
-    .version = "0.6.0",
+    .version = "0.7.0",
     .fingerprint = 0x4da8175f571c388e, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .paths = .{""},

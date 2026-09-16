@@ -33,6 +33,14 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.7.0" date="2026-09-15">
+      <description>
+        <p>Flashing phases for the new vendors: MediaTek BROM now uploads
+        user-supplied Download Agents (SEND_DA with checksum verification,
+        JUMP_DA), and Unisoc gains FDL1/FDL2 loader upload plus address-based
+        flash read, write and erase over the BSL protocol.</p>
+      </description>
+    </release>
     <release version="0.6.0" date="2026-09-15">
       <description>
         <p>Multi-vendor release: Samsung Odin completes (PIT flashing and
