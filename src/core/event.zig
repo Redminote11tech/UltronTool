@@ -142,6 +142,8 @@ pub const SessionState = enum {
     samsung_ready,
     /// LG LAF: the GPT is loaded into the partition browser.
     lg_ready,
+    /// Unisoc: FDL2 is running and flash operations are available.
+    spd_ready,
 };
 
 /// One image entry inside a Huawei UPDATE.APP container (parse result).

@@ -77,6 +77,9 @@ const ChooserKind = union(enum) {
     write_partition: ev.PartitionRow,
     samsung_pit: void,
     samsung_bundle: void,
+    spd_fdl1: void,
+    spd_fdl2: void,
+    spd_write: void,
 };
 
 /// Payload-size choices for VIP digest generation. 16 KiB is the default
@@ -211,6 +214,19 @@ pub const Ui = struct {
     mtk_thread: ?std.Thread = null,
     spd_section: ?*gtk.Widget = null,
     spd_thread: ?std.Thread = null,
+    spd_fdl1_row: ?*adw.ActionRow = null,
+    spd_fdl2_row: ?*adw.ActionRow = null,
+    spd_addr_entry: ?*gtk.Entry = null,
+    spd_size_entry: ?*gtk.Entry = null,
+    spd_flash_read_btn: ?*gtk.Button = null,
+    spd_flash_write_btn: ?*gtk.Button = null,
+    spd_flash_erase_btn: ?*gtk.Button = null,
+    spd_fdl1_path: ?[]u8 = null,
+    spd_fdl2_path: ?[]u8 = null,
+    spd_stage_path: ?[]u8 = null,
+    /// Staged flash op: address and size (hex text from the entries).
+    spd_stage_addr: u32 = 0,
+    spd_stage_size: u32 = 0,
     /// Image path staged for a Samsung partition flash (consumed by the
     /// confirm dialog on both paths, like the Huawei mapping list).
     samsung_flash_path: ?[]u8 = null,
@@ -321,6 +337,8 @@ const ConfirmKind = union(enum) {
     samsung_factory: void,
     lg_erase: ev.PartitionRow,
     lg_write: ev.PartitionRow,
+    spd_write: void,
+    spd_erase: void,
 };
 
 // ----------------------------------------------------------------------
@@ -804,7 +822,7 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     const spd_box = gtk.Box.new(.vertical, 12);
     const spd_group = adw.PreferencesGroup.new();
     adw.PreferencesGroup.setTitle(spd_group, "Unisoc download mode");
-    adw.PreferencesGroup.setDescription(spd_group, "BSL bootrom handshake and version identification (FDL upload comes in a later phase)");
+    adw.PreferencesGroup.setDescription(spd_group, "BSL bootrom handshake, FDL upload and flash operations");
 
     const spd_probe_row = adw.ActionRow.new();
     rowTitle(spd_probe_row, "Bootrom identification");
@@ -815,7 +833,76 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     adw.ActionRow.addSuffix(spd_probe_row, spd_probe_btn.as(gtk.Widget));
     adw.PreferencesGroup.add(spd_group, spd_probe_row.as(gtk.Widget));
 
+    const spd_fdl1_row = adw.ActionRow.new();
+    rowTitle(spd_fdl1_row, "FDL1 loader");
+    adw.ActionRow.setSubtitle(spd_fdl1_row, "None selected — runs from boot RAM");
+    const spd_fdl1_btn = gtk.Button.newWithLabel("Choose…");
+    _ = gtk.Button.signals.clicked.connect(spd_fdl1_btn, *Ui, &onSpdPickFdl1, ui, .{});
+    adw.ActionRow.addSuffix(spd_fdl1_row, spd_fdl1_btn.as(gtk.Widget));
+    adw.PreferencesGroup.add(spd_group, spd_fdl1_row.as(gtk.Widget));
+    ui.spd_fdl1_row = spd_fdl1_row;
+
+    const spd_fdl2_row = adw.ActionRow.new();
+    rowTitle(spd_fdl2_row, "FDL2 loader");
+    adw.ActionRow.setSubtitle(spd_fdl2_row, "None selected — enables flash operations");
+    const spd_fdl2_btn = gtk.Button.newWithLabel("Choose…");
+    _ = gtk.Button.signals.clicked.connect(spd_fdl2_btn, *Ui, &onSpdPickFdl2, ui, .{});
+    adw.ActionRow.addSuffix(spd_fdl2_row, spd_fdl2_btn.as(gtk.Widget));
+    adw.PreferencesGroup.add(spd_group, spd_fdl2_row.as(gtk.Widget));
+    ui.spd_fdl2_row = spd_fdl2_row;
+
+    const spd_upload_row = adw.ActionRow.new();
+    rowTitle(spd_upload_row, "Loader upload");
+    adw.ActionRow.setSubtitle(spd_upload_row, "Both FDLs run in sequence (addresses are FDL-internal)");
+    const spd_upload_btn = gtk.Button.newWithLabel("Upload FDLs");
+    gtk.Widget.addCssClass(spd_upload_btn.as(gtk.Widget), "suggested-action");
+    _ = gtk.Button.signals.clicked.connect(spd_upload_btn, *Ui, &onSpdUploadFdl, ui, .{});
+    adw.ActionRow.addSuffix(spd_upload_row, spd_upload_btn.as(gtk.Widget));
+    adw.PreferencesGroup.add(spd_group, spd_upload_row.as(gtk.Widget));
+
     gtk.Box.append(spd_box, spd_group.as(gtk.Widget));
+
+    const spd_flash_group = adw.PreferencesGroup.new();
+    adw.PreferencesGroup.setTitle(spd_flash_group, "Flash operations (after FDL2)");
+    adw.PreferencesGroup.setDescription(spd_flash_group, "Address-based flash access — hex addresses, decimal sizes");
+
+    const spd_addr_row = adw.ActionRow.new();
+    rowTitle(spd_addr_row, "Flash address (hex)");
+    const spd_addr_entry = gtk.Entry.new();
+    gtk.Entry.setPlaceholderText(spd_addr_entry, "0x80000000");
+    gtk.Widget.setHexpand(spd_addr_entry.as(gtk.Widget), 1);
+    adw.ActionRow.addSuffix(spd_addr_row, spd_addr_entry.as(gtk.Widget));
+    adw.PreferencesGroup.add(spd_flash_group, spd_addr_row.as(gtk.Widget));
+    ui.spd_addr_entry = spd_addr_entry;
+
+    const spd_size_row = adw.ActionRow.new();
+    rowTitle(spd_size_row, "Size in bytes (dec)");
+    const spd_size_entry = gtk.Entry.new();
+    gtk.Entry.setPlaceholderText(spd_size_entry, "65536");
+    gtk.Widget.setHexpand(spd_size_entry.as(gtk.Widget), 1);
+    adw.ActionRow.addSuffix(spd_size_row, spd_size_entry.as(gtk.Widget));
+    adw.PreferencesGroup.add(spd_flash_group, spd_size_row.as(gtk.Widget));
+    ui.spd_size_entry = spd_size_entry;
+
+    const spd_ops_row = adw.ActionRow.new();
+    rowTitle(spd_ops_row, "Operations");
+    const spd_ops_box = gtk.Box.new(.horizontal, 6);
+    gtk.Widget.setValign(spd_ops_box.as(gtk.Widget), .center);
+    const spd_read_btn = gtk.Button.newWithLabel("Read to file…");
+    _ = gtk.Button.signals.clicked.connect(spd_read_btn, *Ui, &onSpdFlashRead, ui, .{});
+    gtk.Box.append(spd_ops_box, spd_read_btn.as(gtk.Widget));
+    const spd_write_btn = gtk.Button.newWithLabel("Write image…");
+    gtk.Widget.addCssClass(spd_write_btn.as(gtk.Widget), "destructive-action");
+    _ = gtk.Button.signals.clicked.connect(spd_write_btn, *Ui, &onSpdFlashWrite, ui, .{});
+    gtk.Box.append(spd_ops_box, spd_write_btn.as(gtk.Widget));
+    const spd_erase_btn = gtk.Button.newWithLabel("Erase");
+    gtk.Widget.addCssClass(spd_erase_btn.as(gtk.Widget), "destructive-action");
+    _ = gtk.Button.signals.clicked.connect(spd_erase_btn, *Ui, &onSpdFlashErase, ui, .{});
+    gtk.Box.append(spd_ops_box, spd_erase_btn.as(gtk.Widget));
+    adw.ActionRow.addSuffix(spd_ops_row, spd_ops_box.as(gtk.Widget));
+    adw.PreferencesGroup.add(spd_flash_group, spd_ops_row.as(gtk.Widget));
+
+    gtk.Box.append(spd_box, spd_flash_group.as(gtk.Widget));
     gtk.Widget.setVisible(spd_box.as(gtk.Widget), 0);
     gtk.Box.append(page, spd_box.as(gtk.Widget));
     ui.spd_section = spd_box.as(gtk.Widget);
@@ -1435,6 +1522,54 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
             if (ui.samsung_stage_path) |old| ui.alloc.free(old);
             ui.samsung_stage_path = dup;
             confirmDialog(ui, "Flash PIT?", "Writing a PIT repartitions the device. A wrong or corrupt PIT can HARD-BRICK it. This is IRREVERSIBLE.", "Flash PIT", .destructive, .samsung_pit);
+        },
+        .spd_fdl1 => {
+            const dup = ui.alloc.dupe(u8, path) catch return;
+            if (ui.spd_fdl1_path) |old| ui.alloc.free(old);
+            ui.spd_fdl1_path = dup;
+            setSubtitleZ(ui.spd_fdl1_row.?, path);
+        },
+        .spd_fdl2 => {
+            const dup = ui.alloc.dupe(u8, path) catch return;
+            if (ui.spd_fdl2_path) |old| ui.alloc.free(old);
+            ui.spd_fdl2_path = dup;
+            setSubtitleZ(ui.spd_fdl2_row.?, path);
+        },
+        .spd_write => {
+            // Read is non-destructive: straight to the job. Write/erase
+            // arrive here staged (addr/size already parsed) — confirm first.
+            const op_kind: SpdJobKind = if (ui.spd_stage_path != null) .write else .read;
+            if (op_kind == .write) {
+                // onSpdFlashWrite staged addr/size and remembered the op by
+                // a null path; mark write mode by staging a marker path.
+                // The image path arrives here — store it for the confirm.
+                const dup = ui.alloc.dupe(u8, path) catch return;
+                if (ui.spd_stage_path) |old| ui.alloc.free(old);
+                ui.spd_stage_path = dup;
+                var body_buf: [256]u8 = undefined;
+                const body = std.fmt.bufPrint(&body_buf, "Write {d} bytes to flash at 0x{X:0>8}?\n\nOverwriting flash is IRREVERSIBLE.", .{ ui.spd_stage_size, ui.spd_stage_addr }) catch return;
+                confirmDialog(ui, "Write flash?", body, "Write", .destructive, .spd_write);
+                return;
+            }
+            const ctx = ui.alloc.create(SpdProbeCtx) catch return;
+            ctx.* = .{ .ui = ui, .kind = .read, .addr = ui.spd_stage_addr, .size = ui.spd_stage_size };
+            ctx.path = ui.alloc.dupe(u8, path) catch {
+                ctx.free();
+                return;
+            };
+            spdStageTarget(ui, ctx) catch {
+                ctx.free();
+                return;
+            };
+            ui.startJob();
+            const thread = std.Thread.spawn(.{}, spdProbeRun, .{ctx}) catch {
+                ui.jobDone();
+                ctx.free();
+                ui.toast("Failed to start worker thread");
+                return;
+            };
+            if (ui.spd_thread) |old| old.join();
+            ui.spd_thread = thread;
         },
         .samsung_bundle => {
             if (ui.busy()) {
@@ -2161,6 +2296,38 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
                 return;
             };
             spawnLgJob(ui, job);
+        },
+        .spd_write, .spd_erase => {
+            const job_kind: SpdJobKind = if (kind == .spd_write) .write else .erase;
+            const staged = ui.spd_stage_path;
+            ui.spd_stage_path = null;
+            if (!applied) {
+                if (staged) |p| ui.alloc.free(p);
+                return;
+            }
+            if (ui.busy()) {
+                if (staged) |p| ui.alloc.free(p);
+                ui.toast("Another operation is running — wait for it to finish");
+                return;
+            }
+            const job = ui.alloc.create(SpdProbeCtx) catch {
+                if (staged) |p| ui.alloc.free(p);
+                return;
+            };
+            job.* = .{ .ui = ui, .kind = job_kind, .addr = ui.spd_stage_addr, .size = ui.spd_stage_size, .path = staged };
+            spdStageTarget(ui, job) catch {
+                job.free();
+                return;
+            };
+            ui.startJob();
+            const thread = std.Thread.spawn(.{}, spdProbeRun, .{job}) catch {
+                ui.jobDone();
+                job.free();
+                ui.toast("Failed to start worker thread");
+                return;
+            };
+            if (ui.spd_thread) |old| old.join();
+            ui.spd_thread = thread;
         },
         .samsung_pit, .samsung_bundle => {
             const job_kind: SamsungJobKind = if (kind == .samsung_pit) .flash_pit else .bundle;
@@ -2948,14 +3115,24 @@ fn onMtkProbe(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     ui.mtk_thread = thread;
 }
 
+const SpdJobKind = enum { probe, fdl_upload, read, write, erase };
+
 const SpdProbeCtx = struct {
     ui: *Ui,
+    kind: SpdJobKind = .probe,
     target: ?transport.Target = null,
     target_serial_buf: ?[]u8 = null,
+    /// FDL1/FDL2/image file path (owned).
+    path: ?[]u8 = null,
+    path2: ?[]u8 = null,
+    addr: u32 = 0,
+    size: u32 = 0,
 
     fn free(self: *SpdProbeCtx) void {
         const alloc = self.ui.alloc;
         if (self.target_serial_buf) |b| alloc.free(b);
+        if (self.path) |p| alloc.free(p);
+        if (self.path2) |p| alloc.free(p);
         alloc.destroy(self);
     }
 };
@@ -2965,16 +3142,28 @@ fn spdProbeRun(ctx: *SpdProbeCtx) void {
     defer ctx.free();
     spdProbeInner(ctx) catch |e| {
         var m = ev.FixedStr(512){};
-        m.set(std.fmt.bufPrint(&m3_buf, "Unisoc probe failed: {s}", .{@errorName(e)}) catch "Unisoc probe failed");
+        m.set(std.fmt.bufPrint(&m3_buf, "Unisoc op failed: {s}", .{@errorName(e)}) catch "Unisoc op failed");
         ui.channel.push(.{ .finished = .{ .success = false, .message = m } });
         return;
     };
     var m = ev.FixedStr(512){};
-    m.set("bootrom version read");
+    m.set(switch (ctx.kind) {
+        .probe => "bootrom version read",
+        .fdl_upload => "FDLs uploaded — flash operations unlocked",
+        .read => "read finished",
+        .write => "write finished",
+        .erase => "erase finished",
+    });
     ui.channel.push(.{ .finished = .{ .success = true, .message = m } });
 }
 
 var m3_buf: [160]u8 = undefined;
+
+/// FDL load addresses — the values spreadtrum_flash's own FDL binaries are
+/// built for (feature-phone NOR pair; both stay user-visible in the CLI
+/// reference). The FDL headers carry their own load info on UMS chips.
+const spd_fdl1_addr: u32 = 0x40002000;
+const spd_fdl2_addr: u32 = 0x9efffe00;
 
 fn spdProbeInner(ctx: *SpdProbeCtx) !void {
     const ui = ctx.ui;
@@ -2985,9 +3174,148 @@ fn spdProbeInner(ctx: *SpdProbeCtx) !void {
     var sess = spd_bsl.Session{ .alloc = ui.alloc, .io = &io, .logger = ui.logger, .cancel = &ui.cancel };
     defer sess.deinit();
     try sess.configurePort();
-    var ver_buf: [64]u8 = undefined;
-    const n = try sess.probe(&ver_buf);
-    ui.logger.info("✓ Unisoc bootrom: {s}", .{ver_buf[0..n]});
+    switch (ctx.kind) {
+        .probe => {
+            var ver_buf: [64]u8 = undefined;
+            const n = try sess.probe(ver_buf[0..]);
+            ui.logger.info("✓ Unisoc bootrom: {s}", .{ver_buf[0..n]});
+        },
+        .fdl_upload => {
+            const fdl1 = try fileio.readFileAlloc(ui.alloc, ctx.path.?, 8 * 1024 * 1024);
+            defer ui.alloc.free(fdl1);
+            const fdl2 = try fileio.readFileAlloc(ui.alloc, ctx.path2.?, 8 * 1024 * 1024);
+            defer ui.alloc.free(fdl2);
+            ui.logger.info("SPD: uploading FDL1 ({d} bytes)…", .{fdl1.len});
+            try sess.fdlUpload(fdl1, spd_fdl1_addr, spd_bsl.exec_timeout_ms);
+            ui.logger.info("✓ FDL1 running — switching to the FDL2 checksum stage", .{});
+            sess.setStage(false);
+            ui.logger.info("SPD: uploading FDL2 ({d} bytes)…", .{fdl2.len});
+            try sess.fdlUpload(fdl2, spd_fdl2_addr, spd_bsl.exec_timeout_ms);
+            ui.logger.info("✓ FDL2 running — flash operations unlocked", .{});
+            ui.channel.push(.{ .session_state = .spd_ready });
+        },
+        .read => {
+            const buf = try ui.alloc.alloc(u8, ctx.size);
+            defer ui.alloc.free(buf);
+            try sess.flashRead(ctx.addr, 0, ctx.size, buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+            var out = try fileio.File.create(ctx.path.?);
+            defer out.close();
+            if ((try out.writeAll(buf)) != buf.len) return error.Io;
+            try out.flush();
+            ui.logger.info("✓ read {d} bytes from 0x{X:0>8}", .{ ctx.size, ctx.addr });
+        },
+        .write => {
+            var img = try fileio.File.open(ctx.path.?);
+            defer img.close();
+            const img_size = try img.size();
+            if (img_size > 0xffff_0000) return error.ImageTooLarge;
+            const buf = try ui.alloc.alloc(u8, @intCast(img_size));
+            defer ui.alloc.free(buf);
+            if ((try img.readAll(buf)) != img_size) return error.Io;
+            try sess.flashWrite(ctx.addr, buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+            ui.logger.info("✓ wrote {d} bytes to 0x{X:0>8}", .{ img_size, ctx.addr });
+        },
+        .erase => {
+            try sess.flashErase(ctx.addr, ctx.size);
+            ui.logger.info("✓ erased {d} bytes at 0x{X:0>8}", .{ ctx.size, ctx.addr });
+        },
+    }
+}
+
+fn onSpdPickFdl1(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    openChooser(ui, .spd_fdl1, "Select FDL1 loader", false, null);
+}
+
+fn onSpdPickFdl2(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    openChooser(ui, .spd_fdl2, "Select FDL2 loader", false, null);
+}
+
+fn onSpdFlashRead(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (!spdStageRange(ui, .read)) return;
+    openChooser(ui, .spd_write, "Save flash dump", true, "flash.bin");
+}
+
+fn onSpdFlashWrite(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (!spdStageRange(ui, .write)) return;
+    // Mark write mode: the staged path stays null until the chooser returns.
+    openChooser(ui, .spd_write, "Select image to write", false, null);
+}
+
+fn onSpdFlashErase(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (!spdStageRange(ui, .erase)) return;
+    var body_buf: [256]u8 = undefined;
+    const body = std.fmt.bufPrint(&body_buf, "Erase {d} bytes of flash at 0x{X:0>8}?\n\nThis is IRREVERSIBLE.", .{ ui.spd_stage_size, ui.spd_stage_addr }) catch return;
+    confirmDialog(ui, "Erase flash?", body, "Erase", .destructive, .spd_erase);
+}
+
+/// Parse the address/size entries (main thread) and stage an op; returns
+/// false (with a toast) when the entries are missing or malformed.
+fn spdStageRange(ui: *Ui, kind: SpdJobKind) bool {
+    if (ui.busy()) {
+        ui.toast("Another operation is running — wait for it to finish");
+        return false;
+    }
+    if (ui.session != .spd_ready) {
+        ui.toast("Upload the FDLs first — flash operations need FDL2 running");
+        return false;
+    }
+    var addr_txt: []const u8 = "";
+    if (ui.spd_addr_entry) |e| addr_txt = std.mem.span(gtk.Editable.getText(@ptrCast(e)));
+    var size_txt: []const u8 = "";
+    if (ui.spd_size_entry) |e| size_txt = std.mem.span(gtk.Editable.getText(@ptrCast(e)));
+    ui.spd_stage_addr = std.fmt.parseInt(u32, std.mem.trim(u8, addr_txt, " "), 0) catch {
+        ui.toast("Invalid flash address");
+        return false;
+    };
+    ui.spd_stage_size = std.fmt.parseInt(u32, std.mem.trim(u8, size_txt, " "), 10) catch {
+        ui.toast("Invalid size");
+        return false;
+    };
+    if (kind != .write and ui.spd_stage_size == 0) {
+        ui.toast("Size must be greater than zero");
+        return false;
+    }
+    return true;
+}
+
+fn spdStageTarget(ui: *Ui, ctx: *SpdProbeCtx) !void {
+    if (activeTarget(ui)) |t| {
+        var copy = t;
+        if (t.serial) |ser| {
+            const dup = try ui.alloc.dupe(u8, ser);
+            ctx.target_serial_buf = dup;
+            copy.serial = dup;
+        }
+        ctx.target = copy;
+    }
+}
+
+fn onSpdUploadFdl(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (ui.busy()) {
+        ui.toast("Another operation is running — wait for it to finish");
+        return;
+    }
+    if (ui.spd_fdl1_path == null or ui.spd_fdl2_path == null) {
+        ui.toast("Choose both FDL1 and FDL2 loaders first");
+        return;
+    }
+    const ctx = ui.alloc.create(SpdProbeCtx) catch return;
+    ctx.* = .{ .ui = ui, .kind = .fdl_upload };
+    if (ui.spd_fdl1_path) |p| ctx.path = ui.alloc.dupe(u8, p) catch null;
+    if (ui.spd_fdl2_path) |p| ctx.path2 = ui.alloc.dupe(u8, p) catch null;
+    spdStageTarget(ui, ctx) catch {
+        ctx.free();
+        return;
+    };
+    ui.startJob();
+    const thread = std.Thread.spawn(.{}, spdProbeRun, .{ctx}) catch {
+        ui.jobDone();
+        ctx.free();
+        ui.toast("Failed to start worker thread");
+        return;
+    };
+    if (ui.spd_thread) |old| old.join();
+    ui.spd_thread = thread;
 }
 
 fn onSpdProbe(_: *gtk.Button, ui: *Ui) callconv(.c) void {
