@@ -26,6 +26,7 @@ test {
     _ = @import("protocol/lg/usb_ids.zig");
     _ = @import("protocol/mtk/brom.zig");
     _ = @import("protocol/mtk/usb_ids.zig");
+    _ = @import("protocol/mtk/daflash.zig");
     _ = @import("protocol/spd/bsl.zig");
     _ = @import("protocol/spd/usb_ids.zig");
     _ = @import("protocol/qualcomm/gpt.zig");
