@@ -271,17 +271,45 @@ pub const Session = struct {
     /// Bootrom probe: baud check (responds with the version string) and
     /// CONNECT handshake. Returns the reported version string.
     pub fn probe(self: *Session, version_out: []u8) Error!usize {
-        try self.encodeMsg(BSL_CMD_CHECK_BAUD, &.{1});
-        try self.send();
-        const ver = try self.recv();
-        if (ver.type != BSL_REP_VER) {
-            self.logger.err("SPD: expected BSL_REP_VER, got 0x{X:0>4}", .{ver.type});
-            return Error.Io;
+        return self.checkBaudConnect(1, version_out);
+    }
+
+    /// The FDL-stage handshake (spd_dump.c:1270-1284 bootrom with 1 bare
+    /// 0x7E, 1299-1308 FDL1 with 4 bare 0x7E retried up to 10×): the
+    /// loader consumes the first frame after sync as the version request
+    /// and answers BSL_REP_VER regardless of type, so CHECK_BAUD must
+    /// precede every real command exchange. `n_baud` bare 0x7E bytes are
+    /// sent (1 bootrom, 4 FDL1), each retried up to 10× until a response.
+    pub fn checkBaudConnect(self: *Session, n_baud: usize, version_out: []u8) Error!usize {
+        // CHECK_BAUD encodes to n bare delimiters (encodeMsg special-case).
+        var pad: [4]u8 = @splat(0);
+        if (n_baud > pad.len) return Error.Io;
+        try self.encodeMsg(BSL_CMD_CHECK_BAUD, pad[0..n_baud]);
+        var ver_len: usize = 0;
+        var got_ver = false;
+        var attempt: u32 = 0;
+        while (attempt < 10) : (attempt += 1) {
+            if (self.cancelled()) return Error.Cancelled;
+            try self.send();
+            if (self.recv()) |ver| {
+                if (ver.type != BSL_REP_VER) {
+                    self.logger.err("SPD: expected BSL_REP_VER, got 0x{X:0>4}", .{ver.type});
+                    return Error.Io;
+                }
+                ver_len = @min(ver.len, version_out.len);
+                @memcpy(version_out[0..ver_len], self.raw[4 .. 4 + ver_len]);
+                got_ver = true;
+                break;
+            } else |e| {
+                if (e != Error.Timeout) return e;
+            }
         }
-        const n = @min(ver.len, version_out.len);
-        @memcpy(version_out[0..n], self.raw[4 .. 4 + n]);
+        if (!got_ver) {
+            self.logger.err("SPD: no BSL_REP_VER after {d} baud checks", .{attempt});
+            return Error.Timeout;
+        }
         try self.sendAndCheck(BSL_CMD_CONNECT, &.{});
-        return n;
+        return ver_len;
     }
 
     // ------------------------------------------------------------------

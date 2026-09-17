@@ -3541,10 +3541,19 @@ fn spdProbeInner(ctx: *SpdProbeCtx) !void {
             defer ui.alloc.free(fdl1);
             const fdl2 = try fileio.readFileAlloc(ui.alloc, ctx.path2.?, 8 * 1024 * 1024);
             defer ui.alloc.free(fdl2);
+            // The loader consumes the first frame after sync as the version
+            // request: CHECK_BAUD + CONNECT precede BOTH stages (spd_dump).
+            var ver_buf: [64]u8 = undefined;
+            _ = try sess.checkBaudConnect(1, ver_buf[0..]);
+            ui.logger.info("SPD: bootrom {s}", .{ver_buf[0..@min(ver_buf.len, 64)]});
             ui.logger.info("SPD: uploading FDL1 ({d} bytes)…", .{fdl1.len});
             try sess.fdlUpload(fdl1, spd_fdl1_addr, spd_bsl.exec_timeout_ms);
             ui.logger.info("✓ FDL1 running — switching to the FDL2 checksum stage", .{});
             sess.setStage(false);
+            // FDL1's replacement re-syncs the same way, with 4 bare 0x7E
+            // bytes retried up to 10×.
+            _ = try sess.checkBaudConnect(4, ver_buf[0..]);
+            ui.logger.info("SPD: FDL1 {s}", .{ver_buf[0..@min(ver_buf.len, 64)]});
             ui.logger.info("SPD: uploading FDL2 ({d} bytes)…", .{fdl2.len});
             try sess.fdlUpload(fdl2, spd_fdl2_addr, spd_bsl.exec_timeout_ms);
             ui.logger.info("✓ FDL2 running — flash operations unlocked", .{});
