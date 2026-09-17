@@ -2588,7 +2588,7 @@ fn ramdumpRun(ctx: *RamdumpCtx) void {
         ui.alloc,
         ui.logger,
         &ui.cancel,
-        .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &ramdumpProgressCb },
+        .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &ramdumpProgressCb },
         ctx.target,
         8000,
         ctx.dir,
@@ -2803,7 +2803,7 @@ fn samsungRunInner(ctx: *SamsungJobCtx) !void {
                 ctx.length = try file.?.size();
             }
             try sess.setTotalBytes(ctx.length);
-            try sess.flashPartition(if (file) |*f| f else null, entry.*, ctx.length, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+            try sess.flashPartition(if (file) |*f| f else null, entry.*, ctx.length, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
             try sess.endSession();
         },
         .flash_pit => {
@@ -2903,7 +2903,7 @@ fn samsungRunInner(ctx: *SamsungJobCtx) !void {
                 }
 
                 try sess.setTotalBytes(raw_len);
-                try sess.flashPartition(&member_file.?, j.entry, raw_len, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                try sess.flashPartition(&member_file.?, j.entry, raw_len, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
                 done_jobs += 1;
             }
             try sess.endSession();
@@ -3075,7 +3075,7 @@ fn lgRunInner(ctx: *LgJobCtx) !void {
         .gpt => {
             // 34 sectors at LBA 0: protective MBR + GPT header + entry array.
             var buf: [34 * 512]u8 = undefined;
-            try sess.readAt(fd, 0, &buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+            try sess.readAt(fd, 0, &buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
             const header = gpt_mod.parseHeader(&buf, 512) catch |e| {
                 ui.logger.err("LG: no valid GPT on the eMMC: {s}", .{@errorName(e)});
                 return e;
@@ -3108,7 +3108,7 @@ fn lgRunInner(ctx: *LgJobCtx) !void {
             while (done < total) {
                 if (ui.cancel.load(.acquire)) return error.Cancelled;
                 const want: usize = @intCast(@min(total - done, lg_laf.chunk_max));
-                try sess.readAt(fd, ctx.row.first_lba + done / 512, buf[0..want], .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                try sess.readAt(fd, ctx.row.first_lba + done / 512, buf[0..want], .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
                 if ((try out.writeAll(buf[0..want])) != want) return error.Io;
                 done += want;
             }
@@ -3134,7 +3134,7 @@ fn lgRunInner(ctx: *LgJobCtx) !void {
                 if (ui.cancel.load(.acquire)) return error.Cancelled;
                 const want: usize = @intCast(@min(img_size - done, lg_laf.chunk_max));
                 if ((try img.readAll(buf[0..want])) != want) return error.Io;
-                try sess.writeAt(fd, ctx.row.first_lba + done / 512, buf[0..want], .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                try sess.writeAt(fd, ctx.row.first_lba + done / 512, buf[0..want], .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
                 done += want;
             }
             try sess.close(fd);
@@ -3263,7 +3263,7 @@ fn mtkProbeInner(ctx: *MtkProbeCtx) !void {
             const data = try fileio.readFileAlloc(ui.alloc, ctx.path.?, 64 * 1024 * 1024);
             defer ui.alloc.free(data);
             ui.logger.info("MTK: uploading DA ({d} bytes) to 0x{X:0>8}…", .{ data.len, ctx.addr });
-            try sess.sendDa(ctx.addr, data, 0, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+            try sess.sendDa(ctx.addr, data, 0, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
             try sess.jumpDa(ctx.addr);
         },
         .read, .write, .format => {
@@ -3281,7 +3281,7 @@ fn mtkProbeInner(ctx: *MtkProbeCtx) !void {
                 .read => {
                     const buf = try ui.alloc.alloc(u8, @intCast(ctx.flash_len));
                     defer ui.alloc.free(buf);
-                    try da_sess.readFlash(ctx.flash_addr, buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                    try da_sess.readFlash(ctx.flash_addr, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
                     var out = try fileio.File.create(ctx.path.?);
                     defer out.close();
                     if ((try out.writeAll(buf)) != buf.len) return error.Io;
@@ -3299,11 +3299,11 @@ fn mtkProbeInner(ctx: *MtkProbeCtx) !void {
                     const buf = try ui.alloc.alloc(u8, @intCast(img_size));
                     defer ui.alloc.free(buf);
                     if ((try img.readAll(buf)) != img_size) return error.Io;
-                    try da_sess.writeFlash(ctx.flash_addr, buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                    try da_sess.writeFlash(ctx.flash_addr, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
                     ui.logger.info("✓ wrote {d} bytes to 0x{X:0>8}", .{ img_size, ctx.flash_addr });
                 },
                 .format => {
-                    try da_sess.formatFlash(ctx.flash_addr, ctx.flash_len, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                    try da_sess.formatFlash(ctx.flash_addr, ctx.flash_len, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
                     ui.logger.info("✓ formatted {d} bytes at 0x{X:0>8}", .{ ctx.flash_len, ctx.flash_addr });
                 },
                 else => unreachable,
@@ -3542,7 +3542,7 @@ fn spdProbeInner(ctx: *SpdProbeCtx) !void {
             if (ctx.pname) |pname| {
                 const buf = try ui.alloc.alloc(u8, ctx.size);
                 defer ui.alloc.free(buf);
-                try sess.partitionRead(pname, buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                try sess.partitionRead(pname, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
                 var out = try fileio.File.create(ctx.path.?);
                 defer out.close();
                 if ((try out.writeAll(buf)) != buf.len) return error.Io;
@@ -3551,7 +3551,7 @@ fn spdProbeInner(ctx: *SpdProbeCtx) !void {
             } else {
                 const buf = try ui.alloc.alloc(u8, ctx.size);
                 defer ui.alloc.free(buf);
-                try sess.flashRead(ctx.addr, 0, ctx.size, buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                try sess.flashRead(ctx.addr, 0, ctx.size, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
                 var out = try fileio.File.create(ctx.path.?);
                 defer out.close();
                 if ((try out.writeAll(buf)) != buf.len) return error.Io;
@@ -3568,10 +3568,10 @@ fn spdProbeInner(ctx: *SpdProbeCtx) !void {
             defer ui.alloc.free(buf);
             if ((try img.readAll(buf)) != img_size) return error.Io;
             if (ctx.pname) |pname| {
-                try sess.partitionWrite(pname, buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                try sess.partitionWrite(pname, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
                 ui.logger.info("✓ wrote {d} bytes to partition \"{s}\"", .{ img_size, pname });
             } else {
-                try sess.flashWrite(ctx.addr, buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                try sess.flashWrite(ctx.addr, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
                 ui.logger.info("✓ wrote {d} bytes to 0x{X:0>8}", .{ img_size, ctx.addr });
             }
         },
