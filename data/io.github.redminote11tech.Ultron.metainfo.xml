@@ -33,6 +33,14 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.8.0" date="2026-09-15">
+      <description>
+        <p>Final flashing phases: MediaTek gains eMMC read/write/format
+        through the running legacy Download Agent, and Unisoc gains
+        partition-name-addressed read/write/erase over FDL2. The vendor
+        modules are now at full practical flash scope.</p>
+      </description>
+    </release>
     <release version="0.7.0" date="2026-09-15">
       <description>
         <p>Flashing phases for the new vendors: MediaTek BROM now uploads

@@ -49,7 +49,7 @@ const gpt_mod = @import("../protocol/qualcomm/gpt.zig");
 const style = @import("style.zig");
 
 pub const app_id = "io.github.redminote11tech.Ultron";
-pub const version = "0.7.0";
+pub const version = "0.8.0";
 
 const EventChannel = ev.Channel(ev.Event, 256);
 const storage_names: [6]?[*:0]const u8 = .{ "ufs", "emmc", "spinor", "nand", "nvme", null };
