@@ -2882,8 +2882,6 @@ fn samsungRunInner(ctx: *SamsungJobCtx) !void {
                 ui.logger.info("bundle: flashing {s} ({d}/{d})", .{ j.member.nameSlice(), done_jobs + 1, total_jobs });
                 try tar_file.seekTo(j.member.data_offset);
 
-                var member_file: ?fileio.File = null;
-                defer if (member_file != null) member_file.?.close();
                 var raw_len: u64 = j.member.size;
 
                 var probe: [4]u8 = undefined;
@@ -2891,21 +2889,25 @@ fn samsungRunInner(ctx: *SamsungJobCtx) !void {
                 try tar_file.seekTo(j.member.data_offset);
                 const is_sparse = sparse_mod.isSparse(&probe);
 
+                // Sparse members expand to a temp raw file; plain members
+                // stream straight from the shared tar handle (the Huawei
+                // flow's using_tmp pattern — only close what WE opened).
+                var using_tmp = false;
+                var member_file: fileio.File = tar_file;
+                defer if (using_tmp) member_file.close();
                 if (is_sparse) {
-                    // Android sparse member: expand to a raw temp file first.
                     var raw_path_buf: [300]u8 = undefined;
                     const raw_path = try tmp.filePath(&raw_path_buf, "member.raw");
                     tmp.track("member.raw") catch {};
                     const raw_size = try sparse_mod.convertToFile(ui.alloc, &tar_file, raw_path, ui.logger);
                     member_file = try fileio.File.open(raw_path);
+                    using_tmp = true;
                     raw_len = raw_size;
                     ui.logger.info("bundle: \"{s}\" sparse → raw ({d} bytes)", .{ j.member.nameSlice(), raw_size });
-                } else {
-                    member_file = tar_file;
                 }
 
                 try sess.setTotalBytes(raw_len);
-                try sess.flashPartition(&member_file.?, j.entry, raw_len, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
+                try sess.flashPartition(&member_file, j.entry, raw_len, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
                 done_jobs += 1;
             }
             try sess.endSession();
