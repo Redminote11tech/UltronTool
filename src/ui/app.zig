@@ -766,9 +766,9 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     _ = gtk.Button.signals.clicked.connect(samsung_bundle_btn, *Ui, &onSamsungPickBundle, ui, .{});
     gtk.Box.append(samsung_write_box, samsung_bundle_btn.as(gtk.Widget));
     const samsung_pitflash_btn = gtk.Button.newWithLabel("Flash PIT…");
-    gtk.Widget.addCssClass(samsung_pit_btn.as(gtk.Widget), "destructive-action");
+    gtk.Widget.addCssClass(samsung_pitflash_btn.as(gtk.Widget), "destructive-action");
     _ = gtk.Button.signals.clicked.connect(samsung_pitflash_btn, *Ui, &onSamsungPickPit, ui, .{});
-    gtk.Box.append(samsung_write_box, samsung_pit_btn.as(gtk.Widget));
+    gtk.Box.append(samsung_write_box, samsung_pitflash_btn.as(gtk.Widget));
     adw.ActionRow.addSuffix(samsung_write_row, samsung_write_box.as(gtk.Widget));
     adw.PreferencesGroup.add(samsung_group, samsung_write_row.as(gtk.Widget));
 
