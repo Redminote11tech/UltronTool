@@ -3,8 +3,8 @@
 //! A protocol module plugs in by exporting a `Protocol` value: it owns the
 //! USB match policy (how to recognize and open its devices) and the
 //! classification of a discovered USB device into a user-facing ModeTag.
-//! Future modules (mtk, samsung) are added to `registry` — nothing else in
-//! the app changes.
+//! The registry currently carries qualcomm, samsung, lg, mtk and spd;
+//! adding a module touches nothing outside protocol/.
 
 const core_event = @import("../core/event.zig");
 

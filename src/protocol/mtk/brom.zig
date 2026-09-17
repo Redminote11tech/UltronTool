@@ -1,6 +1,7 @@
 //! MediaTek BROM (boot ROM) serial protocol — port of bkerler/mtkclient
 //! (GPL-3.0): Port.py run_handshake/mtk_cmd + devicehandler line coding,
-//! and mtk_preloader.py's Cmd table / chip identification.
+//! mtk_preloader.py's Cmd table / chip identification, and the SEND_DA /
+//! JUMP_DA download-agent upload.
 //!
 //! Sync: the host sends the four bytes A0 0A 50 05 one at a time; the BROM
 //! echoes each byte bit-inverted (5F F5 AF FA). Commands are echoed too,
@@ -9,8 +10,8 @@
 //!
 //! Before the sync, mtkclient configures the CDC VCOM (921600 8N1) and
 //! raises RTS — ported through the transport's control-transfer hook.
-//! DA upload / flashing is the roadmap's next phase; this module covers
-//! the sync + identification scope.
+//! Legacy-DA flash operations live in daflash.zig; SLA/DAA authentication
+//! stays out of scope (device-key dependent).
 
 const std = @import("std");
 const transport = @import("../../transport/transport.zig");
@@ -22,7 +23,6 @@ const Error = transport.Error;
 pub const sync_cmd = [4]u8{ 0xA0, 0x0A, 0x50, 0x05 };
 pub const cmd_get_hw_code: u8 = 0xFD;
 pub const cmd_get_hw_sw_ver: u8 = 0xFC;
-pub const cmd_get_bl_ver: u8 = 0xFE;
 pub const cmd_send_da: u8 = 0xD7;
 pub const cmd_jump_da: u8 = 0xD5;
 /// mtkclient's upload pace: a ZLP every 0x2000 bytes, then a final one.

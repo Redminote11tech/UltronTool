@@ -3,14 +3,15 @@
 //! HDLC transcoding, the CRC16/sum checksums, and the bootrom handshake.
 //!
 //! Packets: raw frame = type u16 BE, length u16 BE, payload, checksum u16
-//! BE (bootrom: CRC-16/XMODEM poly 0x1021; FDL2: a folded byte sum).
+//! BE (bootrom: CRC-16/XMODEM poly 0x1021; FDL2: a folded byte sum — the
+//! swap is unconditional when VERIFYING, even-length-only when encoding).
 //! Frames are HDLC-encoded: 0x7E … payload with 0x7E→0x7D 0x5E and
 //! 0x7D→0x7D 0x5D stuffing … 0x7E. The bootrom stage speaks CRC16 and
 //! needs a CDC SET_CONTROL_LINE_STATE with wValue 0x601 first.
 //!
-//! This module covers the probe scope (CHECK_BAUD → version string,
-//! CONNECT → ACK). FDL1/FDL2 upload and flash operations are the
-//! roadmap's next Unisoc phase.
+//! Scope: CHECK_BAUD/CONNECT handshakes, FDL1/FDL2 upload, address-based
+//! and partition-name flash read/write/erase. PAC container parsing is
+//! the remaining roadmap item.
 
 const std = @import("std");
 const transport = @import("../../transport/transport.zig");
@@ -258,10 +259,6 @@ pub const Session = struct {
             return Error.Io;
         }
         return .{ .type = msg_type, .len = len };
-    }
-
-    fn readExact(self: *Session, buf: []u8) Error!void {
-        try self.readExactTimeout(buf, timeout_ms);
     }
 
     fn readExactTimeout(self: *Session, buf: []u8, timeout: u32) Error!void {

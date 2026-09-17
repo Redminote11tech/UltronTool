@@ -50,6 +50,8 @@ pub fn matchInterface(ifc: usb.InterfaceDesc) ?usb.EpPair {
 
 fn classify(input: proto_mod.ClassifyInput) proto_mod.ModeTag {
     if (input.vid != vendor_id) return .unknown;
+    // Note: preloader PIDs classify distinctly but share the BROM probe
+    // flow in the UI; DA upload works identically once synced.
     return switch (input.pid) {
         pid_brom => .mtk_brom,
         pid_preloader, pid_preloader_alt => .mtk_preloader,

@@ -2,7 +2,8 @@
 //!
 //! One worker thread owns the USB transport for as long as a Firehose session
 //! lives. The UI posts requests (connect, upload loader, list partitions,
-//! read/write partition, flash XML, reset, disconnect) into a queue; the
+//! read/write/erase partition, UFS provisioning, Huawei UPDATE.APP, flash
+//! XML, reset, disconnect) into a queue; the
 //! thread executes them sequentially over the open transport and reports
 //! through the event channel. Device state machine:
 //!

@@ -13,12 +13,12 @@ set -eu
 cd "$(dirname "$0")/.."
 
 PKGNAME=ultron
-PKGVER=0.4.0
+PKGVER=$(grep -o 'version = "[0-9.]*"' src/ui/app.zig | head -1 | grep -o "[0-9.]*")
 PKGREL=1
 ARCH=$(uname -m)
 STAGE="${STAGE:-$(mktemp -d)}"
 
-echo "==> Building (ReleaseFast) into $STAGE"
+echo "==> Building (ReleaseSafe) into $STAGE"
 ZIG_GLOBAL_CACHE_DIR="${ZIG_GLOBAL_CACHE_DIR:-$STAGE/zig-cache}" \
   zig build --prefix "$STAGE/usr" -Doptimize=ReleaseSafe
 

@@ -17,6 +17,8 @@ const log = @import("../../core/log.zig");
 const Io = transport.Io;
 const Error = transport.Error;
 
+/// Full Rsp table from dalegacy_param.py (only ack/cont are exchanged by
+/// the ported commands; the rest are kept for reference completeness).
 pub const Rsp = struct {
     pub const soc_ok: u8 = 0xc1;
     pub const soc_fail: u8 = 0xcf;

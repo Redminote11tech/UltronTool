@@ -241,9 +241,6 @@ Cross-vendor plans live in `docs/ROADMAP.md`.
 | 04e8:685d / 6601 / 68c3 | Samsung download mode | samsung/odin |
 | 1004:633e | LG download mode (LAF) | lg/laf |
 | 1782:4d00 | Unisoc bootrom (BSL) | spd |
-| Unisoc download mode | BootROM/BSL + FDL1/FDL2 stages | unisoc (planned — IDs to confirm from references) |
-| LG download mode | LAF daemon | lg/laf (planned — IDs to confirm from references) |
-
 ## 8. Huawei UPDATE.APP (firmware container)
 
 Reference: the classic `splitupdate`/`split_updata.pl` community tools and
@@ -278,17 +275,8 @@ tables are not verified — device-side SHA-256 verification covers the flash.
 
 ## 9. Planned protocol modules
 
-Priority order and per-module references live in `docs/ROADMAP.md` (owner-set). Summary:
-
-| # | Module | Direction | Primary reference |
-|---|---|---|---|
-| 1 | Samsung — Odin/Thor | download-mode flashing, PIT | `Samsung-Loki/Thor`, cross-checked with `Llucs/odin4` and Samsung's Odin4; Heimdall docs only, no code ported |
-| 2 | MediaTek — BROM/DA | BROM sync, DA upload, flash ops | `bkerler/mtkclient` |
-| 3 | Unisoc — FDL1/FDL2 | BSL session, FDL chain, flash ops | `ilyakurdyukov/spreadtrum_flash` + active fork `TomKing062/spreadtrum_flash` |
-| 4 | LG — LAF | download-mode partition ops | `Lekensteyn/lglaf` (protocol.md + dissector) |
-
-All Qualcomm-specific sections above (§1–§8) describe the shipped module and are
-unaffected by these plans.
+All four modules from this list have landed — see §10–§13. PAC parsing
+(Unisoc) and SLA/DAA auth (MediaTek) remain future work.
 
 ## 10. Samsung Odin (Thor protocol) — `protocol/samsung/`
 
