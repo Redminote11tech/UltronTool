@@ -72,8 +72,19 @@ pub fn crc16_xmodem(data: []const u8) u16 {
 }
 
 /// FDL2 checksum (spd_checksum with CHK_FIXZERO): 16-bit word sum, folded
-/// and inverted, byte-swapped for odd lengths.
+/// and inverted, byte-swapped for even lengths. Used when ENCODING.
 pub fn byteSum(data_in: []const u8) u16 {
+    return byteSumFinal(data_in, 1);
+}
+
+/// Receive-side variant: spd_dump verifies with CHK_ORIG (final=2), where
+/// `len < final` holds for BOTH even (0) and odd (1) remainders — the
+/// swap is unconditional after fold+invert.
+pub fn byteSumVerify(data_in: []const u8) u16 {
+    return byteSumFinal(data_in, 2);
+}
+
+fn byteSumFinal(data_in: []const u8, final: u32) u16 {
     var crc: u32 = 0;
     var data = data_in;
     var len = data.len;
@@ -86,9 +97,9 @@ pub fn byteSum(data_in: []const u8) u16 {
     crc = (crc >> 16) + (crc & 0xffff);
     crc += crc >> 16;
     const inv = ~crc & 0xffff;
-    // C's `if (len < final)`: even totals (remaining 0) are byte-swapped,
-    // odd totals (remaining 1) are not.
-    if (len < 1) return @intCast((inv >> 8) | ((inv & 0xff) << 8));
+    // C's `if (len < final)`: with CHK_FIXZERO (final=1) only even totals
+    // (remaining 0) swap; with CHK_ORIG (final=2) the swap is unconditional.
+    if (len < final) return @intCast((inv >> 8) | ((inv & 0xff) << 8));
     return @intCast(inv);
 }
 
@@ -139,7 +150,9 @@ pub const Session = struct {
     }
 
     pub fn encodeMsg(self: *Session, msg_type: u16, data: []const u8) Error!void {
-        if (data.len > 0xffff) return Error.Io;
+        // The frame must fit raw_frame_max (4 header bytes + payload + 2
+        // checksum bytes), not just the u16 length field.
+        if (data.len > raw_frame_max - 6) return Error.Io;
         if (msg_type == BSL_CMD_CHECK_BAUD) {
             // The baud check is sent as bare 0x7E bytes (len of them).
             if (data.len > self.enc.len) return Error.Io;
@@ -219,7 +232,7 @@ pub const Session = struct {
         const len = std.mem.readInt(u16, self.raw[2..4], .big);
         if (4 + @as(usize, len) + 2 > n) return Error.Io;
         const stored = std.mem.readInt(u16, self.raw[4 + len ..][0..2], .big);
-        const expected = if (self.use_crc16) crc16_xmodem(self.raw[0 .. 4 + len]) else byteSum(self.raw[0 .. 4 + len]);
+        const expected = if (self.use_crc16) crc16_xmodem(self.raw[0 .. 4 + len]) else byteSumVerify(self.raw[0 .. 4 + len]);
         if (stored != expected) {
             self.logger.err("SPD: frame checksum mismatch (type 0x{X:0>4})", .{msg_type});
             return Error.Io;
@@ -344,8 +357,9 @@ pub const Session = struct {
         defer self.recv_timeout_ms = timeout_ms;
         r = try self.recv();
         // Feature phones ACK; some FDL2 builds answer INCOMPATIBLE_PARTITION
-        // which spd_dump tolerates.
-        if (r.type != BSL_REP_ACK and r.type != 0x8d) {
+        // (0x96) which spd_dump tolerates. 0x8D is NOT_ENOUGH_MEMORY — a
+        // real failure.
+        if (r.type != BSL_REP_ACK and r.type != 0x96) {
             self.logger.err("SPD: EXEC_DATA answered 0x{X:0>4}", .{r.type});
             return Error.Io;
         }
@@ -608,7 +622,7 @@ test "fdl upload and flash ops against scripted frames" {
     var ack_raw: [6]u8 = undefined;
     std.mem.writeInt(u16, ack_raw[0..2], BSL_REP_ACK, .big);
     std.mem.writeInt(u16, ack_raw[2..4], 0, .big);
-    std.mem.writeInt(u16, ack_raw[4..6], byteSum(ack_raw[0..4][0..]), .big);
+    std.mem.writeInt(u16, ack_raw[4..6], byteSumVerify(ack_raw[0..4][0..]), .big);
     var ack_frame: [8]u8 = undefined;
     ack_frame[0] = 0x7e;
     @memcpy(ack_frame[1..7], &ack_raw);
@@ -647,7 +661,7 @@ test "fdl upload and flash ops against scripted frames" {
     std.mem.writeInt(u16, data_raw[0..2], BSL_REP_READ_FLASH, .big);
     std.mem.writeInt(u16, data_raw[2..4], @intCast(payload.len), .big);
     @memcpy(data_raw[4 .. 4 + payload.len], payload);
-    std.mem.writeInt(u16, data_raw[4 + payload.len ..][0..2], byteSum(data_raw[0 .. 4 + payload.len][0..]), .big);
+    std.mem.writeInt(u16, data_raw[4 + payload.len ..][0..2], byteSumVerify(data_raw[0 .. 4 + payload.len][0..]), .big);
     var data_frame: [2 + data_raw.len]u8 = undefined;
     data_frame[0] = 0x7e;
     @memcpy(data_frame[1 .. 1 + data_raw.len], &data_raw);
@@ -689,7 +703,7 @@ test "partition read and erase by name against scripted frames" {
     var ack_raw: [6]u8 = undefined;
     std.mem.writeInt(u16, ack_raw[0..2], BSL_REP_ACK, .big);
     std.mem.writeInt(u16, ack_raw[2..4], 0, .big);
-    std.mem.writeInt(u16, ack_raw[4..6], byteSum(ack_raw[0..4][0..]), .big);
+    std.mem.writeInt(u16, ack_raw[4..6], byteSumVerify(ack_raw[0..4][0..]), .big);
     ack_frame[0] = 0x7e;
     @memcpy(ack_frame[1..7], &ack_raw);
     ack_frame[7] = 0x7e;
@@ -713,7 +727,7 @@ test "partition read and erase by name against scripted frames" {
     std.mem.writeInt(u16, data_raw[0..2], BSL_REP_READ_FLASH, .big);
     std.mem.writeInt(u16, data_raw[2..4], @intCast(payload.len), .big);
     @memcpy(data_raw[4 .. 4 + payload.len], payload);
-    std.mem.writeInt(u16, data_raw[4 + payload.len ..][0..2], byteSum(data_raw[0 .. 4 + payload.len][0..]), .big);
+    std.mem.writeInt(u16, data_raw[4 + payload.len ..][0..2], byteSumVerify(data_raw[0 .. 4 + payload.len][0..]), .big);
     var data_frame: [2 + data_raw.len]u8 = undefined;
     data_frame[0] = 0x7e;
     @memcpy(data_frame[1 .. 1 + data_raw.len], &data_raw);
