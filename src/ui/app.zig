@@ -2083,8 +2083,10 @@ fn onDigestGenerate(_: *gtk.Button, ui: *Ui) callconv(.c) void {
         ui.toast("Failed to start worker thread");
         return;
     };
-    thread.detach();
-    if (ui.digest_thread) |old| old.join(); // previous run's tail (frees only)
+    // busy() gated the spawn, so any stored handle is a finished previous
+    // run — joining it is instant (detached handles cannot be joined again;
+    // pthread_join of a dead id panics in ReleaseSafe).
+    if (ui.digest_thread) |old| old.join();
     ui.digest_thread = thread;
 }
 
