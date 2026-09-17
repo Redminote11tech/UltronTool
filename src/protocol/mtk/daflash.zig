@@ -36,8 +36,12 @@ pub const CMD_SDMMC_WRITE_DATA: u8 = 0x62;
 
 /// EMMC_PART_USER (mtkclient's default partition target).
 pub const EMMC_PART_USER: u8 = 0x08;
-/// Storage type byte for eMMC in READ/WRITE/FORMAT packets.
+/// Storage type byte for READ/FORMAT packets (the reference hardcodes
+/// 0x02 there). SDMMC_WRITE_DATA takes DaStorage values instead, where
+/// eMMC is 0x01 — see WRITE_DATA below.
 pub const STORAGE_EMMC: u8 = 0x02;
+/// DaStorage.MTK_DA_STORAGE_EMMC — byte 1 of the SDMMC_WRITE_DATA header.
+pub const DASTORAGE_EMMC: u8 = 0x01;
 /// READ_CMD packet size (1 MiB, as the reference).
 pub const read_packet_size: u32 = 0x100000;
 /// Host identity byte for READ_CMD (0x0C = Linux).
@@ -161,7 +165,7 @@ pub const Session = struct {
         const length: u64 = (data.len + 511) / 512 * 512;
         var pkt: [1 + 1 + 1 + 8 + 8 + 4]u8 = undefined;
         pkt[0] = CMD_SDMMC_WRITE_DATA;
-        pkt[1] = STORAGE_EMMC;
+        pkt[1] = DASTORAGE_EMMC; // DaStorage value, not the 0x02 hardcode
         pkt[2] = EMMC_PART_USER;
         std.mem.writeInt(u64, pkt[3..11], addr, .big);
         std.mem.writeInt(u64, pkt[11..19], length, .big);
