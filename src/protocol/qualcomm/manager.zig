@@ -127,6 +127,7 @@ const QueueItem = struct {
 
     fn dupe(item: *QueueItem, s: []const u8) ![]const u8 {
         const d = try heap.dupe(u8, s);
+        errdefer heap.free(d);
         try item.strings.append(heap, d);
         return d;
     }
@@ -211,6 +212,7 @@ pub const Manager = struct {
         dupeRequest(&item) catch {
             item.deinit();
             self.logger.err("manager: out of memory queuing request", .{});
+            pushFinished(self.channel, false, "OutOfMemory");
             return;
         };
         self.mutex.lock();
@@ -218,6 +220,7 @@ pub const Manager = struct {
         self.pending.append(self.alloc, item) catch {
             item.deinit();
             self.logger.err("manager: failed to queue request", .{});
+            pushFinished(self.channel, false, "OutOfMemory");
         };
     }
 
@@ -325,10 +328,11 @@ pub const Manager = struct {
                     fh.reset() catch |e| {
                         self.logger.warn("reset request failed: {s}", .{@errorName(e)});
                     };
+                    self.teardown();
+                    self.emitState(.disconnected);
+                    pushFinished(self.channel, true, "device reset");
                 }
-                self.teardown();
-                self.emitState(.disconnected);
-                pushFinished(self.channel, true, "device reset");
+                // requireSession already finished the job when absent.
             },
             .disconnect => {
                 self.teardown();
@@ -564,6 +568,7 @@ pub const Manager = struct {
         self.io = self.makeIo(t) orelse {
             self.t = null;
             t.close();
+            t.destroy();
             self.emitState(.disconnected);
             return false;
         };
@@ -1280,6 +1285,11 @@ pub const Manager = struct {
                 using_tmp = true;
             }
 
+            if (needed > std.math.maxInt(u32)) {
+                self.logger.err("{s}: partition too large ({d} sectors)", .{ m.label, needed });
+                skipped += 1;
+                continue;
+            }
             var op = rawprogram.Program{
                 .sector_size = sector_size,
                 .num_sectors = @intCast(needed),
@@ -1341,10 +1351,16 @@ pub const Manager = struct {
 
         var op_list = std.ArrayList(ExecOp).empty;
         defer op_list.deinit(self.alloc);
-        for (ops) |op| op_list.append(self.alloc, .{ .op = op }) catch return;
+        for (ops) |op| op_list.append(self.alloc, .{ .op = op }) catch {
+            pushFinished(self.channel, false, "OutOfMemory");
+            return;
+        };
         if (findBootablePartition(ops)) |part| {
             self.logger.info("adding set-bootable for partition {d}", .{part});
-            op_list.append(self.alloc, .{ .set_bootable = part }) catch return;
+            op_list.append(self.alloc, .{ .set_bootable = part }) catch {
+                pushFinished(self.channel, false, "OutOfMemory");
+                return;
+            };
         }
 
         var ectx = ExecCtx{ .channel = self.channel, .op_total = op_list.items.len };

@@ -494,7 +494,9 @@ pub const Session = struct {
             if (n >= 8) {
                 const cmd = std.mem.readInt(u32, buf[0..4], .little);
                 const length = std.mem.readInt(u32, buf[4..8], .little);
-                if (cmd == HELLO and @as(u32, @intCast(n)) == length) {
+                // HandleHello requires the full 0x30-byte packet; anything
+                // shorter would read uninitialized buffer bytes below.
+                if (cmd == HELLO and @as(u32, @intCast(n)) == length and length >= 0x30) {
                     hello = std.mem.readInt(u32, buf[20..24], .little);
                     self.protocol_version = std.mem.readInt(u32, buf[8..12], .little);
                     break;

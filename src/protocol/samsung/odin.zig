@@ -233,9 +233,10 @@ pub const Session = struct {
         const v = Version{
             .unknown1 = @truncate(r.ack & 0xFF),
             .unknown2 = @truncate((r.ack >> 8) & 0xFF),
-            // Bit 15 of the upper half is the compressed-download capability
-            // flag (odin4), not a version bit.
-            .protocol = @truncate((r.ack >> 16) & 0x7FFF),
+            // odin4 reads the full upper half as an i16 version; the
+            // compressed-download capability is bit 15 of the LOW half
+            // (it lands inside unknown2 here, preserved in that field).
+            .protocol = @truncate(r.ack >> 16),
         };
         self.protocol_version = v.protocol;
         self.logger.info("Odin: session open, bootloader protocol v{d}", .{v.protocol});
