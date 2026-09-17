@@ -219,8 +219,10 @@ pub const Ui = struct {
     mtk_da_path: ?[]u8 = null,
     mtk_da_addr_entry: ?*gtk.Entry = null,
     mtk_da_ready: bool = false,
-    /// Chooser routing marker for MTK write-vs-read picks (single dialog).
+    /// Chooser routing markers for write-vs-read picks (single dialog at
+    /// a time). Cleared unconditionally when a chooser answers.
     mtk_write_pick: bool = false,
+    spd_write_pick: bool = false,
     mtk_flash_addr_entry: ?*gtk.Entry = null,
     mtk_flash_size_entry: ?*gtk.Entry = null,
     mtk_stage_path: ?[]u8 = null,
@@ -1508,6 +1510,10 @@ fn openChooserFull(ui: *Ui, kind: ChooserKind, title: [:0]const u8, save: bool, 
 fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *Ui) callconv(.c) void {
     const kind = ui.chooser orelse return;
     ui.chooser = null;
+    // Pick-routing markers must never outlive the dialog: a cancelled
+    // write pick must not hijack the next read pick (the audit's M2).
+    ui.mtk_write_pick = false;
+    ui.spd_write_pick = false;
     if (response_id != @intFromEnum(gtk.ResponseType.accept)) return;
     const file = gtk.FileChooser.getFile(chooser.as(gtk.FileChooser)) orelse {
         ui.logger.err("file chooser returned no file", .{});
@@ -1515,10 +1521,12 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
         return;
     };
     defer file.unref();
-    // Portal-backed choosers may return URI-backed files without a native
-    // path; fall back to the URI (file:// only).
+    // Resolve the path and copy it into our allocator immediately: both
+    // g_file_get_path and the URI string are g_malloc-owned and the URI
+    // fallback below would otherwise dangle past its glib.free.
     var path: []const u8 = undefined;
     if (gio.File.getPath(file)) |p| {
+        defer glib.free(p);
         path = std.mem.span(p);
     } else {
         const uri_c = gio.File.getUri(file);
@@ -1532,6 +1540,12 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
             return;
         }
     }
+    const path_copy = ui.alloc.dupe(u8, path) catch {
+        ui.toast("Out of memory");
+        return;
+    };
+    defer ui.alloc.free(path_copy);
+    path = path_copy;
 
     switch (kind) {
         .loader => {
@@ -1633,9 +1647,7 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
             setSubtitleZ(ui.mtk_da_row.?, path);
         },
         .mtk_read => {
-            // The staging state distinguishes read (mtk_stage_path == null)
-            // from write (path staged by… actually both come here; decide
-            // by the "write" marker set in onMtkFlashWrite via stage path).
+            // onMtkFlashWrite sets mtk_write_pick; a read pick has it clear.
             if (ui.mtk_write_pick) {
                 ui.mtk_write_pick = false;
                 const dup = ui.alloc.dupe(u8, path) catch return;
@@ -1665,13 +1677,9 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
             setSubtitleZ(ui.spd_fdl2_row.?, path);
         },
         .spd_write => {
-            // Read is non-destructive: straight to the job. Write/erase
-            // arrive here staged (addr/size already parsed) — confirm first.
-            const op_kind: SpdJobKind = if (ui.spd_stage_path != null) .write else .read;
-            if (op_kind == .write) {
-                // onSpdFlashWrite staged addr/size and remembered the op by
-                // a null path; mark write mode by staging a marker path.
-                // The image path arrives here — store it for the confirm.
+            // onSpdFlashWrite sets spd_write_pick; a read pick has it clear.
+            if (ui.spd_write_pick) {
+                ui.spd_write_pick = false;
                 const dup = ui.alloc.dupe(u8, path) catch return;
                 if (ui.spd_stage_path) |old| ui.alloc.free(old);
                 ui.spd_stage_path = dup;
@@ -3606,7 +3614,7 @@ fn onSpdFlashRead(_: *gtk.Button, ui: *Ui) callconv(.c) void {
 
 fn onSpdFlashWrite(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     if (!spdStageRange(ui, .write)) return;
-    // Mark write mode: the staged path stays null until the chooser returns.
+    ui.spd_write_pick = true;
     openChooser(ui, .spd_write, "Select image to write", false, null);
 }
 
