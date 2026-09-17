@@ -222,6 +222,7 @@ pub const Ui = struct {
     spd_fdl2_row: ?*adw.ActionRow = null,
     spd_addr_entry: ?*gtk.Entry = null,
     spd_size_entry: ?*gtk.Entry = null,
+    spd_name_entry: ?*gtk.Entry = null,
     spd_flash_read_btn: ?*gtk.Button = null,
     spd_flash_write_btn: ?*gtk.Button = null,
     spd_flash_erase_btn: ?*gtk.Button = null,
@@ -231,6 +232,7 @@ pub const Ui = struct {
     /// Staged flash op: address and size (hex text from the entries).
     spd_stage_addr: u32 = 0,
     spd_stage_size: u32 = 0,
+    spd_stage_name: ?[]u8 = null,
     /// Image path staged for a Samsung partition flash (consumed by the
     /// confirm dialog on both paths, like the Huawei mapping list).
     samsung_flash_path: ?[]u8 = null,
@@ -905,6 +907,16 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     adw.ActionRow.addSuffix(spd_addr_row, spd_addr_entry.as(gtk.Widget));
     adw.PreferencesGroup.add(spd_flash_group, spd_addr_row.as(gtk.Widget));
     ui.spd_addr_entry = spd_addr_entry;
+
+    const spd_name_row = adw.ActionRow.new();
+    rowTitle(spd_name_row, "Partition name (optional)");
+    adw.ActionRow.setSubtitle(spd_name_row, "FDL2 name-addressed ops override the address above");
+    const spd_name_entry = gtk.Entry.new();
+    gtk.Entry.setPlaceholderText(spd_name_entry, "wfixnv1");
+    gtk.Widget.setHexpand(spd_name_entry.as(gtk.Widget), 1);
+    adw.ActionRow.addSuffix(spd_name_row, spd_name_entry.as(gtk.Widget));
+    adw.PreferencesGroup.add(spd_flash_group, spd_name_row.as(gtk.Widget));
+    ui.spd_name_entry = spd_name_entry;
 
     const spd_size_row = adw.ActionRow.new();
     rowTitle(spd_size_row, "Size in bytes (dec)");
@@ -1589,7 +1601,8 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
                 return;
             }
             const ctx = ui.alloc.create(SpdProbeCtx) catch return;
-            ctx.* = .{ .ui = ui, .kind = .read, .addr = ui.spd_stage_addr, .size = ui.spd_stage_size };
+            ctx.* = .{ .ui = ui, .kind = .read, .addr = ui.spd_stage_addr, .size = ui.spd_stage_size, .pname = ui.spd_stage_name };
+            ui.spd_stage_name = null; // ownership moves to the ctx
             ctx.path = ui.alloc.dupe(u8, path) catch {
                 ctx.free();
                 return;
@@ -2351,7 +2364,8 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
                 if (staged) |p| ui.alloc.free(p);
                 return;
             };
-            job.* = .{ .ui = ui, .kind = job_kind, .addr = ui.spd_stage_addr, .size = ui.spd_stage_size, .path = staged };
+            job.* = .{ .ui = ui, .kind = job_kind, .addr = ui.spd_stage_addr, .size = ui.spd_stage_size, .path = staged, .pname = ui.spd_stage_name };
+            ui.spd_stage_name = null; // ownership moves to the job
             spdStageTarget(ui, job) catch {
                 job.free();
                 return;
@@ -3240,12 +3254,15 @@ const SpdProbeCtx = struct {
     path2: ?[]u8 = null,
     addr: u32 = 0,
     size: u32 = 0,
+    /// Partition name for name-addressed ops (owned, null = address mode).
+    pname: ?[]u8 = null,
 
     fn free(self: *SpdProbeCtx) void {
         const alloc = self.ui.alloc;
         if (self.target_serial_buf) |b| alloc.free(b);
         if (self.path) |p| alloc.free(p);
         if (self.path2) |p| alloc.free(p);
+        if (self.pname) |p| alloc.free(p);
         alloc.destroy(self);
     }
 };
@@ -3308,14 +3325,25 @@ fn spdProbeInner(ctx: *SpdProbeCtx) !void {
             ui.channel.push(.{ .session_state = .spd_ready });
         },
         .read => {
-            const buf = try ui.alloc.alloc(u8, ctx.size);
-            defer ui.alloc.free(buf);
-            try sess.flashRead(ctx.addr, 0, ctx.size, buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
-            var out = try fileio.File.create(ctx.path.?);
-            defer out.close();
-            if ((try out.writeAll(buf)) != buf.len) return error.Io;
-            try out.flush();
-            ui.logger.info("✓ read {d} bytes from 0x{X:0>8}", .{ ctx.size, ctx.addr });
+            if (ctx.pname) |pname| {
+                const buf = try ui.alloc.alloc(u8, ctx.size);
+                defer ui.alloc.free(buf);
+                try sess.partitionRead(pname, buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                var out = try fileio.File.create(ctx.path.?);
+                defer out.close();
+                if ((try out.writeAll(buf)) != buf.len) return error.Io;
+                try out.flush();
+                ui.logger.info("✓ read partition \"{s}\" ({d} bytes)", .{ pname, ctx.size });
+            } else {
+                const buf = try ui.alloc.alloc(u8, ctx.size);
+                defer ui.alloc.free(buf);
+                try sess.flashRead(ctx.addr, 0, ctx.size, buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                var out = try fileio.File.create(ctx.path.?);
+                defer out.close();
+                if ((try out.writeAll(buf)) != buf.len) return error.Io;
+                try out.flush();
+                ui.logger.info("✓ read {d} bytes from 0x{X:0>8}", .{ ctx.size, ctx.addr });
+            }
         },
         .write => {
             var img = try fileio.File.open(ctx.path.?);
@@ -3325,12 +3353,22 @@ fn spdProbeInner(ctx: *SpdProbeCtx) !void {
             const buf = try ui.alloc.alloc(u8, @intCast(img_size));
             defer ui.alloc.free(buf);
             if ((try img.readAll(buf)) != img_size) return error.Io;
-            try sess.flashWrite(ctx.addr, buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
-            ui.logger.info("✓ wrote {d} bytes to 0x{X:0>8}", .{ img_size, ctx.addr });
+            if (ctx.pname) |pname| {
+                try sess.partitionWrite(pname, buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                ui.logger.info("✓ wrote {d} bytes to partition \"{s}\"", .{ img_size, pname });
+            } else {
+                try sess.flashWrite(ctx.addr, buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                ui.logger.info("✓ wrote {d} bytes to 0x{X:0>8}", .{ img_size, ctx.addr });
+            }
         },
         .erase => {
-            try sess.flashErase(ctx.addr, ctx.size);
-            ui.logger.info("✓ erased {d} bytes at 0x{X:0>8}", .{ ctx.size, ctx.addr });
+            if (ctx.pname) |pname| {
+                try sess.partitionErase(pname);
+                ui.logger.info("✓ erase issued for partition \"{s}\"", .{pname});
+            } else {
+                try sess.flashErase(ctx.addr, ctx.size);
+                ui.logger.info("✓ erased {d} bytes at 0x{X:0>8}", .{ ctx.size, ctx.addr });
+            }
         },
     }
 }
@@ -3387,6 +3425,12 @@ fn spdStageRange(ui: *Ui, kind: SpdJobKind) bool {
     if (kind != .write and ui.spd_stage_size == 0) {
         ui.toast("Size must be greater than zero");
         return false;
+    }
+    // A non-empty partition name switches to FDL2 name-addressed ops.
+    ui.spd_stage_name = null;
+    if (ui.spd_name_entry) |e| {
+        const raw = std.mem.trim(u8, std.mem.span(gtk.Editable.getText(@ptrCast(e))), " ");
+        if (raw.len > 0) ui.spd_stage_name = ui.alloc.dupe(u8, raw) catch null;
     }
     return true;
 }
