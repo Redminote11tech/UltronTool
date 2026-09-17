@@ -3067,10 +3067,10 @@ fn lgRunInner(ctx: *LgJobCtx) !void {
     var sess: lg_laf.Session = undefined;
     var sess_open = false;
     errdefer if (sess_open) sess.deinit();
-    const fd = blk: {
-        defer sess_open = true;
-        break :blk try lgOpenDisk(ctx, &sess);
-    };
+    // lgOpenDisk assigns sess BEFORE any error return; sess_open must flip
+    // only on success or the errdefer deinits an undefined session.
+    const fd = try lgOpenDisk(ctx, &sess);
+    sess_open = true;
     defer sess.deinit();
 
     switch (ctx.kind) {
