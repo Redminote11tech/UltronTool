@@ -34,6 +34,8 @@ pub const BSL_CMD_READ_FLASH: u16 = 0x06;
 pub const BSL_REP_READ_FLASH: u16 = 0x07;
 pub const BSL_CMD_ERASE_FLASH: u16 = 0x0a;
 pub const BSL_CMD_READ_START: u16 = 0x10;
+pub const BSL_CMD_READ_MIDST: u16 = 0x11;
+pub const BSL_CMD_READ_END: u16 = 0x12;
 pub const BSL_REP_ACK: u16 = 0x80;
 pub const BSL_REP_VER: u16 = 0x81;
 
@@ -278,14 +280,17 @@ pub const Session = struct {
         self.use_crc16 = bootrom;
     }
 
-    /// UTF-16LE partition selection packet (select_partition): name padded
-    /// to 36 u16, then size (LE u32, plus high word for 64-bit mode).
-    fn partitionPkt(self: *Session, name: []const u8, size: u64, cmd: u16) Error!void {
+    /// UTF-16LE partition selection packet (spd_dump select_partition):
+    /// name padded to 36 u16, then size (LE u32, plus high word for 64-bit
+    /// mode). Selects a virtual partition for the next READ_*/DATA/ERASE
+    /// command and waits for its ACK.
+    /// Encode only — the selection packet for `cmd` (no I/O).
+    pub fn encodePartitionSelect(self: *Session, name: []const u8, size: u64, cmd: u16) Error!void {
         var pkt = std.mem.zeroes([36 * 2 + 4 + 4 + 8]u8);
         const u16len = @min(name.len, 36);
         var i: usize = 0;
         while (i < u16len) : (i += 1) {
-            const cp = std.unicode.utf8Decode(name[i .. i + 1]) catch name[i];
+            const cp: u16 = @intCast(std.unicode.utf8Decode(name[i .. i + 1]) catch @as(u21, name[i]));
             var tmp: [2]u8 = undefined;
             std.mem.writeInt(u16, &tmp, cp, .little);
             @memcpy(pkt[i * 2 ..][0..2], &tmp);
@@ -294,6 +299,10 @@ pub const Session = struct {
         std.mem.writeInt(u32, pkt[76..80], @intCast(size >> 32), .little);
         const pkt_len: usize = if (size >> 32 != 0) 80 else 76;
         try self.encodeMsg(cmd, pkt[0..pkt_len]);
+    }
+
+    pub fn selectPartition(self: *Session, name: []const u8, size: u64, cmd: u16) Error!void {
+        try self.encodePartitionSelect(name, size, cmd);
         try self.send();
         const r = try self.recv();
         if (r.type != BSL_REP_ACK) {
@@ -417,6 +426,87 @@ pub const Session = struct {
             self.logger.err("SPD: ERASE_FLASH answered 0x{X:0>4}", .{r.type});
             return Error.Io;
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Virtual-partition (name-addressed) operations — FDL2 only
+    // ------------------------------------------------------------------
+
+    /// Read a partition by name (spd_dump dump_partition): READ_START
+    /// selects it, READ_MIDST chunks carry (LE length, LE offset lo,
+    /// LE offset hi) and return BSL_REP_READ_FLASH payloads, READ_END
+    /// closes the read session.
+    pub fn partitionRead(self: *Session, name: []const u8, out: []u8, progress: ProgressHook) Error!void {
+        try self.selectPartition(name, out.len, BSL_CMD_READ_START);
+        var off: u64 = 0;
+        while (off < out.len) {
+            if (self.cancelled()) return Error.Cancelled;
+            const n: u64 = @min(out.len - off, read_step);
+            var data: [12]u8 = undefined;
+            std.mem.writeInt(u32, data[0..4], @intCast(n), .little);
+            std.mem.writeInt(u32, data[4..8], @truncate(off), .little);
+            std.mem.writeInt(u32, data[8..12], @intCast(off >> 32), .little);
+            try self.encodeMsg(BSL_CMD_READ_MIDST, data[0..]);
+            try self.send();
+            const r = try self.recv();
+            if (r.type != BSL_REP_READ_FLASH) {
+                self.logger.err("SPD: READ_MIDST answered 0x{X:0>4}", .{r.type});
+                return Error.Io;
+            }
+            const nread = self.lastPayloadLen();
+            if (nread > n) return Error.Io;
+            @memcpy(out[@intCast(off)..@intCast(off + nread)], self.raw[4 .. 4 + nread]);
+            off += nread;
+            if (nread != n) break;
+            progress.report("reading", off, out.len);
+        }
+        try self.encodeMsg(BSL_CMD_READ_END, &.{});
+        try self.send();
+        const r = try self.recv();
+        if (r.type != BSL_REP_ACK) {
+            self.logger.err("SPD: READ_END answered 0x{X:0>4}", .{r.type});
+            return Error.Io;
+        }
+    }
+
+    /// Write a partition by name (spd_dump load_partition): START_DATA
+    /// selects it with the total size, MIDST_DATA streams 528-byte chunks
+    /// (15 s per-chunk timeout — smartphones are slow here), END_DATA
+    /// commits.
+    pub fn partitionWrite(self: *Session, name: []const u8, data: []const u8, progress: ProgressHook) Error!void {
+        try self.selectPartition(name, data.len, BSL_CMD_START_DATA);
+        var off: usize = 0;
+        while (off < data.len) {
+            if (self.cancelled()) return Error.Cancelled;
+            const n = @min(data.len - off, write_step);
+            try self.encodeMsg(BSL_CMD_MIDST_DATA, data[off .. off + n]);
+            try self.send();
+            self.recv_timeout_ms = exec_timeout_ms;
+            const r = self.recv() catch |e| {
+                self.recv_timeout_ms = timeout_ms;
+                return e;
+            };
+            self.recv_timeout_ms = timeout_ms;
+            if (r.type != BSL_REP_ACK) {
+                self.logger.err("SPD: partition MIDST answered 0x{X:0>4}", .{r.type});
+                return Error.Io;
+            }
+            off += n;
+            progress.report("writing", off, data.len);
+        }
+        try self.encodeMsg(BSL_CMD_END_DATA, &.{});
+        try self.send();
+        const r = try self.recv();
+        if (r.type != BSL_REP_ACK) {
+            self.logger.err("SPD: partition END_DATA answered 0x{X:0>4}", .{r.type});
+            return Error.Io;
+        }
+    }
+
+    /// Erase a partition by name (spd_dump erase_partition): the ERASE
+    /// command itself carries the selection packet.
+    pub fn partitionErase(self: *Session, name: []const u8) Error!void {
+        try self.selectPartition(name, 0, BSL_CMD_ERASE_FLASH);
     }
 };
 
@@ -576,4 +666,96 @@ test "fdl upload and flash ops against scripted frames" {
     var out: [9]u8 = undefined;
     try sess.flashRead(0x80000000, 0, @intCast(payload.len), &out, .{});
     try testing.expectEqualStrings(payload, &out);
+}
+
+test "partition read and erase by name against scripted frames" {
+    const l = try testing.allocator.create(log.Logger);
+    defer testing.allocator.destroy(l);
+    l.* = .{ .mirror_stderr = false };
+    const cancel = std.atomic.Value(bool).init(false);
+
+    const pname = "wfixnv1";
+    const payload = "PARTDATA!";
+
+    // Build expectations with a throwaway session (FDL2 stage).
+    var enc = Session{ .alloc = testing.allocator, .io = undefined, .logger = l, .cancel = &cancel };
+    defer enc.deinit();
+    enc.use_crc16 = false;
+
+    var steps = std.ArrayList(Step).empty;
+    defer steps.deinit(testing.allocator);
+
+    var ack_frame: [8]u8 = undefined;
+    var ack_raw: [6]u8 = undefined;
+    std.mem.writeInt(u16, ack_raw[0..2], BSL_REP_ACK, .big);
+    std.mem.writeInt(u16, ack_raw[2..4], 0, .big);
+    std.mem.writeInt(u16, ack_raw[4..6], byteSum(ack_raw[0..4][0..]), .big);
+    ack_frame[0] = 0x7e;
+    @memcpy(ack_frame[1..7], &ack_raw);
+    ack_frame[7] = 0x7e;
+
+    // READ_START (name selection) → ACK
+    var snaps: [3][]u8 = undefined;
+    try enc.encodePartitionSelect(pname, payload.len, BSL_CMD_READ_START);
+    snaps[0] = try testing.allocator.dupe(u8, enc.enc[0..enc.enc_len]);
+    try steps.append(testing.allocator, .{ .expect_write = snaps[0] });
+    try steps.append(testing.allocator, .{ .respond = &ack_frame });
+
+    // READ_MIDST (LE len=9, LE offset=0, hi=0) → data frame
+    var midst: [12]u8 = undefined;
+    std.mem.writeInt(u32, midst[0..4], payload.len, .little);
+    std.mem.writeInt(u32, midst[4..8], 0, .little);
+    std.mem.writeInt(u32, midst[8..12], 0, .little);
+    try enc.encodeMsg(BSL_CMD_READ_MIDST, midst[0..]);
+    snaps[1] = try testing.allocator.dupe(u8, enc.enc[0..enc.enc_len]);
+    try steps.append(testing.allocator, .{ .expect_write = snaps[1] });
+    var data_raw: [4 + 9 + 2]u8 = undefined;
+    std.mem.writeInt(u16, data_raw[0..2], BSL_REP_READ_FLASH, .big);
+    std.mem.writeInt(u16, data_raw[2..4], @intCast(payload.len), .big);
+    @memcpy(data_raw[4 .. 4 + payload.len], payload);
+    std.mem.writeInt(u16, data_raw[4 + payload.len ..][0..2], byteSum(data_raw[0 .. 4 + payload.len][0..]), .big);
+    var data_frame: [2 + data_raw.len]u8 = undefined;
+    data_frame[0] = 0x7e;
+    @memcpy(data_frame[1 .. 1 + data_raw.len], &data_raw);
+    data_frame[data_frame.len - 1] = 0x7e;
+    try steps.append(testing.allocator, .{ .respond = &data_frame });
+
+    // READ_END → ACK
+    try enc.encodeMsg(BSL_CMD_READ_END, &.{});
+    snaps[2] = try testing.allocator.dupe(u8, enc.enc[0..enc.enc_len]);
+    try steps.append(testing.allocator, .{ .expect_write = snaps[2] });
+    try steps.append(testing.allocator, .{ .respond = &ack_frame });
+    defer for (snaps) |sn| testing.allocator.free(sn);
+
+    var h = try Harness.init(testing.allocator, steps.items);
+    defer h.deinit();
+    var io = Io.init(testing.allocator, h.transport());
+    defer io.deinit();
+    var sess = Session{ .alloc = testing.allocator, .io = &io, .logger = l, .cancel = &cancel };
+    defer sess.deinit();
+    sess.use_crc16 = false;
+
+    var out: [payload.len]u8 = undefined;
+    try sess.partitionRead(pname, &out, .{});
+    try testing.expectEqualStrings(payload, &out);
+
+    // Erase by name: ERASE_FLASH carries the selection packet. Fresh step
+    // list — h consumed the read script above.
+    var erase_steps = std.ArrayList(Step).empty;
+    defer erase_steps.deinit(testing.allocator);
+    try enc.encodePartitionSelect(pname, 0, BSL_CMD_ERASE_FLASH);
+    const erase_snap = try testing.allocator.dupe(u8, enc.enc[0..enc.enc_len]);
+    defer testing.allocator.free(erase_snap);
+    try erase_steps.append(testing.allocator, .{ .expect_write = erase_snap });
+    try erase_steps.append(testing.allocator, .{ .respond = &ack_frame });
+
+    var h2 = try Harness.init(testing.allocator, erase_steps.items);
+    defer h2.deinit();
+    var io2 = Io.init(testing.allocator, h2.transport());
+    defer io2.deinit();
+    var sess2 = Session{ .alloc = testing.allocator, .io = &io2, .logger = l, .cancel = &cancel };
+    defer sess2.deinit();
+    sess2.use_crc16 = false;
+
+    try sess2.partitionErase(pname);
 }
