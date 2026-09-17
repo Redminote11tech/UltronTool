@@ -219,15 +219,27 @@ pub const Session = struct {
             return Error.Io;
         }
 
+        // prepare_data zero-pads odd-sized payloads; the echoed size, the
+        // checksum and the stream all use the padded buffer.
+        var padded: ?[]u8 = null;
+        defer if (padded) |p| self.alloc.free(p);
+        var payload = data;
+        if (data.len % 2 != 0) {
+            padded = self.alloc.alloc(u8, data.len + 1) catch return Error.OutOfMemory;
+            @memcpy(padded.?[0..data.len], data);
+            padded.?[data.len] = 0;
+            payload = padded.?;
+        }
+
         // LE-word XOR checksum over the padded data (prepare_data).
         var chk: u16 = 0;
         var i: usize = 0;
-        while (i + 2 <= data.len) : (i += 2) {
-            chk ^= std.mem.readInt(u16, data[i..][0..2], .little);
+        while (i + 2 <= payload.len) : (i += 2) {
+            chk ^= std.mem.readInt(u16, payload[i..][0..2], .little);
         }
-        if (i < data.len) chk ^= data[i];
+        if (i < payload.len) chk ^= payload[i];
 
-        try self.uploadStream(data, progress);
+        try self.uploadStream(payload, progress);
         var resp: [4]u8 = undefined;
         try self.readExact(&resp);
         const rx_chk = std.mem.readInt(u16, resp[0..2], .big);
