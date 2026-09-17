@@ -33,6 +33,22 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.8.1" date="2026-09-15">
+      <description>
+        <p>Audit hardening release from a four-agent code review: progress
+        callbacks received a channel-pointer-pointer (corrupting the UI on
+        the first progress event of every vendor data phase), the digest
+        thread was detached then joined (guaranteed panic), LG jobs
+        deinit'd an undefined session on open failure, Samsung bundle
+        flash closed the shared archive handle every member, Unisoc's
+        write flow misrouted into a file-destroying read, the FDL
+        handshake choreography was missing (both stages), the MTK WRITE
+        storage byte and several checksum/packet-layout details were
+        wrong against the references, and the Flash PIT button was never
+        added to the UI. Dozens of smaller leaks, dead paths and doc
+        drifts fixed.</p>
+      </description>
+    </release>
     <release version="0.8.0" date="2026-09-15">
       <description>
         <p>Final flashing phases: MediaTek gains eMMC read/write/format
