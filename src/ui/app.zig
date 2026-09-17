@@ -340,9 +340,6 @@ const ConfirmCtx = struct {
     kind: ConfirmKind,
 };
 
-/// Row staged across a pending LG confirm dialog (single dialog at a time).
-var lg_stage_row: ev.PartitionRow = .{};
-
 const ConfirmKind = union(enum) {
     apply_writes: void,
     flash_xml: void,
@@ -822,7 +819,7 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     const mtk_box = gtk.Box.new(.vertical, 12);
     const mtk_group = adw.PreferencesGroup.new();
     adw.PreferencesGroup.setTitle(mtk_group, "MediaTek BROM");
-    adw.PreferencesGroup.setDescription(mtk_group, "Boot ROM sync and chip identification (DA upload comes in a later phase)");
+    adw.PreferencesGroup.setDescription(mtk_group, "Boot ROM sync, chip identification and DA upload");
 
     const mtk_probe_row = adw.ActionRow.new();
     rowTitle(mtk_probe_row, "Chip identification");
@@ -1809,7 +1806,6 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
                 const dup = ui.alloc.dupe(u8, path) catch return;
                 if (ui.samsung_flash_path) |old| ui.alloc.free(old);
                 ui.samsung_flash_path = dup; // shared staging slot (modes are exclusive)
-                lg_stage_row = row;
                 confirmDialog(ui, "Flash image to partition?", body, "Flash", .destructive, .{ .lg_write = row });
                 return;
             }
@@ -2301,24 +2297,36 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
     ui.alloc.destroy(ctx);
     gtk.Window.destroy(dlg.as(gtk.Window));
     const applied = std.mem.eql(u8, std.mem.span(response), "apply");
-    // The pending UPDATE.APP mapping list is consumed on BOTH paths: apply
-    // hands it to the manager (which copies it), dismissal frees it.
-    var huawei_maps: ?std.ArrayList(manager_mod.HuaweiMapping) = null;
-    if (kind == .huawei_app) {
-        huawei_maps = ui.huawei_pending_mappings;
-        ui.huawei_pending_mappings = null;
-        if (!applied) {
-            if (huawei_maps) |*list| {
+    if (!applied) {
+        // Dismissal frees every staged slot this dialog could own.
+        if (kind == .huawei_app) {
+            if (ui.huawei_pending_mappings) |*list| {
                 for (list.items) |m| {
                     ui.alloc.free(m.entry);
                     ui.alloc.free(m.label);
                 }
                 list.deinit(ui.alloc);
+                ui.huawei_pending_mappings = null;
             }
-            return;
         }
+        if (ui.samsung_flash_path) |p| ui.alloc.free(p);
+        ui.samsung_flash_path = null;
+        if (ui.samsung_stage_path) |p| ui.alloc.free(p);
+        ui.samsung_stage_path = null;
+        if (ui.spd_stage_path) |p| ui.alloc.free(p);
+        ui.spd_stage_path = null;
+        if (ui.spd_stage_name) |p| ui.alloc.free(p);
+        ui.spd_stage_name = null;
+        if (ui.mtk_stage_path) |p| ui.alloc.free(p);
+        ui.mtk_stage_path = null;
+        return;
     }
-    if (!applied) return;
+    // The pending UPDATE.APP mapping list is consumed on apply only.
+    var huawei_maps: ?std.ArrayList(manager_mod.HuaweiMapping) = null;
+    if (kind == .huawei_app) {
+        huawei_maps = ui.huawei_pending_mappings;
+        ui.huawei_pending_mappings = null;
+    }
 
     switch (kind) {
         .apply_writes => {
@@ -2375,13 +2383,8 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
             ui.manager.?.enqueue(.{ .provision_ufs = .{ .path = path, .finalize = finalize } });
         },
         .samsung_flash => |row| {
-            const staged = ui.samsung_flash_path;
+            const path = ui.samsung_flash_path orelse return;
             ui.samsung_flash_path = null;
-            if (!applied) {
-                if (staged) |p| ui.alloc.free(p);
-                return;
-            }
-            const path = staged orelse return;
             if (ui.busy()) {
                 ui.alloc.free(path);
                 ui.toast("Another operation is running — wait for it to finish");
@@ -2400,7 +2403,6 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
             spawnSamsungJob(ui, job);
         },
         .lg_erase => |row| {
-            if (!applied) return;
             if (ui.busy()) {
                 ui.toast("Another operation is running — wait for it to finish");
                 return;
@@ -2414,13 +2416,8 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
             spawnLgJob(ui, job);
         },
         .lg_write => |row| {
-            const staged = ui.samsung_flash_path;
+            const path = ui.samsung_flash_path orelse return; // shared staging slot (modes are exclusive)
             ui.samsung_flash_path = null;
-            if (!applied) {
-                if (staged) |p| ui.alloc.free(p);
-                return;
-            }
-            const path = staged orelse return;
             if (ui.busy()) {
                 ui.alloc.free(path);
                 ui.toast("Another operation is running — wait for it to finish");
@@ -2441,10 +2438,6 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
             const mtk_kind: MtkJobKind = if (kind == .mtk_write) .write else .format;
             const staged = ui.mtk_stage_path;
             ui.mtk_stage_path = null;
-            if (!applied) {
-                if (staged) |p| ui.alloc.free(p);
-                return;
-            }
             if (ui.busy()) {
                 if (staged) |p| ui.alloc.free(p);
                 ui.toast("Another operation is running — wait for it to finish");
@@ -2465,10 +2458,6 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
             const job_kind: SpdJobKind = if (kind == .spd_write) .write else .erase;
             const staged = ui.spd_stage_path;
             ui.spd_stage_path = null;
-            if (!applied) {
-                if (staged) |p| ui.alloc.free(p);
-                return;
-            }
             if (ui.busy()) {
                 if (staged) |p| ui.alloc.free(p);
                 ui.toast("Another operation is running — wait for it to finish");
@@ -2498,10 +2487,6 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
             const job_kind: SamsungJobKind = if (kind == .samsung_pit) .flash_pit else .bundle;
             const staged = ui.samsung_stage_path;
             ui.samsung_stage_path = null;
-            if (!applied) {
-                if (staged) |p| ui.alloc.free(p);
-                return;
-            }
             if (ui.busy()) {
                 if (staged) |p| ui.alloc.free(p);
                 ui.toast("Another operation is running — wait for it to finish");
@@ -2519,7 +2504,6 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
             spawnSamsungJob(ui, job);
         },
         .samsung_factory => {
-            if (!applied) return;
             if (ui.busy()) {
                 ui.toast("Another operation is running — wait for it to finish");
                 return;
@@ -2688,7 +2672,7 @@ fn samsungJobCtxFree(ctx: *SamsungJobCtx) void {
     alloc.destroy(ctx);
 }
 
-fn samsungProgressCb(ctx: ?*anyopaque, name: []const u8, done: u64, total: u64) void {
+fn vendorProgressCb(ctx: ?*anyopaque, name: []const u8, done: u64, total: u64) void {
     const channel: *EventChannel = @ptrCast(@alignCast(ctx orelse return));
     const frac: f32 = if (total == 0) -1.0 else @as(f32, @floatFromInt(done)) / @as(f32, @floatFromInt(total));
     channel.push(.{ .progress = .{ .fraction = frac, .label = ev.FixedStr(160).fromSlice(name), .done = done, .total = total } });
@@ -2813,7 +2797,7 @@ fn samsungRunInner(ctx: *SamsungJobCtx) !void {
                 ctx.length = try file.?.size();
             }
             try sess.setTotalBytes(ctx.length);
-            try sess.flashPartition(if (file) |*f| f else null, entry.*, ctx.length, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
+            try sess.flashPartition(if (file) |*f| f else null, entry.*, ctx.length, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &vendorProgressCb });
             try sess.endSession();
         },
         .flash_pit => {
@@ -2915,7 +2899,7 @@ fn samsungRunInner(ctx: *SamsungJobCtx) !void {
                 }
 
                 try sess.setTotalBytes(raw_len);
-                try sess.flashPartition(&member_file, j.entry, raw_len, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
+                try sess.flashPartition(&member_file, j.entry, raw_len, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &vendorProgressCb });
                 done_jobs += 1;
             }
             try sess.endSession();
@@ -3087,7 +3071,7 @@ fn lgRunInner(ctx: *LgJobCtx) !void {
         .gpt => {
             // 34 sectors at LBA 0: protective MBR + GPT header + entry array.
             var buf: [34 * 512]u8 = undefined;
-            try sess.readAt(fd, 0, &buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
+            try sess.readAt(fd, 0, &buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &vendorProgressCb });
             const header = gpt_mod.parseHeader(&buf, 512) catch |e| {
                 ui.logger.err("LG: no valid GPT on the eMMC: {s}", .{@errorName(e)});
                 return e;
@@ -3120,7 +3104,7 @@ fn lgRunInner(ctx: *LgJobCtx) !void {
             while (done < total) {
                 if (ui.cancel.load(.acquire)) return error.Cancelled;
                 const want: usize = @intCast(@min(total - done, lg_laf.chunk_max));
-                try sess.readAt(fd, ctx.row.first_lba + done / 512, buf[0..want], .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
+                try sess.readAt(fd, ctx.row.first_lba + done / 512, buf[0..want], .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &vendorProgressCb });
                 if ((try out.writeAll(buf[0..want])) != want) return error.Io;
                 done += want;
             }
@@ -3146,7 +3130,7 @@ fn lgRunInner(ctx: *LgJobCtx) !void {
                 if (ui.cancel.load(.acquire)) return error.Cancelled;
                 const want: usize = @intCast(@min(img_size - done, lg_laf.chunk_max));
                 if ((try img.readAll(buf[0..want])) != want) return error.Io;
-                try sess.writeAt(fd, ctx.row.first_lba + done / 512, buf[0..want], .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
+                try sess.writeAt(fd, ctx.row.first_lba + done / 512, buf[0..want], .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &vendorProgressCb });
                 done += want;
             }
             try sess.close(fd);
@@ -3241,7 +3225,10 @@ fn mtkProbeRun(ctx: *MtkProbeCtx) void {
         ui.channel.push(.{ .finished = .{ .success = false, .message = m } });
         return;
     };
-    if (ctx.kind == .da_upload) ui.mtk_da_ready = true;
+    if (ctx.kind == .da_upload) {
+        // handleEvent owns this flag (worker → main ordering via the event).
+        // The finished handler sets it by message match below.
+    }
     var m = ev.FixedStr(512){};
     m.set(switch (ctx.kind) {
         .probe => "chip info read",
@@ -3275,7 +3262,7 @@ fn mtkProbeInner(ctx: *MtkProbeCtx) !void {
             const data = try fileio.readFileAlloc(ui.alloc, ctx.path.?, 64 * 1024 * 1024);
             defer ui.alloc.free(data);
             ui.logger.info("MTK: uploading DA ({d} bytes) to 0x{X:0>8}…", .{ data.len, ctx.addr });
-            try sess.sendDa(ctx.addr, data, 0, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
+            try sess.sendDa(ctx.addr, data, 0, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &vendorProgressCb });
             try sess.jumpDa(ctx.addr);
         },
         .read, .write, .format => {
@@ -3293,7 +3280,7 @@ fn mtkProbeInner(ctx: *MtkProbeCtx) !void {
                 .read => {
                     const buf = try ui.alloc.alloc(u8, @intCast(ctx.flash_len));
                     defer ui.alloc.free(buf);
-                    try da_sess.readFlash(ctx.flash_addr, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
+                    try da_sess.readFlash(ctx.flash_addr, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &vendorProgressCb });
                     var out = try fileio.File.create(ctx.path.?);
                     defer out.close();
                     if ((try out.writeAll(buf)) != buf.len) return error.Io;
@@ -3311,11 +3298,11 @@ fn mtkProbeInner(ctx: *MtkProbeCtx) !void {
                     const buf = try ui.alloc.alloc(u8, @intCast(img_size));
                     defer ui.alloc.free(buf);
                     if ((try img.readAll(buf)) != img_size) return error.Io;
-                    try da_sess.writeFlash(ctx.flash_addr, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
+                    try da_sess.writeFlash(ctx.flash_addr, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &vendorProgressCb });
                     ui.logger.info("✓ wrote {d} bytes to 0x{X:0>8}", .{ img_size, ctx.flash_addr });
                 },
                 .format => {
-                    try da_sess.formatFlash(ctx.flash_addr, ctx.flash_len, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
+                    try da_sess.formatFlash(ctx.flash_addr, ctx.flash_len, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &vendorProgressCb });
                     ui.logger.info("✓ formatted {d} bytes at 0x{X:0>8}", .{ ctx.flash_len, ctx.flash_addr });
                 },
                 else => unreachable,
@@ -3563,7 +3550,7 @@ fn spdProbeInner(ctx: *SpdProbeCtx) !void {
             if (ctx.pname) |pname| {
                 const buf = try ui.alloc.alloc(u8, ctx.size);
                 defer ui.alloc.free(buf);
-                try sess.partitionRead(pname, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
+                try sess.partitionRead(pname, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &vendorProgressCb });
                 var out = try fileio.File.create(ctx.path.?);
                 defer out.close();
                 if ((try out.writeAll(buf)) != buf.len) return error.Io;
@@ -3572,7 +3559,7 @@ fn spdProbeInner(ctx: *SpdProbeCtx) !void {
             } else {
                 const buf = try ui.alloc.alloc(u8, ctx.size);
                 defer ui.alloc.free(buf);
-                try sess.flashRead(ctx.addr, 0, ctx.size, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
+                try sess.flashRead(ctx.addr, 0, ctx.size, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &vendorProgressCb });
                 var out = try fileio.File.create(ctx.path.?);
                 defer out.close();
                 if ((try out.writeAll(buf)) != buf.len) return error.Io;
@@ -3589,10 +3576,10 @@ fn spdProbeInner(ctx: *SpdProbeCtx) !void {
             defer ui.alloc.free(buf);
             if ((try img.readAll(buf)) != img_size) return error.Io;
             if (ctx.pname) |pname| {
-                try sess.partitionWrite(pname, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
+                try sess.partitionWrite(pname, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &vendorProgressCb });
                 ui.logger.info("✓ wrote {d} bytes to partition \"{s}\"", .{ img_size, pname });
             } else {
-                try sess.flashWrite(ctx.addr, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &samsungProgressCb });
+                try sess.flashWrite(ctx.addr, buf, .{ .ctx = @ptrCast(ctx.ui.channel), .cb = &vendorProgressCb });
                 ui.logger.info("✓ wrote {d} bytes to 0x{X:0>8}", .{ img_size, ctx.addr });
             }
         },
@@ -3693,8 +3680,28 @@ fn onSpdUploadFdl(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     }
     const ctx = ui.alloc.create(SpdProbeCtx) catch return;
     ctx.* = .{ .ui = ui, .kind = .fdl_upload };
-    if (ui.spd_fdl1_path) |p| ctx.path = ui.alloc.dupe(u8, p) catch null;
-    if (ui.spd_fdl2_path) |p| ctx.path2 = ui.alloc.dupe(u8, p) catch null;
+    // Both paths are required — a dupe failure aborts the spawn cleanly
+    // instead of leaving a null the worker would unwrap.
+    if (ui.spd_fdl1_path) |p| {
+        ctx.path = ui.alloc.dupe(u8, p) catch {
+            ctx.free();
+            ui.toast("Out of memory");
+            return;
+        };
+    } else {
+        ctx.free();
+        return;
+    }
+    if (ui.spd_fdl2_path) |p| {
+        ctx.path2 = ui.alloc.dupe(u8, p) catch {
+            ctx.free();
+            ui.toast("Out of memory");
+            return;
+        };
+    } else {
+        ctx.free();
+        return;
+    }
     spdStageTarget(ui, ctx) catch {
         ctx.free();
         return;
@@ -4156,6 +4163,7 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
                     ui.cancel.store(true, .release);
                 }
                 ui.session = .disconnected;
+                ui.mtk_da_ready = false;
                 refreshMainPage(ui);
                 ui.logger.info("device disconnected", .{});
             }
@@ -4245,6 +4253,12 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
         },
         .finished => |fin| {
             ui.jobDone();
+            if (fin.success and std.mem.eql(u8, fin.message.slice(), "DA uploaded and started")) {
+                ui.mtk_da_ready = true;
+            }
+            if (!fin.success) {
+                ui.mtk_da_ready = false;
+            }
             if (!fin.success) {
                 ui.toast(fin.message.slice());
                 ui.logger.err("operation failed: {s}", .{fin.message.slice()});
@@ -4261,7 +4275,7 @@ fn isNotable(msg: []const u8) bool {
     for (suffixes) |sfx| {
         if (std.mem.endsWith(u8, msg, sfx)) return true;
     }
-    const names = [_][]const u8{ "device reset", "device rebooted", "loader required", "disconnected", "connected (VIP)", "partitions loaded", "digest tables created", "ramdump finished", "UFS provisioning finished", "huawei app finished", "userdata erased (factory reset)" };
+    const names = [_][]const u8{ "device reset", "device rebooted", "loader required", "disconnected", "connected (VIP)", "partitions loaded", "digest tables created", "ramdump finished", "UFS provisioning finished", "huawei app finished", "userdata erased (factory reset)", "PIT loaded", "PIT flash finished", "bundle flash finished", "bootrom version read", "chip info read", "DA uploaded and started", "FDLs uploaded — flash operations unlocked" };
     for (names) |n| {
         if (std.mem.eql(u8, msg, n)) return true;
     }
