@@ -179,6 +179,11 @@ pub const Session = struct {
     pub fn send(self: *Session) Error!void {
         if (self.enc_len == 0) return Error.Io;
         _ = try self.io.write(self.enc[0..self.enc_len], timeout_ms);
+        // UMS9117-class devices stall after a full 512-byte bulk-out frame
+        // unless it is terminated by a ZLP (spd_dump's endp_out_blk rule).
+        if (self.enc_len % 512 == 0) {
+            _ = self.io.write(&.{}, 100) catch 0;
+        }
         self.enc_len = 0;
     }
 
@@ -205,9 +210,13 @@ pub const Session = struct {
             if (got >= self.enc.len - 1) return Error.Io;
             var b: [1]u8 = undefined;
             try self.readExactTimeout(&b, timeout);
-            // The opening delimiter is dropped, not stored (the reference
-            // discards everything up to and including a header byte).
-            if (b[0] == hdlc_header) break;
+            // The opening delimiter is dropped (the reference discards
+            // everything up to and including a header byte) — and empty
+            // frames between consecutive delimiters are skipped.
+            if (b[0] == hdlc_header) {
+                if (got > 0) break;
+                continue;
+            }
             self.enc[got] = b[0];
             got += 1;
         }
@@ -231,6 +240,17 @@ pub const Session = struct {
         const msg_type = std.mem.readInt(u16, self.raw[0..2], .big);
         const len = std.mem.readInt(u16, self.raw[2..4], .big);
         if (4 + @as(usize, len) + 2 > n) return Error.Io;
+        // Asynchronous log frames ride the same pipe (spd_dump drains
+        // them before returning the real response).
+        if (msg_type == 0xff) {
+            if (len > 0) {
+                var lbuf: [256]u8 = undefined;
+                const nl = @min(len, lbuf.len);
+                @memcpy(lbuf[0..nl], self.raw[4 .. 4 + nl]);
+                self.logger.info("SPD log: {s}", .{lbuf[0..nl]});
+            }
+            return self.recvTimeout(timeout);
+        }
         const stored = std.mem.readInt(u16, self.raw[4 + len ..][0..2], .big);
         const expected = if (self.use_crc16) crc16_xmodem(self.raw[0 .. 4 + len]) else byteSumVerify(self.raw[0 .. 4 + len]);
         if (stored != expected) {
@@ -328,7 +348,11 @@ pub const Session = struct {
     /// Encode only — the selection packet for `cmd` (no I/O).
     pub fn encodePartitionSelect(self: *Session, name: []const u8, size: u64, cmd: u16) Error!void {
         var pkt = std.mem.zeroes([36 * 2 + 4 + 4 + 8]u8);
-        const u16len = @min(name.len, 36);
+        if (name.len > 36) {
+            self.logger.err("SPD: partition name \"{s}\" exceeds 36 units", .{name});
+            return Error.Io;
+        }
+        const u16len = name.len;
         var i: usize = 0;
         while (i < u16len) : (i += 1) {
             const cp: u16 = @intCast(std.unicode.utf8Decode(name[i .. i + 1]) catch @as(u21, name[i]));
@@ -338,7 +362,9 @@ pub const Session = struct {
         }
         std.mem.writeInt(u32, pkt[72..76], @truncate(size), .little);
         std.mem.writeInt(u32, pkt[76..80], @intCast(size >> 32), .little);
-        const pkt_len: usize = if (size >> 32 != 0) 80 else 76;
+        // mode64 packets carry the trailing u64 dummy of the C struct
+        // (sizeof(name) + 16 = 88 bytes), not just the size fields.
+        const pkt_len: usize = if (size >> 32 != 0) 88 else 76;
         try self.encodeMsg(cmd, pkt[0..pkt_len]);
     }
 
