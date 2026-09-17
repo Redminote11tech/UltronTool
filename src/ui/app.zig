@@ -41,6 +41,7 @@ const samsung_usb_ids = @import("../protocol/samsung/usb_ids.zig");
 const lg_laf = @import("../protocol/lg/laf.zig");
 const lg_usb_ids = @import("../protocol/lg/usb_ids.zig");
 const mtk_brom = @import("../protocol/mtk/brom.zig");
+const mtk_daflash = @import("../protocol/mtk/daflash.zig");
 const mtk_usb_ids = @import("../protocol/mtk/usb_ids.zig");
 const spd_bsl = @import("../protocol/spd/bsl.zig");
 const spd_usb_ids = @import("../protocol/spd/usb_ids.zig");
@@ -81,6 +82,7 @@ const ChooserKind = union(enum) {
     spd_fdl2: void,
     spd_write: void,
     mtk_da: void,
+    mtk_read: void,
 };
 
 /// Payload-size choices for VIP digest generation. 16 KiB is the default
@@ -216,6 +218,14 @@ pub const Ui = struct {
     mtk_da_row: ?*adw.ActionRow = null,
     mtk_da_path: ?[]u8 = null,
     mtk_da_addr_entry: ?*gtk.Entry = null,
+    mtk_da_ready: bool = false,
+    /// Chooser routing marker for MTK write-vs-read picks (single dialog).
+    mtk_write_pick: bool = false,
+    mtk_flash_addr_entry: ?*gtk.Entry = null,
+    mtk_flash_size_entry: ?*gtk.Entry = null,
+    mtk_stage_path: ?[]u8 = null,
+    mtk_stage_addr: u64 = 0,
+    mtk_stage_size: u64 = 0,
     spd_section: ?*gtk.Widget = null,
     spd_thread: ?std.Thread = null,
     spd_fdl1_row: ?*adw.ActionRow = null,
@@ -345,6 +355,8 @@ const ConfirmKind = union(enum) {
     lg_write: ev.PartitionRow,
     spd_write: void,
     spd_erase: void,
+    mtk_write: void,
+    mtk_format: void,
 };
 
 // ----------------------------------------------------------------------
@@ -847,6 +859,48 @@ fn buildMainPage(ui: *Ui) *gtk.Widget {
     adw.PreferencesGroup.add(mtk_group, mtk_upload_row.as(gtk.Widget));
 
     gtk.Box.append(mtk_box, mtk_group.as(gtk.Widget));
+
+    const mtk_flash_group = adw.PreferencesGroup.new();
+    adw.PreferencesGroup.setTitle(mtk_flash_group, "Flash operations (after DA upload)");
+    adw.PreferencesGroup.setDescription(mtk_flash_group, "Address-based eMMC access through the running DA — hex address, decimal size");
+
+    const mtk_faddr_row = adw.ActionRow.new();
+    rowTitle(mtk_faddr_row, "Flash address (hex)");
+    const mtk_faddr_entry = gtk.Entry.new();
+    gtk.Entry.setPlaceholderText(mtk_faddr_entry, "0x00010000");
+    gtk.Widget.setHexpand(mtk_faddr_entry.as(gtk.Widget), 1);
+    adw.ActionRow.addSuffix(mtk_faddr_row, mtk_faddr_entry.as(gtk.Widget));
+    adw.PreferencesGroup.add(mtk_flash_group, mtk_faddr_row.as(gtk.Widget));
+    ui.mtk_flash_addr_entry = mtk_faddr_entry;
+
+    const mtk_fsize_row = adw.ActionRow.new();
+    rowTitle(mtk_fsize_row, "Size in bytes (dec)");
+    const mtk_fsize_entry = gtk.Entry.new();
+    gtk.Entry.setPlaceholderText(mtk_fsize_entry, "65536");
+    gtk.Widget.setHexpand(mtk_fsize_entry.as(gtk.Widget), 1);
+    adw.ActionRow.addSuffix(mtk_fsize_row, mtk_fsize_entry.as(gtk.Widget));
+    adw.PreferencesGroup.add(mtk_flash_group, mtk_fsize_row.as(gtk.Widget));
+    ui.mtk_flash_size_entry = mtk_fsize_entry;
+
+    const mtk_ops_row = adw.ActionRow.new();
+    rowTitle(mtk_ops_row, "Operations");
+    const mtk_ops_box = gtk.Box.new(.horizontal, 6);
+    gtk.Widget.setValign(mtk_ops_box.as(gtk.Widget), .center);
+    const mtk_read_btn = gtk.Button.newWithLabel("Read to file…");
+    _ = gtk.Button.signals.clicked.connect(mtk_read_btn, *Ui, &onMtkFlashRead, ui, .{});
+    gtk.Box.append(mtk_ops_box, mtk_read_btn.as(gtk.Widget));
+    const mtk_write_btn = gtk.Button.newWithLabel("Write image…");
+    gtk.Widget.addCssClass(mtk_write_btn.as(gtk.Widget), "destructive-action");
+    _ = gtk.Button.signals.clicked.connect(mtk_write_btn, *Ui, &onMtkFlashWrite, ui, .{});
+    gtk.Box.append(mtk_ops_box, mtk_write_btn.as(gtk.Widget));
+    const mtk_format_btn = gtk.Button.newWithLabel("Format");
+    gtk.Widget.addCssClass(mtk_format_btn.as(gtk.Widget), "destructive-action");
+    _ = gtk.Button.signals.clicked.connect(mtk_format_btn, *Ui, &onMtkFlashFormat, ui, .{});
+    gtk.Box.append(mtk_ops_box, mtk_format_btn.as(gtk.Widget));
+    adw.ActionRow.addSuffix(mtk_ops_row, mtk_ops_box.as(gtk.Widget));
+    adw.PreferencesGroup.add(mtk_flash_group, mtk_ops_row.as(gtk.Widget));
+
+    gtk.Box.append(mtk_box, mtk_flash_group.as(gtk.Widget));
     gtk.Widget.setVisible(mtk_box.as(gtk.Widget), 0);
     gtk.Box.append(page, mtk_box.as(gtk.Widget));
     ui.mtk_section = mtk_box.as(gtk.Widget);
@@ -1577,6 +1631,32 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
             if (ui.mtk_da_path) |old| ui.alloc.free(old);
             ui.mtk_da_path = dup;
             setSubtitleZ(ui.mtk_da_row.?, path);
+        },
+        .mtk_read => {
+            // The staging state distinguishes read (mtk_stage_path == null)
+            // from write (path staged by… actually both come here; decide
+            // by the "write" marker set in onMtkFlashWrite via stage path).
+            if (ui.mtk_write_pick) {
+                ui.mtk_write_pick = false;
+                const dup = ui.alloc.dupe(u8, path) catch return;
+                if (ui.mtk_stage_path) |old| ui.alloc.free(old);
+                ui.mtk_stage_path = dup;
+                var body_buf: [256]u8 = undefined;
+                const body = std.fmt.bufPrint(&body_buf, "Write {d} bytes (512-padded) to flash at 0x{X:0>8}?\n\nOverwriting flash is IRREVERSIBLE.", .{ ui.mtk_stage_size, ui.mtk_stage_addr }) catch return;
+                confirmDialog(ui, "Write flash?", body, "Write", .destructive, .mtk_write);
+                return;
+            }
+            const ctx = ui.alloc.create(MtkProbeCtx) catch return;
+            ctx.* = .{ .ui = ui, .kind = .read, .flash_addr = ui.mtk_stage_addr, .flash_len = ui.mtk_stage_size };
+            ctx.path = ui.alloc.dupe(u8, path) catch {
+                ctx.free();
+                return;
+            };
+            mtkStageTarget(ui, ctx) catch {
+                ctx.free();
+                return;
+            };
+            spawnMtkJob(ui, ctx);
         },
         .spd_fdl2 => {
             const dup = ui.alloc.dupe(u8, path) catch return;
@@ -2347,6 +2427,30 @@ fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *Con
             };
             spawnLgJob(ui, job);
         },
+        .mtk_write, .mtk_format => {
+            const mtk_kind: MtkJobKind = if (kind == .mtk_write) .write else .format;
+            const staged = ui.mtk_stage_path;
+            ui.mtk_stage_path = null;
+            if (!applied) {
+                if (staged) |p| ui.alloc.free(p);
+                return;
+            }
+            if (ui.busy()) {
+                if (staged) |p| ui.alloc.free(p);
+                ui.toast("Another operation is running — wait for it to finish");
+                return;
+            }
+            const job = ui.alloc.create(MtkProbeCtx) catch {
+                if (staged) |p| ui.alloc.free(p);
+                return;
+            };
+            job.* = .{ .ui = ui, .kind = mtk_kind, .flash_addr = ui.mtk_stage_addr, .flash_len = ui.mtk_stage_size, .path = staged };
+            mtkStageTarget(ui, job) catch {
+                job.free();
+                return;
+            };
+            spawnMtkJob(ui, job);
+        },
         .spd_write, .spd_erase => {
             const job_kind: SpdJobKind = if (kind == .spd_write) .write else .erase;
             const staged = ui.spd_stage_path;
@@ -3093,17 +3197,20 @@ fn lgControlClicked(ui: *Ui, kind: LgJobKind) void {
 // MediaTek / Unisoc probe jobs
 // ----------------------------------------------------------------------
 
-const MtkJobKind = enum { probe, da_upload };
+const MtkJobKind = enum { probe, da_upload, read, write, format };
 
 const MtkProbeCtx = struct {
     ui: *Ui,
     kind: MtkJobKind = .probe,
     target: ?transport.Target = null,
     target_serial_buf: ?[]u8 = null,
-    /// DA file path (da_upload) — owned.
+    /// DA file path (da_upload) / image path (write) / dump path (read).
     path: ?[]u8 = null,
     /// DA load address (hex entry, main-thread parsed).
     addr: u32 = 0x00200000,
+    /// Flash address/length for the DA flash ops (main-thread parsed).
+    flash_addr: u64 = 0,
+    flash_len: u64 = 0,
 
     fn free(self: *MtkProbeCtx) void {
         const alloc = self.ui.alloc;
@@ -3122,10 +3229,14 @@ fn mtkProbeRun(ctx: *MtkProbeCtx) void {
         ui.channel.push(.{ .finished = .{ .success = false, .message = m } });
         return;
     };
+    if (ctx.kind == .da_upload) ui.mtk_da_ready = true;
     var m = ev.FixedStr(512){};
     m.set(switch (ctx.kind) {
         .probe => "chip info read",
         .da_upload => "DA uploaded and started",
+        .read => "read finished",
+        .write => "write finished",
+        .format => "format finished",
     });
     ui.channel.push(.{ .finished = .{ .success = true, .message = m } });
 }
@@ -3154,6 +3265,49 @@ fn mtkProbeInner(ctx: *MtkProbeCtx) !void {
             ui.logger.info("MTK: uploading DA ({d} bytes) to 0x{X:0>8}…", .{ data.len, ctx.addr });
             try sess.sendDa(ctx.addr, data, 0, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
             try sess.jumpDa(ctx.addr);
+        },
+        .read, .write, .format => {
+            // The device has rebooted into the DA after JUMP_DA: a fresh
+            // open + DA session (the BROM transport is gone).
+            var da_sess: mtk_daflash.Session = undefined;
+            var da_usb = try usb.open(&mtk_usb_ids.policy, ctx.target, 15000, ui.logger, ui.alloc, &ui.cancel);
+            defer da_usb.close();
+            var da_io = transport.Io.init(ui.alloc, da_usb.transport());
+            defer da_io.deinit();
+            da_sess = .{ .alloc = ui.alloc, .io = &da_io, .logger = ui.logger, .cancel = &ui.cancel };
+            try da_sess.checkStatus();
+
+            switch (ctx.kind) {
+                .read => {
+                    const buf = try ui.alloc.alloc(u8, @intCast(ctx.flash_len));
+                    defer ui.alloc.free(buf);
+                    try da_sess.readFlash(ctx.flash_addr, buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                    var out = try fileio.File.create(ctx.path.?);
+                    defer out.close();
+                    if ((try out.writeAll(buf)) != buf.len) return error.Io;
+                    try out.flush();
+                    ui.logger.info("✓ read {d} bytes from 0x{X:0>8}", .{ ctx.flash_len, ctx.flash_addr });
+                },
+                .write => {
+                    var img = try fileio.File.open(ctx.path.?);
+                    defer img.close();
+                    const img_size = try img.size();
+                    if (img_size > ctx.flash_len) {
+                        ui.logger.err("MTK: image ({d} B) exceeds the staged size ({d} B)", .{ img_size, ctx.flash_len });
+                        return error.ImageTooLarge;
+                    }
+                    const buf = try ui.alloc.alloc(u8, @intCast(img_size));
+                    defer ui.alloc.free(buf);
+                    if ((try img.readAll(buf)) != img_size) return error.Io;
+                    try da_sess.writeFlash(ctx.flash_addr, buf, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                    ui.logger.info("✓ wrote {d} bytes to 0x{X:0>8}", .{ img_size, ctx.flash_addr });
+                },
+                .format => {
+                    try da_sess.formatFlash(ctx.flash_addr, ctx.flash_len, .{ .ctx = @ptrCast(&ctx.ui.channel), .cb = &samsungProgressCb });
+                    ui.logger.info("✓ formatted {d} bytes at 0x{X:0>8}", .{ ctx.flash_len, ctx.flash_addr });
+                },
+                else => unreachable,
+            }
         },
     }
 }
@@ -3210,6 +3364,66 @@ fn onMtkUploadDa(_: *gtk.Button, ui: *Ui) callconv(.c) void {
     };
     if (ui.mtk_thread) |old| old.join();
     ui.mtk_thread = thread;
+}
+
+/// Parse the MTK flash address/size entries (main thread). Returns false
+/// with a toast when malformed or the DA is not running.
+fn mtkStageRange(ui: *Ui) bool {
+    if (ui.busy()) {
+        ui.toast("Another operation is running — wait for it to finish");
+        return false;
+    }
+    if (!ui.mtk_da_ready) {
+        ui.toast("Upload the DA first — flash operations need the agent running");
+        return false;
+    }
+    var addr_txt: []const u8 = "";
+    if (ui.mtk_flash_addr_entry) |e| addr_txt = std.mem.span(gtk.Editable.getText(@ptrCast(e)));
+    var size_txt: []const u8 = "";
+    if (ui.mtk_flash_size_entry) |e| size_txt = std.mem.span(gtk.Editable.getText(@ptrCast(e)));
+    ui.mtk_stage_addr = std.fmt.parseInt(u64, std.mem.trim(u8, addr_txt, " "), 0) catch {
+        ui.toast("Invalid flash address");
+        return false;
+    };
+    ui.mtk_stage_size = std.fmt.parseInt(u64, std.mem.trim(u8, size_txt, " "), 10) catch {
+        ui.toast("Invalid size");
+        return false;
+    };
+    if (ui.mtk_stage_size == 0) {
+        ui.toast("Size must be greater than zero");
+        return false;
+    }
+    return true;
+}
+
+fn spawnMtkJob(ui: *Ui, ctx: *MtkProbeCtx) void {
+    ui.startJob();
+    const thread = std.Thread.spawn(.{}, mtkProbeRun, .{ctx}) catch {
+        ui.jobDone();
+        ctx.free();
+        ui.toast("Failed to start worker thread");
+        return;
+    };
+    if (ui.mtk_thread) |old| old.join();
+    ui.mtk_thread = thread;
+}
+
+fn onMtkFlashRead(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (!mtkStageRange(ui)) return;
+    openChooser(ui, .mtk_read, "Save flash dump", true, "flash.bin");
+}
+
+fn onMtkFlashWrite(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (!mtkStageRange(ui)) return;
+    ui.mtk_write_pick = true;
+    openChooser(ui, .mtk_read, "Select image to write", false, null);
+}
+
+fn onMtkFlashFormat(_: *gtk.Button, ui: *Ui) callconv(.c) void {
+    if (!mtkStageRange(ui)) return;
+    var body_buf: [256]u8 = undefined;
+    const body = std.fmt.bufPrint(&body_buf, "Format {d} bytes of flash at 0x{X:0>8}?\n\nThis is IRREVERSIBLE.", .{ ui.mtk_stage_size, ui.mtk_stage_addr }) catch return;
+    confirmDialog(ui, "Format flash?", body, "Format", .destructive, .mtk_format);
 }
 
 fn onMtkProbe(_: *gtk.Button, ui: *Ui) callconv(.c) void {
