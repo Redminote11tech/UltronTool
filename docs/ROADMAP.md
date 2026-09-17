@@ -48,10 +48,10 @@ download, repartition UX polish.
 
 ## 2. MediaTek — BROM / Download Agent
 
-**Status:** sync + identification + DA upload landed (`src/protocol/mtk/`,
-`docs/PROTOCOL.md` §12): BROM sync, chip identification, SEND_DA/JUMP_DA for
-user-supplied DA binaries. Remaining: SLA/DAA auth, legacy-DA partition ops
-(read/write/erase over the running DA).
+**Status:** phases 1–4 of the practical scope landed (`src/protocol/mtk/`,
+`docs/PROTOCOL.md` §12): BROM sync, chip identification, SEND_DA/JUMP_DA and
+legacy-DA eMMC read/write/format. Remaining: SLA/DAA auth (needs device keys),
+PMT/GPT ops, NOR/NAND paths.
 
 **References:**
 - `bkerler/mtkclient` — the only complete open-source reference (active). Port BROM sync,
@@ -70,8 +70,8 @@ user-supplied DA binaries. Remaining: SLA/DAA auth, legacy-DA partition ops
 
 **Status:** FDL upload + flash ops landed (`src/protocol/spd/`,
 `docs/PROTOCOL.md` §13): bootrom handshake, FDL1/FDL2 upload with the
-checksum stage switch, address-based flash read/write/erase. Remaining:
-virtual-partition (name) ops, PAC parsing.
+checksum stage switch, flash read/write/erase by address AND by partition
+name. Remaining: PAC parsing.
 
 **References:**
 - `ilyakurdyukov/spreadtrum_flash` (`spd_dump`) — original Linux FDL tool (archived but
