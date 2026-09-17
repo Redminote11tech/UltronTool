@@ -141,12 +141,13 @@ pub const Session = struct {
             self.logger.err("LAF: response trailer mismatch (cmd {s})", .{&cmd});
             return Error.Io;
         }
-        // CRC covers header (zeroed CRC field) + body.
+        // CRC covers header (zeroed 4-byte CRC field) + body — lglaf
+        // zeroes all four bytes of the field, not just the u16.
         const stored = std.mem.readInt(u16, self.rx[0x18..][0..2], .little);
-        const crc_rx = self.rx[0x18..][0..2].*;
-        @memset(self.rx[0x18..][0..2], 0);
+        const crc_rx: [4]u8 = self.rx[0x18..0x1c].*;
+        @memset(self.rx[0x18..0x1c], 0);
         const expected = crc16(self.rx[0 .. header_len + body_len]);
-        self.rx[0x18..][0..2].* = crc_rx;
+        self.rx[0x18..0x1c].* = crc_rx;
         if (expected != stored) {
             self.logger.err("LAF: response CRC mismatch (expected {x:0>4}, got {x:0>4})", .{ expected, stored });
             return Error.Io;
@@ -178,16 +179,10 @@ pub const Session = struct {
             try self.sendPacket("HELO", args, &.{});
             const pkt = try self.readPacket();
             if (std.mem.eql(u8, &pkt.cmd, "HELO")) {
-                if (pkt.args[0] != version_arg) {
-                    self.logger.err("LAF: HELO version echo mismatch (0x{X:0>8})", .{pkt.args[0]});
-                    return Error.Io;
-                }
+                // lglaf checks only the command word; a device answering
+                // with its own (newer) protocol id must still pass.
                 self.version_min = pkt.args[1];
                 self.logger.info("LAF: session open (min protocol 0x{X:0>8})", .{self.version_min});
-                // Second HELO, per the reference.
-                try self.sendPacket("HELO", args, &.{});
-                const pkt2 = try self.readPacket();
-                try self.expectCmd(&pkt2, "HELO");
                 return;
             }
             self.logger.warn("LAF: expected HELO, got {s} — retrying", .{&pkt.cmd});
@@ -368,18 +363,13 @@ test "open, read, write and erase exchange against scripted responses" {
     var steps = std.ArrayList(Step).empty;
     defer steps.deinit(testing.allocator);
 
-    // hello (single-exchange part is covered above; script both HELOs)
-    var pkt_buf: [64]u8 = undefined;
+    // hello: one HELO on a clean sync (the second is only for desyncs).
     var resp: []u8 = undefined;
-    _ = &pkt_buf;
-    _ = &resp;
 
     var req_helo: [32]u8 = undefined;
     _ = buildPacket(&req_helo, "HELO", .{ version_arg, 0, 0, 0 }, &.{});
     var resp_helo: [32]u8 = undefined;
     _ = buildPacket(&resp_helo, "HELO", .{ version_arg, 0, 0, 0 }, &.{});
-    try steps.append(testing.allocator, .{ .expect_write = &req_helo });
-    try steps.append(testing.allocator, .{ .respond = &resp_helo });
     try steps.append(testing.allocator, .{ .expect_write = &req_helo });
     try steps.append(testing.allocator, .{ .respond = &resp_helo });
 
@@ -460,8 +450,6 @@ test "write refuses the GPT area and FAIL responses error out" {
     _ = buildPacket(&req_helo, "HELO", .{ version_arg, 0, 0, 0 }, &.{});
     var resp_helo: [32]u8 = undefined;
     _ = buildPacket(&resp_helo, "HELO", .{ version_arg, 0, 0, 0 }, &.{});
-    try steps.append(testing.allocator, .{ .expect_write = &req_helo });
-    try steps.append(testing.allocator, .{ .respond = &resp_helo });
     try steps.append(testing.allocator, .{ .expect_write = &req_helo });
     try steps.append(testing.allocator, .{ .respond = &resp_helo });
 
