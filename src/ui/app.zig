@@ -1518,31 +1518,35 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
         return;
     };
     defer file.unref();
-    // Resolve the path and copy it into our allocator immediately: both
-    // g_file_get_path and the URI string are g_malloc-owned and the URI
-    // fallback below would otherwise dangle past its glib.free.
-    var path: []const u8 = undefined;
+    // Resolve the chooser path. BOTH glib strings (g_file_get_path's
+    // transfer-full result and the URI) must outlive our copy: freeing
+    // them in-branch made `path` dangle, and the dupe then tripped
+    // memcpyAlias when glibc recycled the same block for the allocation.
+    var path_glib: ?[*:0]u8 = null;
+    var path_owned: ?[]u8 = null;
+    defer if (path_glib) |p| glib.free(p);
+    defer if (path_owned) |p| ui.alloc.free(p);
+
     if (gio.File.getPath(file)) |p| {
-        defer glib.free(p);
-        path = std.mem.span(p);
+        path_glib = p;
     } else {
         const uri_c = gio.File.getUri(file);
         defer glib.free(uri_c);
         const uri = std.mem.span(uri_c);
-        if (std.mem.startsWith(u8, uri, "file://")) {
-            path = uri["file://".len..];
-        } else {
+        if (!std.mem.startsWith(u8, uri, "file://")) {
             ui.logger.err("selected file URI is not file://: {s}", .{uri});
             ui.toast("Unsupported file location");
             return;
         }
+        // URI-backed file: copy the path portion while the glib URI string
+        // is alive. (Not percent-decoded — pre-existing edge; paths with
+        // %XX sequences will fail to open rather than crash.)
+        path_owned = ui.alloc.dupe(u8, uri["file://".len..]) catch {
+            ui.toast("Out of memory");
+            return;
+        };
     }
-    const path_copy = ui.alloc.dupe(u8, path) catch {
-        ui.toast("Out of memory");
-        return;
-    };
-    defer ui.alloc.free(path_copy);
-    path = path_copy;
+    const path: []const u8 = if (path_owned) |p| p else std.mem.span(path_glib.?);
 
     switch (kind) {
         .loader => {
