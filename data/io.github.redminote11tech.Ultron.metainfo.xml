@@ -33,6 +33,15 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.8.2" date="2026-09-21">
+      <description>
+        <p>Crash fix: every file-picker interaction crashed the app when
+        the chooser reported a URI-backed file (portal choosers) — the
+        path was read after its glib owner was freed and the copy tripped
+        the memcpy-alias safety check. The glib strings now outlive the
+        copy.</p>
+      </description>
+    </release>
     <release version="0.8.1" date="2026-09-15">
       <description>
         <p>Audit hardening release from a four-agent code review: progress
