@@ -4,13 +4,16 @@
 
 # Ultron
 
-**Flash and unbrick Qualcomm EDL (9008) devices — natively on Linux.**
+**Flash and unbrick phones over their download modes — natively on Linux.**
 
-A native GTK4/libadwaita GUI, with Sahara and Firehose reimplemented in Zig.
+A native GTK4/libadwaita GUI. Qualcomm **Sahara** and **Firehose** are
+reimplemented in Zig, and the same plugin interface carries Samsung **Odin**,
+LG **LAF**, MediaTek **BROM/DA** and Unisoc **BSL/FDL** modules.
 
-To our knowledge this is the **first native Linux GUI tool** to reimplement the
-Qualcomm **Sahara** and **Firehose** protocols in **Zig** — a graphical successor
-to the classic [`qdl`](https://github.com/linux-msm/qdl) command-line tool.
+To our knowledge this is the **first native Linux GUI tool** to reimplement
+Qualcomm Sahara/Firehose in **Zig** — a graphical successor to the classic
+[`qdl`](https://github.com/linux-msm/qdl) command-line tool, extended into a
+multi-vendor flashing suite.
 
 GPL-3.0 · Zig 0.16 · GTK4/libadwaita · Linux (Wayland/X11)
 
@@ -18,11 +21,13 @@ GPL-3.0 · Zig 0.16 · GTK4/libadwaita · Linux (Wayland/X11)
 
 ---
 
-> **Status: v0.8.2** — Qualcomm EDL is fully usable, and the protocol
-> registry now carries four vendor modules: Qualcomm EDL, Samsung Odin,
-> LG LAF, MediaTek BROM (sync/DA upload + flash) and Unisoc BSL (FDL
-> upload + flash). Samsung/LG/MTK/Unisoc are sim-validated; hardware
-> validation is still rolling in — treat them as experimental.
+> **Status: v0.8.2** — five protocol modules ship behind one plugin
+> registry. The **Qualcomm EDL core is hardware-proven** (loader upload,
+> flashing, verification, erase, stuck-programmer recovery and drain
+> confirmed on real devices). The Samsung/LG/MediaTek/Unisoc modules are
+> protocol-complete, sim-tested and audit-hardened, but each has spent
+> little or no time with real hardware yet — see
+> [Help wanted](#help-wanted-hardware-validation).
 
 ## Why Ultron?
 
@@ -30,8 +35,8 @@ Existing EDL tooling on Linux is a pile of Python scripts or a bare CLI.
 Ultron is a **real desktop app**: it detects your device the moment you plug it
 in, walks you through loader upload and flashing with confirmations on every
 destructive action, shows the device's actual partition table, and logs every
-byte of protocol traffic in a built-in console — while the protocol core stays
-a small, dependency-free Zig library you can audit in an afternoon.
+byte of protocol traffic in a built-in console — while the protocol core
+stays a small, dependency-free Zig library with no hidden layers.
 
 ## Features
 
@@ -72,11 +77,13 @@ a small, dependency-free Zig library you can audit in an afternoon.
   backup (read-back works), image → partition flash, TRIM erase, reboot /
   power-off (ported from lglaf).
 - **MediaTek BROM** (`0e8d:0003`) — BROM sync + chip identification, DA
-  upload (SEND_DA/JUMP_DA with checksum verification) for user-supplied DA
-  binaries, and eMMC flash read/write/format through the running legacy DA.
-- **Unisoc flashing** (`1782:4d00`) — BSL bootrom handshake, FDL1/FDL2 upload
-  and flash read/write/erase both by raw address and by partition name
-  (ported from spreadtrum_flash).
+  upload (SEND_DA/JUMP_DA with checksum verification) for a user-supplied DA
+  binary, and eMMC flash read/write/format through the running legacy DA.
+  SLA/DAA-locked bootroms are refused with a clear error (auth keys are
+  device-specific).
+- **Unisoc flashing** (`1782:4d00`) — BSL bootrom handshake, user-supplied
+  FDL1/FDL2 upload, and flash read/write/erase both by raw address and by
+  partition name (ported from spreadtrum_flash).
 - **Persistent session** — the Firehose connection stays open across
   operations; explicit Reset device / Disconnect; cancel aborts and
   disconnects safely
@@ -112,6 +119,34 @@ partition browser is disabled (reads are not in the table); flash via
 rawprogram XML. The table stays valid only for that exact plan: same XML
 files, images, storage type and SkipStorageInit setting.
 
+## Help wanted: hardware validation
+
+The Qualcomm EDL core is proven on real devices. The four newer modules are
+protocol-faithful to their references and pass scripted end-to-end tests, but
+simulated devices cannot tell us what a real bootloader does on the fringes.
+If you have a device stuck in one of these modes, Ultron is exactly the tool
+to try — and your console log (Copy log button) is exactly the report we need:
+
+- **Samsung Odin** (`04e8:685d`) — PIT dump first (it fills the partition
+  browser), then a small partition write, then a tar.md5 bundle. Success
+  looks like `Loke handshake complete` → `PIT loaded` → per-image
+  `md5 verified` → `bundle flash finished`.
+- **LG LAF** (`1004:633e`) — Load GPT, a partition backup (read-back), and
+  a small write. Look for `session open (min protocol …)` and
+  `GPT loaded: N partitions`.
+- **MediaTek BROM** (`0e8d:0003`) — chip identification with any DA for your
+  SoC: `HW code 0x…` then `DA uploaded and started`. SLA-locked devices are
+  expected to refuse with a clear log line — that report is valuable too.
+- **Unisoc** (`1782:4d00`) — FDL1/FDL2 upload: `FDLs uploaded — flash
+  operations unlocked`, then a small address-based read.
+- **Qualcomm VIP / UFS provisioning** — implemented per upstream qdl but
+  never confirmed against enforcing hardware; a log from either would settle
+  open questions.
+
+Open an issue with the console log attached (snap the device into its
+download mode, run `ultron --debug`, reproduce, Copy log). Hardware logs are
+treated as ground truth and drive the fixes.
+
 ## Requirements
 
 - Linux with libusb 1.0, GTK4 + libadwaita, libudev
@@ -119,9 +154,11 @@ files, images, storage type and SkipStorageInit setting.
   (`/usr/lib/udev/rules.d/70-ultron.rules`, installed by the PKGBUILD). On
   other distros copy it manually, then:
   `sudo udevadm control --reload && sudo udevadm trigger`
-- Your device's own signed **programmer** (firehose) file and, for rawprogram
-  flashing, its flash-layout XML files — these are vendor-specific and
-  **never included**
+- Vendor files that are device-specific and **never included**:
+  Qualcomm needs its signed firehose programmer (and rawprogram/patch XMLs
+  for plan-based flashing); MediaTek needs a Download Agent binary for its
+  SoC; Unisoc needs its FDL1/FDL2 loaders. Samsung and LG need nothing —
+  their bootloaders already speak the protocol
 
 ## Building
 
@@ -153,10 +190,15 @@ udev rules, then reloads udev.
 ```
 src/
 ├── core/       logging ring, event channel, libc file helpers
-├── transport/  Transport vtable · libusb backend (qdl ZLP semantics) · sim backend
+├── transport/  Transport vtable · libusb backend (ZLP + control-transfer hooks) · sim backend
 ├── device/     libudev hot-plug scanner
+├── firmware/   sparse · Huawei UPDATE.APP · Samsung tar.md5
 ├── protocol/   Protocol vtable + registry (the plugin point)
-│   └── qualcomm/  sahara · firehose · vip · digestgen · gpt · xml · rawprogram · manager
+│   ├── qualcomm/  sahara · firehose · vip · digestgen · gpt · xml · rawprogram · manager
+│   ├── samsung/   odin · pit
+│   ├── lg/        laf
+│   ├── mtk/       brom · daflash
+│   └── spd/       bsl
 └── ui/         libadwaita app (workflow page + console)
 ```
 
@@ -168,7 +210,8 @@ timeout and quirk with sources.
 
 A protocol is one `Protocol` value in `src/protocol/protocol.zig`: a
 device-USB match policy plus a classifier. The scanner, UI and manager need
-zero changes — MediaTek and Samsung modules are planned exactly this way.
+zero changes — that is exactly how the Samsung, LG, MediaTek and Unisoc
+modules landed.
 
 ## Credits
 
@@ -176,6 +219,14 @@ zero changes — MediaTek and Samsung modules are planned exactly this way.
   primary reference; Sahara/Firehose/USB semantics are ported from its source
 - [`bkerler/edl`](https://github.com/bkerler/edl) (GPL-3.0) and
   [`strongtz/edl-ng`](https://github.com/strongtz/edl-ng) (MIT) — cross-checks
+- [`bkerler/mtkclient`](https://github.com/bkerler/mtkclient) (GPL-3.0) — the
+  MediaTek BROM/DA module is ported from its source
+- [`Samsung-Loki/Thor`](https://github.com/Samsung-Loki/Thor) (MIT) and
+  [`Llucs/odin4`](https://github.com/Llucs/odin4) — Samsung Odin references
+- [`Lekensteyn/lglaf`](https://github.com/Lekensteyn/lglaf) (MIT) — the LG
+  LAF reference
+- [`ilyakurdyukov/spreadtrum_flash`](https://github.com/ilyakurdyukov/spreadtrum_flash)
+  (MIT) — the Unisoc BSL reference
 - [`ianprime0509/zig-gobject`](https://github.com/ianprime0509/zig-gobject)
   (0BSD) — GTK4/libadwaita bindings for Zig
 
