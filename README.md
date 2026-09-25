@@ -29,6 +29,13 @@ GPL-3.0 · Zig 0.16 · GTK4/libadwaita · Linux (Wayland/X11)
 > little or no time with real hardware yet — see
 > [Help wanted](#help-wanted-hardware-validation).
 
+> **On the `ts-ui` branch** an experiment explores a second frontend: a
+> Material 3 TypeScript UI in a native Tauri window, wired to the same core
+> through a new headless `ultron-daemon` (line-JSON over stdio, no CLI). Its
+> Qualcomm EDL flash flow works end-to-end; see
+> [`ui-ts/README.md`](ui-ts/README.md). Everything below describes the
+> shipped GTK app.
+
 ## Why Ultron?
 
 Existing EDL tooling on Linux is a pile of Python scripts or a bare CLI.
@@ -169,6 +176,10 @@ zig build --release=fast
 zig build test      # unit tests (Sahara/Firehose/GPT over a simulated device)
 ```
 
+`zig build` also produces `zig-out/bin/ultron-daemon` — the headless IPC
+bridge used by the experimental TS UI on this branch; the GTK app does not
+need it.
+
 ## Packaging (Arch / CachyOS)
 
 Two equivalent ways to build the installable package:
@@ -193,6 +204,7 @@ src/
 ├── transport/  Transport vtable · libusb backend (ZLP + control-transfer hooks) · sim backend
 ├── device/     libudev hot-plug scanner
 ├── firmware/   sparse · Huawei UPDATE.APP · Samsung tar.md5
+├── ipc/        headless ultron-daemon (ts-ui branch): line-JSON stdio bridge for the TS UI
 ├── protocol/   Protocol vtable + registry (the plugin point)
 │   ├── qualcomm/  sahara · firehose · vip · digestgen · gpt · xml · rawprogram · manager
 │   ├── samsung/   odin · pit
