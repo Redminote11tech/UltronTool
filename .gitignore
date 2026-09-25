@@ -24,3 +24,7 @@ ultron-0.1.0.tar.gz
 
 # Agent rule-set (local, per-owner; not repo content)
 AGENTS.md
+
+# TS UI experiment branch
+ui-ts/node_modules/
+ui-ts/dist/
