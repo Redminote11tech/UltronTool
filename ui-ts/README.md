@@ -58,12 +58,23 @@ mirrors each vendor module's real inputs, and protocol/app log separation.
 - **Console** separates protocol chatter (violet mono) from app events, with
   level filters, autoscroll and save.
 
-## Status: simulated
+## Status: real (Qualcomm EDL vertical slice)
 
-The device bus (`src/state/bus.tsx`) is a mock that mirrors the Zig core's
-event channel semantics (log / progress / state-change / job-finished). The
-"Sim device" selector fabricates connections; flash scenarios replay realistic
-protocol log lines. **No USB, no hardware, no flashing.**
+Since 0.3.0 the app talks to the **actual Zig flashing core**: a headless
+`ultron-daemon` (src/ipc/, spawned by the Tauri shell, line-JSON over stdio —
+see `src/ipc/codec.zig` for the wire contract) owns the udev device scanner
+and the persistent Firehose session manager. The UI shows real hotplug
+detection, connects, uploads the programmer over Sahara, flashes rawprogram/
+patch XML with digest verification, streams real protocol logs and progress,
+and resets/disconnects. Native file pickers stage real paths.
+
+Scope notes:
+- **Qualcomm EDL is wired end-to-end.** Other vendors' flows still live in
+  the GTK app's UI layer; their cards honestly say "TS flow pending".
+- In a plain browser (`npm run dev`) the daemon isn't reachable and the bus
+  falls back to the simulated scenarios — that's the design-review mode.
+- Partition ops, UFS provisioning and the Huawei UPDATE.APP path are exposed
+  by the daemon protocol but not yet surfaced in this UI.
 
 ## Run it
 
