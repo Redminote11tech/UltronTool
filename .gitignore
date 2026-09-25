@@ -6,6 +6,7 @@ zig-out/
 *.pkg.tar.zst
 pkg/
 src-*/
+!src-tauri/
 v*.tar.gz
 
 # Reference source clones (protocol study only, not part of the build)
