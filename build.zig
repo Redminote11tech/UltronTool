@@ -41,6 +41,26 @@ pub fn build(b: *std.Build) void {
     b.installFile("data/icons/hicolor/256x256/apps/" ++ app_id ++ ".png", "share/icons/hicolor/256x256/apps/" ++ app_id ++ ".png",);
     b.installFile("data/70-ultron.rules", "lib/udev/rules.d/70-ultron.rules",);
 
+    // Headless IPC daemon for the TS UI (Tauri shell): scanner + Firehose
+    // manager over line-JSON stdio. Internal service of the GUI — no CLI.
+    const daemon_mod = b.createModule(.{
+        .root_source_file = b.path("src/daemon_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "glib", .module = gobject.module("glib2") },
+        },
+    });
+    daemon_mod.linkSystemLibrary("glib-2.0", .{});
+    daemon_mod.linkSystemLibrary("libusb-1.0", .{});
+    daemon_mod.linkSystemLibrary("libudev", .{});
+    const daemon = b.addExecutable(.{
+        .name = "ultron-daemon",
+        .root_module = daemon_mod,
+    });
+    b.installArtifact(daemon);
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
