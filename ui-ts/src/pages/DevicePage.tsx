@@ -1,12 +1,13 @@
 import { motion, AnimatePresence } from "motion/react";
-import { Cpu, RefreshCw, Power, ArrowRight, Radio } from "lucide-react";
+import { Cpu, RefreshCw, Power, ArrowRight, Radio, Check } from "lucide-react";
 import { useBus } from "../state/bus";
 import { VENDORS } from "../state/vendors";
 import type { Mode } from "../state/vendors";
 import { Button } from "../components/Button";
 import { Modal } from "../components/Modal";
+import { IndeterminateProgress } from "../components/Progress";
 import { useState } from "react";
-import { springGentle, springSnappy, item, stagger } from "../lib/motion";
+import { item, stagger } from "../lib/motion";
 
 export function DevicePage() {
   const { state, dispatch, setMode, toast } = useBus();
@@ -27,24 +28,20 @@ export function DevicePage() {
             {v ? (
               <motion.div
                 key="found"
-                initial={{ opacity: 0, scale: 0.96, y: 10 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.98, y: -8 }}
-                transition={springGentle}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2, ease: [0.05, 0.7, 0.1, 1] }}
               >
-                <motion.div
+                <div
+                  className="m3-empty-icon"
                   style={{
-                    width: 56, height: 56, borderRadius: 16, margin: "0 auto 16px",
-                    background: `color-mix(in srgb, ${v.color} 14%, transparent)`,
-                    boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${v.color} 45%, transparent)`,
-                    display: "grid", placeItems: "center", color: v.color,
+                    background: `color-mix(in srgb, ${v.color} 16%, transparent)`,
+                    color: v.color,
                   }}
-                  initial={{ rotate: -8, scale: 0.8 }}
-                  animate={{ rotate: 0, scale: 1 }}
-                  transition={springSnappy}
                 >
-                  <Cpu size={26} />
-                </motion.div>
+                  <Cpu size={40} strokeWidth={1.6} />
+                </div>
 
                 <h2>{v.name} · {v.modeLabel}</h2>
                 <p className="sub">Connected over USB. Ready for {v.name} protocol operations.</p>
@@ -54,13 +51,13 @@ export function DevicePage() {
                 <div className="kv mono"><span className="k">Link state</span><span style={{ color: "var(--ok)" }}>● session open</span></div>
 
                 <div className="device-actions">
-                  <Button variant="primary" onClick={() => dispatch({ type: "page", page: "flash" })}>
+                  <Button variant="filled" onClick={() => dispatch({ type: "page", page: "flash" })}>
                     Open Flash <ArrowRight size={15} />
                   </Button>
-                  <Button variant="ghost" onClick={() => setConfirmReset(true)}>
+                  <Button variant="outlined" onClick={() => setConfirmReset(true)}>
                     <Power size={14} /> Reset device
                   </Button>
-                  <Button variant="ghost" onClick={() => setMode("none")}>
+                  <Button variant="text" onClick={() => setMode("none")}>
                     <RefreshCw size={13} /> Disconnect
                   </Button>
                 </div>
@@ -70,28 +67,26 @@ export function DevicePage() {
                 key="empty"
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.15 }}
               >
-                <div className="radar">
-                  <span className="radar-ring" />
-                  <span className="radar-ring" />
-                  <span className="radar-ring" />
-                  <span className="radar-core">
-                    <motion.span
-                      animate={{ opacity: [0.45, 1, 0.45] }}
-                      transition={{ duration: 2, repeat: Infinity }}
-                      style={{ display: "grid", placeItems: "center" }}
-                    >
-                      <Radio size={22} />
-                    </motion.span>
-                  </span>
+                <div className="m3-empty-icon">
+                  <motion.span
+                    animate={{ opacity: state.scanning ? [0.5, 1, 0.5] : 1 }}
+                    transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut" }}
+                    style={{ display: "grid", placeItems: "center" }}
+                  >
+                    <Radio size={40} strokeWidth={1.6} />
+                  </motion.span>
                 </div>
                 <h2>{state.scanning ? "Searching for devices…" : "No device connected"}</h2>
                 <p className="sub">
                   Plug the device in and enter its download mode. Ultron listens for
                   hotplug events and classifies the port automatically.
                 </p>
+                {state.scanning && (
+                  <div className="scan-progress"><IndeterminateProgress /></div>
+                )}
               </motion.div>
             )}
           </AnimatePresence>
@@ -112,40 +107,28 @@ export function DevicePage() {
               key={id}
               className={`vendor-chip ${active ? "active" : ""}`}
               variants={item}
-              whileHover={{ y: -2 }}
-              whileTap={{ scale: 0.96 }}
-              transition={springSnappy}
               onClick={() => setMode(id)}
-              style={
-                active
-                  ? { boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${meta.color} 55%, transparent), 0 0 22px color-mix(in srgb, ${meta.color} 18%, transparent)` }
-                  : undefined
-              }
               title={`Simulate a ${meta.name} device (design-review switch)`}
             >
-              <span
-                className="dot"
-                style={{ background: meta.color, animation: active ? "pulse 1.8s ease-in-out infinite" : undefined }}
-              />
+              <span className="dot" style={{ background: meta.color }} />
               {meta.name}
-              <span style={{ color: "var(--text-3)" }}>· {meta.modeLabel}</span>
+              <span style={{ opacity: 0.7 }}>· {meta.modeLabel}</span>
+              {active && <Check size={14} />}
             </motion.button>
           );
         })}
       </motion.div>
 
       <Modal open={confirmReset}>
-        <h3>
-          <Power size={16} color="var(--warn)" /> Reset the device?
-        </h3>
+        <h3>Reset the device?</h3>
         <p>
           A protocol reset reboots the device out of download mode. Unsaved flash
           state is discarded. This is safe but the session closes.
         </p>
         <div className="modal-actions">
-          <Button variant="ghost" onClick={() => setConfirmReset(false)}>Cancel</Button>
+          <Button variant="text" onClick={() => setConfirmReset(false)}>Cancel</Button>
           <Button
-            variant="primary"
+            variant="filled"
             onClick={() => {
               setConfirmReset(false);
               dispatch({ type: "log", level: "info", text: "reset: device rebooted (sim)" });

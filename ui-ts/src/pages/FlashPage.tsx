@@ -8,7 +8,7 @@ import { Button, HoldButton } from "../components/Button";
 import { SwitchRow } from "../components/Switch";
 import { Progress } from "../components/Progress";
 import { bytes, eta, rate } from "../lib/format";
-import { item, stagger, springSnappy } from "../lib/motion";
+import { item, stagger } from "../lib/motion";
 
 interface Filled {
   name: string;
@@ -51,11 +51,13 @@ export function FlashPage() {
     return (
       <div className="page" style={{ display: "grid", placeItems: "center", minHeight: "60vh" }}>
         <motion.div
-          initial={{ opacity: 0, y: 10 }}
+          initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           style={{ textAlign: "center", color: "var(--text-2)" }}
         >
-          <Zap size={28} style={{ marginBottom: 10, opacity: 0.5 }} />
+          <div className="m3-empty-icon" style={{ marginBottom: 16 }}>
+            <Zap size={36} strokeWidth={1.6} />
+          </div>
           <p>No device — connect one on the Device page to unlock flashing.</p>
         </motion.div>
       </div>
@@ -71,19 +73,19 @@ export function FlashPage() {
           <motion.div
             key="job"
             className="card pad"
-            initial={{ opacity: 0, y: -14, scale: 0.99 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -10 }}
-            transition={springSnappy}
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.25, ease: [0.05, 0.7, 0.1, 1] }}
             style={{ marginBottom: 20 }}
           >
             {job.finished && !job.failed && (
-              <motion.div className="banner-ok" initial={{ opacity: 0, scale: 0.97 }} animate={{ opacity: 1, scale: 1 }}>
+              <motion.div className="banner-ok" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
                 ✔ Job finished — device rebooted.
               </motion.div>
             )}
             {job.finished && job.failed && (
-              <motion.div className="banner-err" initial={{ opacity: 0, scale: 0.97 }} animate={{ opacity: 1, scale: 1 }}>
+              <motion.div className="banner-err" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
                 ⚠ Job cancelled — session torn down.
               </motion.div>
             )}
@@ -94,7 +96,7 @@ export function FlashPage() {
               <span className="mono">{rate(job.rate)}</span>
               <span style={{ marginLeft: "auto" }} className="mono">ETA {eta(job.eta)}</span>
               {!job.finished && (
-                <Button variant="ghost" onClick={cancelFlash}>Cancel</Button>
+                <Button variant="text" onClick={cancelFlash}>Cancel</Button>
               )}
             </div>
             <div className="prog-label">{job.label}</div>
@@ -110,7 +112,7 @@ export function FlashPage() {
           animate="animate"
         >
           <div className="flash-head">
-            <span className="dot" style={{ background: v.color, width: 9, height: 9 }} />
+            <span className="dot" style={{ background: v.color }} />
             <b>{v.name} flash plan</b>
             <span className="note">slot layout mirrors the {v.name} module's real inputs</span>
           </div>
@@ -123,12 +125,9 @@ export function FlashPage() {
                 variants={item}
                 className={`slot ${f ? "filled" : ""} ${s.disabledNote ? "disabled" : ""}`}
                 onClick={() => fill(s)}
-                whileHover={s.disabledNote || f ? undefined : { scale: 1.005 }}
-                whileTap={s.disabledNote || f ? undefined : { scale: 0.995 }}
-                transition={springSnappy}
               >
                 <div className="slot-title">
-                  {s.disabledNote ? <Lock size={15} /> : f ? <FileText size={15} color="var(--accent)" /> : <FileText size={15} />}
+                  {s.disabledNote ? <Lock size={16} /> : f ? <FileText size={16} color="var(--accent)" /> : <FileText size={16} />}
                   {s.label}
                   <span className={`req ${s.required ? "yes" : "opt"}`}>
                     {s.disabledNote ? "SOON" : s.required ? "REQUIRED" : "OPTIONAL"}
@@ -142,13 +141,14 @@ export function FlashPage() {
                 {f && (
                   <motion.div
                     className="slot-file"
-                    initial={{ opacity: 0, x: -8 }}
+                    initial={{ opacity: 0, x: -6 }}
                     animate={{ opacity: 1, x: 0 }}
+                    transition={{ duration: 0.2, ease: [0.2, 0, 0, 1] }}
                   >
                     <span className="mono">{f.name}</span>
                     <span className="size mono">{bytes(f.size)}</span>
                     <button className="slot-x" onClick={clear(s.id)} aria-label="remove">
-                      <X size={13} />
+                      <X size={14} />
                     </button>
                   </motion.div>
                 )}
@@ -197,7 +197,7 @@ export function FlashPage() {
             </div>
           </motion.div>
 
-          <motion.div variants={item} style={{ marginTop: 18 }}>
+          <motion.div variants={item} style={{ marginTop: 20 }}>
             {destructive ? (
               <HoldButton
                 disabled={requiredMissing || running}
@@ -207,7 +207,7 @@ export function FlashPage() {
               />
             ) : (
               <Button
-                variant="primary"
+                variant="filled"
                 large
                 block
                 disabled={requiredMissing || running}
@@ -216,7 +216,7 @@ export function FlashPage() {
                 <Zap size={16} /> Start flash
               </Button>
             )}
-            <p style={{ fontSize: 11.5, color: "var(--text-3)", textAlign: "center", margin: "10px 0 0" }}>
+            <p style={{ fontSize: 12, color: "var(--text-2)", textAlign: "center", margin: "12px 0 0" }}>
               {requiredMissing
                 ? "Stage the required files to enable start"
                 : destructive

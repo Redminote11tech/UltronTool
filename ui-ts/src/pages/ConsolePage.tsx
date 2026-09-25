@@ -6,7 +6,7 @@ import type { Level } from "../state/bus";
 import { Button } from "../components/Button";
 import { Switch } from "../components/Switch";
 import { clock } from "../lib/format";
-import { springSnappy } from "../lib/motion";
+import { railTransition } from "../lib/motion";
 
 const FILTERS: { id: "all" | Level; label: string }[] = [
   { id: "all", label: "All" },
@@ -35,7 +35,7 @@ export function ConsolePage() {
           {FILTERS.map((f) => (
             <button key={f.id} onClick={() => setFilter(f.id)} role="tab" aria-selected={filter === f.id}>
               {filter === f.id && (
-                <motion.span layoutId="seg-active" className="seg-active" transition={springSnappy} />
+                <motion.span layoutId="seg-active" className="seg-active" transition={railTransition} />
               )}
               <span>{f.label}</span>
             </button>
@@ -45,10 +45,10 @@ export function ConsolePage() {
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text-2)" }}>
             Autoscroll <Switch on={autoscroll} onChange={setAutoscroll} />
           </label>
-          <Button variant="ghost" onClick={() => { dispatch({ type: "clearLogs" }); toast(true, "Console cleared"); }}>
+          <Button variant="text" onClick={() => { dispatch({ type: "clearLogs" }); toast(true, "Console cleared"); }}>
             <Trash2 size={14} /> Clear
           </Button>
-          <Button variant="ghost" onClick={() => toast(true, "Log saved", "ultron-session.log (simulated)")}>
+          <Button variant="text" onClick={() => toast(true, "Log saved", "ultron-session.log (simulated)")}>
             <Save size={14} /> Save
           </Button>
         </div>
