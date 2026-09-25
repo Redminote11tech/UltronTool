@@ -1,11 +1,15 @@
 # Ultron — TS UI experiment (`ts-ui` branch)
 
-A design experiment: the same Ultron flashing tool, reimagined with a
-TypeScript frontend rendered in a **native desktop window** (Tauri 2 +
-webkit2gtk on Linux) — not a website in a browser. The Zig flashing core on
-`main` is untouched; nothing here is wired to hardware yet.
+A UI experiment for the same Ultron flashing tool: a TypeScript frontend
+rendered in a **native desktop window** (Tauri 2 + webkit2gtk on Linux) —
+not a website in a browser. The proven Zig GTK app on `main` is untouched;
+this branch additively adds a headless IPC daemon (`src/ipc/`) and, since
+**0.3.0, the TS UI is wired to the real flashing core** for Qualcomm EDL
+(see Status below).
 
 ![device page](docs/device-connected.png)
+*Browser preview of the device page. In the native window the same page
+lists real detected devices (daemon mode) instead of this simulated card.*
 
 > **Design history:** the first skin, "Precision Dark" (custom near-black
 > surfaces, springs everywhere, glow accents), is preserved on branch
@@ -17,9 +21,11 @@ webkit2gtk on Linux) — not a website in a browser. The Zig flashing core on
 GTK4/libadwaita is correct for the shipped app (native, fast, dependency-free
 runtime) but its animation and layout vocabulary is limited. This branch
 explores what the product could feel like with a web-grade rendering stack:
-springs everywhere, shared-element transitions, hold-to-confirm destructives.
-If the experiment lands, the frontend stays; the backend becomes a thin IPC
-bridge to the existing Zig `manager.zig` (phase 2).
+state layers, shared-element transitions, hold-to-confirm destructives.
+The backend question turned out to have a small answer: a headless Zig
+daemon (`ultron-daemon`, line-JSON over stdio, spawned by the shell) exposes
+the existing scanner + manager — no protocol logic moved, no second
+implementation, the GTK app keeps working unchanged.
 
 ## Art direction — Material 3
 
@@ -53,6 +59,8 @@ mirrors each vendor module's real inputs, and protocol/app log separation.
 - **Slot staging** mirrors what each vendor module actually consumes (programmer
   + rawprogram/patch for Qualcomm; BL/AP/CP/CSC/PIT for Samsung; FDL1/FDL2 for
   Unisoc, with the unlanded PAC parser shown locked "SOON" instead of hidden).
+  The sim mode renders every vendor's layout for design review; the
+  daemon-wired flow is currently Qualcomm's.
 - **Job telemetry** is byte-accurate: percent, bytes, throughput, ETA and the
   current protocol step in one strip, with cancel always one click away.
 - **Console** separates protocol chatter (violet mono) from app events, with
@@ -78,44 +86,54 @@ Scope notes:
 
 ## Run it
 
-Frontend only (design iteration, in a browser tab):
+Frontend only (design iteration, in a browser tab — runs the simulated bus):
 
 ```sh
 cd ui-ts && npm install && npm run dev   # http://localhost:5173
 ```
 
-Native window (Tauri 2 shell in `../src-tauri`, uses webkit2gtk-4.1):
+Native window with the real core (Tauri 2 shell in `../src-tauri`):
 
 ```sh
-cd src-tauri && cargo run        # debug build loads the dev server
+zig build                 # repo root — also produces zig-out/bin/ultron-daemon
+cd src-tauri && cargo run # debug shell loads the dev server, spawns the daemon
 # release, self-contained (embeds ../ui-ts/dist):
 cd src-tauri && cargo build --release && ./target/release/ultron-ui
 ```
 
-Requires: node ≥ 20, rust, `webkit2gtk-4.1` (all present on a stock Arch dev
-setup; `libayatana-appindicator3` only if tray support is ever added).
+The shell resolves the daemon from `ULTRON_DAEMON_PATH`, the executable
+directory, or a `zig-out/` tree above it. The packaged version ships it as
+`ultrontool-beta-daemon` next to the GUI binary plus the udev rules.
+
+Requires: node ≥ 20, rust, zig 0.16, `webkit2gtk-4.1` (all present on a
+stock Arch dev setup; `libayatana-appindicator3` only if tray support is
+ever added).
 
 ## Map
 
 ```
-ui-ts/
-├── src/
-│   ├── styles/tokens.css     # the entire design system lives here
-│   ├── styles/app.css        # layout + component micro-detail
-│   ├── state/vendors.ts      # vendor meta, per-vendor file slots, scenarios
-│   ├── state/bus.tsx         # mock event bus (mirrors core/event.zig)
-│   ├── components/           # rail, buttons + hold-to-confirm, switch,
-│   │                         # progress, modal, toasts, brand mark
-│   ├── pages/                # device / flash / console
-│   └── lib/                  # motion presets, byte/rate/eta formatting
-└── docs/                     # screenshots from the design pass
-src-tauri/                    # native shell (Tauri 2, webkit2gtk)
+src/                          # Zig core (branch additions only)
+├── ipc/codec.zig             # the wire contract: events/requests + tests
+├── ipc/daemon.zig            # scanner + manager behind stdio (no CLI, refuses argv)
+└── daemon_main.zig           # ultron-daemon executable entry
+ui-ts/src/
+├── styles/                   # tokens.css (generated M3 palette) + app.css
+├── state/                    # bus.tsx (reducer, both transports) · daemon.ts
+│                             #   (wire mirror) · vendors.ts (meta, slots, sim scenarios)
+├── lib/                      # tauri.ts (ipc + file pickers) · motion.ts · format.ts
+├── components/               # rail, buttons + hold-to-confirm, switch, progress,
+│                             # dialog, snackbars, brand mark
+└── pages/                    # device / flash / console
+src-tauri/                    # Tauri 2 shell: daemon spawn + relay, capabilities,
+└── packaging/                #   build-beta-package.sh (Arch/CachyOS artifact)
 ```
 
-## Phase 2 (not started)
+## What's next (not started)
 
-1. IPC bridge: Zig `manager.zig` exposes a local JSON events/commands socket
-   (or stdio pipe); `bus.tsx` swaps scenarios for the real channel.
-2. Drag-and-drop onto slots, real file pickers through Tauri APIs.
-3. Decision point: keep GTK mainline and treat this as a parallel skin, or
-   promote it — that call belongs to the owner after trying both on hardware.
+1. Port the vendor one-shot flows (Samsung tar.md5, LG, MTK, Unisoc) from the
+   GTK UI layer into daemon jobs, then light up their pages here.
+2. Surface partition ops, UFS provisioning and the Huawei UPDATE.APP path
+   (the daemon protocol already carries them).
+3. Drag-and-drop onto slots.
+4. Decision point: promote the TS UI or keep it as a parallel skin — the
+   owner's call after trying both on hardware.
