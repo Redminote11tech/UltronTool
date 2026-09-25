@@ -7,6 +7,11 @@ webkit2gtk on Linux) — not a website in a browser. The Zig flashing core on
 
 ![device page](docs/device-connected.png)
 
+> **Design history:** the first skin, "Precision Dark" (custom near-black
+> surfaces, springs everywhere, glow accents), is preserved on branch
+> `ts-ui-precision-dark` and ships in the `UltronTool-BETA-0.1.0` artifact.
+> The current skin is **Material 3** (below).
+
 ## Why this exists
 
 GTK4/libadwaita is correct for the shipped app (native, fast, dependency-free
@@ -16,25 +21,29 @@ springs everywhere, shared-element transitions, hold-to-confirm destructives.
 If the experiment lands, the frontend stays; the backend becomes a thin IPC
 bridge to the existing Zig `manager.zig` (phase 2).
 
-## Art direction — "Precision Dark"
+## Art direction — Material 3
 
-A control-room instrument panel, not a consumer app:
+Authentic M3, not M3-flavored: the color roles are **generated** from seed
+`#22d3ee` with Google's `@material/material-color-utilities` (HCT tonal
+palettes) and checked in as static CSS — dark scheme by default, light scheme
+flips on `prefers-color-scheme`. Components follow the spec:
 
-- **Surfaces** — layered near-blacks (`#07080b` → `#1f2431`), hairline
-  separators at 6–12% white. Depth comes from elevation, not shadows.
-- **One accent** — arc cyan `#22d3ee` owns all interaction (focus, progress,
-  primary actions). Red is **reserved for destructive actions** and never used
-  as decoration; amber = caution; emerald = success. Vendor identities
-  (Qualcomm cyan, Samsung blue, LG red, MTK orange, Unisoc green) appear only
-  in status dots and badges.
-- **Type** — Inter Variable for UI, JetBrains Mono with tabular numerals for
-  anything that is data (paths, sizes, rates, hex, logs).
-- **Motion** — springs for anything physical (300–480 stiffness, ≤34 damping),
-  tweens ≤220ms for fades. Every button presses (scale 0.965); cards lift 1px
-  on hover; the nav-rail active pill glides between icons via a shared
-  `layoutId`; pages cross-fade with a 4px blur; progress bars follow values on
-  a soft spring with a sheen sweep. `prefers-reduced-motion` collapses all of
-  it to linear.
+- **Shape** — pill buttons (full radius), 12dp cards, 28dp dialogs, 4dp chips.
+- **State layers** — interaction is answered with the spec's 8% hover / 12%
+  press current-color overlays instead of scale-and-glow. Calm by design.
+- **Type** — Roboto on the M3 type scale (24dp regular headlines, 14/500
+  labels); JetBrains Mono survives only for data (console, hex, sizes).
+- **Motion** — M3 easing curves, no springs: fade-through page transitions
+  (90ms out, 210ms in + 92→100 scale), morphing rail indicator, snackbar
+  slide. Everything answers in ≤350ms.
+- **Components** — M3 navigation rail (icon-in-pill + labels), filled/tonal/
+  outlined/text/error buttons, M3 switches, linear progress with stop-dot,
+  snackbars on inverse-surface, segmented buttons, filter chips with
+  checkmarks.
+
+Kept from the first skin because the logic is sound (owner-approved):
+hold-to-confirm destructives, byte-accurate job telemetry, slot staging that
+mirrors each vendor module's real inputs, and protocol/app log separation.
 
 ## UX logic worth stealing for mainline
 
