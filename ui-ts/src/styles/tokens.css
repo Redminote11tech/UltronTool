@@ -1,0 +1,72 @@
+/*
+ * Ultron TS UI — "Precision Dark" design tokens.
+ *
+ * Art direction: a dark control-room instrument panel. Layered near-black
+ * surfaces, hairline separators, one cold accent (arc cyan) for interaction,
+ * a strict semantic set (ok/warn/danger) that never doubles as decoration.
+ * Vendor identities get their own hue and appear only in badges/dots.
+ * Red is reserved exclusively for destructive actions — never brand chrome.
+ */
+:root {
+  color-scheme: dark;
+
+  /* surfaces, darkest → most elevated */
+  --bg-0: #07080b;
+  --bg-1: #0c0e13;
+  --bg-2: #11141b;
+  --bg-3: #181c25;
+  --bg-4: #1f2431;
+
+  /* hairlines */
+  --stroke-1: rgba(255, 255, 255, 0.06);
+  --stroke-2: rgba(255, 255, 255, 0.12);
+  --stroke-3: rgba(255, 255, 255, 0.2);
+
+  /* text */
+  --text-1: #eceef2;
+  --text-2: #99a1ad;
+  --text-3: #5d6470;
+
+  /* interaction accent (brand chrome, focus, links, progress) */
+  --accent: #22d3ee;
+  --accent-strong: #7dedfb;
+  --accent-dim: rgba(34, 211, 238, 0.12);
+  --accent-glow: 0 0 0 1px rgba(34, 211, 238, 0.28), 0 6px 28px rgba(34, 211, 238, 0.14);
+
+  /* semantics */
+  --ok: #34d399;
+  --ok-dim: rgba(52, 211, 153, 0.12);
+  --warn: #fbbf24;
+  --warn-dim: rgba(251, 191, 36, 0.12);
+  --danger: #f43f5e;
+  --danger-strong: #fb7185;
+  --danger-dim: rgba(244, 63, 94, 0.12);
+
+  /* vendor hues (badges/dots only) */
+  --v-qualcomm: #22d3ee;
+  --v-crash: #fbbf24;
+  --v-samsung: #60a5fa;
+  --v-lg: #f87171;
+  --v-mtk: #fb923c;
+  --v-spd: #4ade80;
+
+  /* type */
+  --sans: "Inter Variable", "Inter", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Code", monospace;
+
+  /* geometry */
+  --r-s: 8px;
+  --r-m: 12px;
+  --r-l: 18px;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 24px rgba(0, 0, 0, 0.35);
+  --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.5), 0 16px 48px rgba(0, 0, 0, 0.45);
+
+  /* motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --ease-out: linear;
+  }
+}
