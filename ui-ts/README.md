@@ -128,6 +128,27 @@ src-tauri/                    # Tauri 2 shell: daemon spawn + relay, capabilitie
 └── packaging/                #   build-beta-package.sh (Arch/CachyOS artifact)
 ```
 
+## Troubleshooting: blank/garbled window on NVIDIA + Wayland
+
+WebKitGTK's DMABUF renderer has a known failure class on proprietary NVIDIA
+drivers (blank/corrupted windows, `WebKitWebProcess` SIGSEGVs inside
+`libEGL_nvidia` — see the [Tauri Linux graphics notes](https://v2.tauri.app/develop/debug/linux-graphics/)
+and [WebKit bug 261874](https://bugs.webkit.org/show_bug.cgi?id=261874)).
+The shell therefore defaults to `WEBKIT_DISABLE_DMABUF_RENDERER=1` at
+startup (escape hatches: set that variable yourself, or
+`ULTRON_WEBKIT_COMPAT=off` to disable all defaults).
+
+Diagnosed 2026-09-25 on CachyOS + NVIDIA 615.71.09 (GTX 1660 SUPER) + a
+Hyprland-family Wayland compositor: the frontend renders perfectly in a
+plain browser, in stock `MiniBrowser`, and in a bare Tauri builder — but
+shows garbage inside the Tauri shell, and none of the documented fallbacks
+(`WEBKIT_DISABLE_DMABUF_RENDERER`, `WEBKIT_DISABLE_COMPOSITING_MODE`,
+`WEBKIT_DMABUF_RENDERER_FORCE_SHM`, `WEBKIT_SKIA_ENABLE_CPU_RENDERING`,
+sandbox off, Mesa EGL vendor, `GDK_BACKEND=x11`, `GSK_RENDERER=cairo`)
+change it. Wayland-protocol capture shows the app stalls committing frames
+~1.3 s after start while the WebProcess stays alive. This is upstream
+territory (wry / WebKitGTK / compositor); the GTK app is unaffected.
+
 ## What's next (not started)
 
 1. Port the vendor one-shot flows (Samsung tar.md5, LG, MTK, Unisoc) from the

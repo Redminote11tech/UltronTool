@@ -112,6 +112,17 @@ fn daemon_send(line: String, state: State<DaemonState>) -> Result<(), String> {
 }
 
 fn main() {
+    // WebKitGTK's DMABUF renderer is the known source of blank/garbled windows
+    // (and WebProcess SIGSEGVs inside libEGL) on NVIDIA + Wayland — the
+    // Tauri-documented workaround is to disable it. Default it on unless the
+    // user picked a mode themselves (env already set, or ULTRON_WEBKIT_COMPAT
+    // set to "off" / "raw" to skip all defaults).
+    let compat = std::env::var("ULTRON_WEBKIT_COMPAT").unwrap_or_default();
+    if compat != "off" && compat != "raw" {
+        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(DaemonState { child: Mutex::new(None) })
