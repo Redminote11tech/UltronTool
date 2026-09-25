@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Ultron Beta (TS UI)
+GenericName=Device flashing tool (experiment)
+Comment=TS UI experiment build — simulated device bus, no hardware access
+Exec=/usr/bin/ultrontool-beta
+Icon=ultrontool-beta
+Terminal=false
+Categories=Development;Utility;
+StartupWMClass=ultrontool-beta
+Keywords=flashing;qualcomm;edl;unbricking;odin;mtk;
