@@ -1,72 +1,167 @@
 /*
- * Ultron TS UI — "Precision Dark" design tokens.
+ * Ultron TS UI — Material 3 tokens.
  *
- * Art direction: a dark control-room instrument panel. Layered near-black
- * surfaces, hairline separators, one cold accent (arc cyan) for interaction,
- * a strict semantic set (ok/warn/danger) that never doubles as decoration.
- * Vendor identities get their own hue and appear only in badges/dots.
- * Red is reserved exclusively for destructive actions — never brand chrome.
+ * Color roles generated from seed #22d3ee with Google's
+ * @material/material-color-utilities (HCT tonal palettes, scheme 0.3.0 +
+ * spec-current surface containers from the neutral palette). Static CSS on
+ * purpose: no runtime dependency, both schemes checked in, light/dark flips
+ * on prefers-color-scheme.
+ *
+ * The --bg / --text / --accent aliases keep the component CSS stable; they
+ * now point at M3 roles instead of the old hand-picked "Precision Dark"
+ * values (that skin lives on branch ts-ui-precision-dark).
  */
+
+/* ----------------------------------------------------------- dark scheme */
 :root {
   color-scheme: dark;
 
-  /* surfaces, darkest → most elevated */
-  --bg-0: #07080b;
-  --bg-1: #0c0e13;
-  --bg-2: #11141b;
-  --bg-3: #181c25;
-  --bg-4: #1f2431;
+  --md-primary: #2fd9f4;
+  --md-on-primary: #00363e;
+  --md-primary-container: #004e5a;
+  --md-on-primary-container: #a2eeff;
+  --md-secondary: #b1cbd1;
+  --md-on-secondary: #1c3439;
+  --md-secondary-container: #334a50;
+  --md-on-secondary-container: #cde7ed;
+  --md-tertiary: #bcc5eb;
+  --md-on-tertiary: #262f4d;
+  --md-tertiary-container: #3d4665;
+  --md-on-tertiary-container: #dbe1ff;
+  --md-error: #ffb4ab;
+  --md-on-error: #690005;
+  --md-error-container: #93000a;
+  --md-on-error-container: #ffb4ab;
+  --md-surface: #191c1d;
+  --md-on-surface: #e1e3e3;
+  --md-on-surface-variant: #bfc8cb;
+  --md-outline: #899295;
+  --md-outline-variant: #3f484a;
+  --md-inverse-surface: #e1e3e3;
+  --md-inverse-on-surface: #2e3132;
+  --md-inverse-primary: #006877;
+  --md-surface-dim: #111415;
+  --md-surface-container-lowest: #0b0f10;
+  --md-surface-container-low: #191c1d;
+  --md-surface-container: #1d2021;
+  --md-surface-container-high: #272a2b;
+  --md-surface-container-highest: #323536;
 
-  /* hairlines */
-  --stroke-1: rgba(255, 255, 255, 0.06);
-  --stroke-2: rgba(255, 255, 255, 0.12);
-  --stroke-3: rgba(255, 255, 255, 0.2);
+  /* app aliases (dark) */
+  --bg-0: var(--md-surface-dim);
+  --bg-1: var(--md-surface-container-low);
+  --bg-2: var(--md-surface-container);
+  --bg-3: var(--md-surface-container-high);
+  --bg-4: var(--md-surface-container-highest);
+  --text-1: var(--md-on-surface);
+  --text-2: var(--md-on-surface-variant);
+  --text-3: var(--md-outline);
+  --stroke-1: var(--md-outline-variant);
+  --stroke-2: var(--md-outline);
+  --accent: var(--md-primary);
+  --accent-strong: var(--md-primary);
+  --accent-dim: color-mix(in srgb, var(--md-primary) 16%, transparent);
+  --ok: #7adb9e;
+  --warn: #e8c268;
+  --danger: var(--md-error);
+  --danger-strong: var(--md-error);
+  --danger-dim: color-mix(in srgb, var(--md-error) 14%, transparent);
+  --ok-dim: color-mix(in srgb, var(--ok) 14%, transparent);
+  --warn-dim: color-mix(in srgb, var(--warn) 14%, transparent);
+  --scrim: rgba(0, 0, 0, 0.5);
 
-  /* text */
-  --text-1: #eceef2;
-  --text-2: #99a1ad;
-  --text-3: #5d6470;
-
-  /* interaction accent (brand chrome, focus, links, progress) */
-  --accent: #22d3ee;
-  --accent-strong: #7dedfb;
-  --accent-dim: rgba(34, 211, 238, 0.12);
-  --accent-glow: 0 0 0 1px rgba(34, 211, 238, 0.28), 0 6px 28px rgba(34, 211, 238, 0.14);
-
-  /* semantics */
-  --ok: #34d399;
-  --ok-dim: rgba(52, 211, 153, 0.12);
-  --warn: #fbbf24;
-  --warn-dim: rgba(251, 191, 36, 0.12);
-  --danger: #f43f5e;
-  --danger-strong: #fb7185;
-  --danger-dim: rgba(244, 63, 94, 0.12);
-
-  /* vendor hues (badges/dots only) */
+  /* vendor hues (status dots / badges only) */
   --v-qualcomm: #22d3ee;
   --v-crash: #fbbf24;
-  --v-samsung: #60a5fa;
+  --v-samsung: #8ab4f8;
   --v-lg: #f87171;
   --v-mtk: #fb923c;
   --v-spd: #4ade80;
 
-  /* type */
-  --sans: "Inter Variable", "Inter", system-ui, sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, "Cascadia Code", monospace;
+  /* type — M3 type scale, Roboto */
+  --sans: "Roboto", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
 
-  /* geometry */
+  /* M3 shape: 4/8/16/28 */
+  --r-xs: 4px;
   --r-s: 8px;
-  --r-m: 12px;
-  --r-l: 18px;
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 24px rgba(0, 0, 0, 0.35);
-  --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.5), 0 16px 48px rgba(0, 0, 0, 0.45);
+  --r-m: 16px;
+  --r-l: 28px;
+  --r-full: 999px;
 
-  /* motion */
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  /* M3 elevation level 1 (dark: subtle shadow, tonal surfaces do the work) */
+  --shadow-1: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-3: 0 4px 8px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
-@media (prefers-reduced-motion: reduce) {
+/* ---------------------------------------------------------- light scheme */
+@media (prefers-color-scheme: light) {
   :root {
-    --ease-out: linear;
+    color-scheme: light;
+
+    --md-primary: #006877;
+    --md-on-primary: #ffffff;
+    --md-primary-container: #a2eeff;
+    --md-on-primary-container: #001f25;
+    --md-secondary: #4a6268;
+    --md-on-secondary: #ffffff;
+    --md-secondary-container: #cde7ed;
+    --md-on-secondary-container: #051f24;
+    --md-tertiary: #545d7e;
+    --md-on-tertiary: #ffffff;
+    --md-tertiary-container: #dbe1ff;
+    --md-on-tertiary-container: #101a37;
+    --md-error: #ba1a1a;
+    --md-on-error: #ffffff;
+    --md-error-container: #ffdad6;
+    --md-on-error-container: #410002;
+    --md-surface: #fbfcfd;
+    --md-on-surface: #191c1d;
+    --md-on-surface-variant: #3f484a;
+    --md-outline: #6f797b;
+    --md-outline-variant: #bfc8cb;
+    --md-inverse-surface: #2e3132;
+    --md-inverse-on-surface: #eff1f2;
+    --md-inverse-primary: #2fd9f4;
+    --md-surface-dim: #d8dadb;
+    --md-surface-container-lowest: #ffffff;
+    --md-surface-container-low: #f2f4f5;
+    --md-surface-container: #eceeef;
+    --md-surface-container-high: #e6e8e9;
+    --md-surface-container-highest: #e1e3e3;
+
+    --bg-0: var(--md-surface);
+    --bg-1: var(--md-surface-container-low);
+    --bg-2: var(--md-surface-container-lowest);
+    --bg-3: var(--md-surface-container-high);
+    --bg-4: var(--md-surface-container-highest);
+    --text-1: var(--md-on-surface);
+    --text-2: var(--md-on-surface-variant);
+    --text-3: var(--md-outline);
+    --stroke-1: var(--md-outline-variant);
+    --stroke-2: var(--md-outline);
+    --accent: var(--md-primary);
+    --accent-strong: var(--md-primary);
+    --accent-dim: color-mix(in srgb, var(--md-primary) 14%, transparent);
+    --ok: #1e6b3c;
+    --warn: #7a5900;
+    --danger: var(--md-error);
+    --danger-strong: var(--md-error);
+    --danger-dim: color-mix(in srgb, var(--md-error) 10%, transparent);
+    --ok-dim: color-mix(in srgb, var(--ok) 12%, transparent);
+    --warn-dim: color-mix(in srgb, var(--warn) 12%, transparent);
+    --scrim: rgba(0, 0, 0, 0.4);
+
+    --v-qualcomm: #0087a5;
+    --v-crash: #9a6b00;
+    --v-samsung: #3c6ab8;
+    --v-lg: #c04848;
+    --v-mtk: #c2661f;
+    --v-spd: #2e7d43;
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.15);
+    --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.16), 0 1px 2px rgba(0, 0, 0, 0.1);
+    --shadow-3: 0 4px 8px rgba(0, 0, 0, 0.15), 0 1px 3px rgba(0, 0, 0, 0.1);
   }
 }
