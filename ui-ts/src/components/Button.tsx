@@ -1,45 +1,38 @@
 import { motion, AnimatePresence } from "motion/react";
 import { useRef, useState } from "react";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
-import { springSnappy } from "../lib/motion";
 
-type Variant = "default" | "primary" | "ghost" | "danger";
+type Variant = "filled" | "tonal" | "outlined" | "text" | "error";
 
-/** Every button answers the click with a spring press (scale 0.965) and a
- * 1px lift on hover — the tactile baseline for the whole app. */
+/** M3 buttons: pill shape + state layers; no lift, no scale. */
 export function Button({
-  variant = "default",
+  variant = "text",
   large,
   block,
   children,
+  className,
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; large?: boolean; block?: boolean }) {
-  const cls = ["btn", variant !== "default" ? variant : "", large ? "lg" : "", block ? "block" : ""]
+  const cls = ["btn", variant, large ? "lg" : "", block ? "block" : "", className ?? ""]
     .filter(Boolean)
     .join(" ");
   return (
-    <motion.button
-      className={cls}
-      whileHover={rest.disabled ? undefined : { y: -1 }}
-      whileTap={rest.disabled ? undefined : { scale: 0.965 }}
-      transition={springSnappy}
-      {...(rest as object)}
-    >
+    <button className={cls} {...rest}>
       {children}
-    </motion.button>
+    </button>
   );
 }
 
 /**
- * Hold-to-confirm: the guard rail for destructive ops. The fill sweeps left→
- * right while held (~900ms); release early and it drains back. Visualizes
- * commitment instead of nagging with a second dialog.
+ * Hold-to-confirm for destructive ops (kept from the previous design — the
+ * UX idea survives the reskin): fill sweeps while held (~900ms), drains back
+ * on early release.
  */
 export function HoldButton({
   onConfirm,
   label,
   holdingLabel = "Keep holding…",
-  className = "btn danger lg block hold",
+  className = "btn error lg block",
   disabled,
 }: {
   onConfirm: () => void;
@@ -79,16 +72,14 @@ export function HoldButton({
   };
 
   return (
-    <motion.button
-      className={className}
+    <button
+      className={className + " hold"}
       disabled={disabled}
       onPointerDown={begin}
       onPointerUp={stop}
       onPointerLeave={(e) => {
         if (e.buttons !== 0) stop();
       }}
-      whileTap={disabled ? undefined : { scale: 0.98 }}
-      transition={springSnappy}
     >
       <span
         className="hold-fill"
@@ -98,16 +89,16 @@ export function HoldButton({
         <AnimatePresence mode="wait" initial={false}>
           <motion.span
             key={holding ? "h" : "l"}
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.12 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.1 }}
             style={{ display: "inline-flex", alignItems: "center", gap: 8 }}
           >
             {holding ? holdingLabel : label}
           </motion.span>
         </AnimatePresence>
       </span>
-    </motion.button>
+    </button>
   );
 }

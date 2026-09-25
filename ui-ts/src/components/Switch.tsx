@@ -1,5 +1,5 @@
 import { motion } from "motion/react";
-import { springSnappy } from "../lib/motion";
+import { EASE_EMPHASIZED } from "../lib/motion";
 
 export function Switch({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -11,8 +11,14 @@ export function Switch({ on, onChange }: { on: boolean; onChange: (v: boolean) =
     >
       <motion.span
         className="switch knob"
-        animate={{ left: on ? 19 : 3, backgroundColor: on ? "var(--accent-strong)" : "var(--text-2)" }}
-        transition={springSnappy}
+        animate={{
+          left: on ? 24 : 5,
+          width: on ? 24 : 18,
+          height: on ? 24 : 18,
+          top: on ? 2 : 5,
+          backgroundColor: on ? "var(--md-on-primary)" : "var(--text-2)",
+        }}
+        transition={{ duration: 0.2, ease: EASE_EMPHASIZED }}
       />
     </button>
   );

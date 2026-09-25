@@ -1,7 +1,8 @@
 import { motion, AnimatePresence } from "motion/react";
 import type { ReactNode } from "react";
-import { springGentle } from "../lib/motion";
+import { dialog } from "../lib/motion";
 
+/** M3 basic dialog: 28dp corners on surface-container-high, scrim behind. */
 export function Modal({ open, children }: { open: boolean; children: ReactNode }) {
   return (
     <AnimatePresence>
@@ -11,15 +12,9 @@ export function Modal({ open, children }: { open: boolean; children: ReactNode }
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          transition={{ duration: 0.16 }}
+          transition={{ duration: 0.15 }}
         >
-          <motion.div
-            className="modal-panel"
-            initial={{ scale: 0.94, y: 14, opacity: 0 }}
-            animate={{ scale: 1, y: 0, opacity: 1 }}
-            exit={{ scale: 0.96, y: 8, opacity: 0 }}
-            transition={springGentle}
-          >
+          <motion.div className="modal-panel" variants={dialog} initial="initial" animate="animate" exit="exit">
             {children}
           </motion.div>
         </motion.div>
