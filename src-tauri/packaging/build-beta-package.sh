@@ -12,7 +12,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 ver="0.3.0"
-pkgrel="1"
+pkgrel="2"
 name="ultrontool-beta"
 out="UltronTool-BETA-${ver}-${pkgrel}-x86_64.pkg.tar.zst"
 stage="$(mktemp -d)"
@@ -35,7 +35,10 @@ if [[ -x "$daemon" ]]; then
 else
   echo "warning: zig-out/bin/ultron-daemon missing — build it: zig build -Doptimize=ReleaseSafe" >&2
 fi
-install -Dm644 "${root}/data/70-ultron.rules" "$stage/usr/lib/udev/rules.d/70-ultron.rules"
+# udev rules under the beta's own filename: the stable `ultron` package owns
+# 70-ultron.rules, and pacman refuses two packages owning one file. Both
+# files carry identical directives — udev applies them idempotently.
+install -Dm644 "${root}/data/70-ultron.rules" "$stage/usr/lib/udev/rules.d/70-ultrontool-beta.rules"
 
 install -Dm644 "${root}/LICENSE" "$stage/usr/share/licenses/${name}/LICENSE"
 install -Dm644 "${root}/src-tauri/packaging/${name}.desktop" "$stage/usr/share/applications/${name}.desktop"
