@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Ultron TS UI default capability",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:default"]
+}
