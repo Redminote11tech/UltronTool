@@ -1,7 +1,7 @@
 {
   "name": "ultron-ui-ts",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Ultron TS UI experiment — native window via Tauri 2, webview-rendered frontend",
   "scripts": {
