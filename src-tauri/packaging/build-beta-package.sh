@@ -2,8 +2,8 @@
 # Build the UltronTool-BETA package for Arch/CachyOS from the TS UI experiment.
 #
 # Contents: the self-contained Tauri release binary (embeds ui-ts/dist) as
-# /usr/bin/ultrontool-beta, plus desktop entry, hicolor icons and license.
-# Simulated device bus — this package cannot touch hardware.
+# /usr/bin/ultrontool-beta, the Zig IPC daemon (ultrontool-beta-daemon) it
+# spawns, udev rules for download-mode devices, desktop entry, icons, license.
 #
 # Hand-rolled like the stable ultron package (makepkg's pkg/ handling is
 # unreliable in this environment): plain staging + .PKGINFO/.INSTALL/.MTREE
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-ver="0.2.0"
+ver="0.3.0"
 pkgrel="1"
 name="ultrontool-beta"
 out="UltronTool-BETA-${ver}-${pkgrel}-x86_64.pkg.tar.zst"
@@ -26,6 +26,17 @@ if [[ ! -x "$bin" ]]; then
 fi
 
 install -Dm755 "$bin" "$stage/usr/bin/${name}"
+
+# The Zig IPC daemon rides along as a sibling of the GUI binary — the shell
+# resolves it via exe_dir at startup. udev rules grant device access.
+daemon="${root}/zig-out/bin/ultron-daemon"
+if [[ -x "$daemon" ]]; then
+  install -Dm755 "$daemon" "$stage/usr/bin/${name}-daemon"
+else
+  echo "warning: zig-out/bin/ultron-daemon missing — build it: zig build -Doptimize=ReleaseSafe" >&2
+fi
+install -Dm644 "${root}/data/70-ultron.rules" "$stage/usr/lib/udev/rules.d/70-ultron.rules"
+
 install -Dm644 "${root}/LICENSE" "$stage/usr/share/licenses/${name}/LICENSE"
 install -Dm644 "${root}/src-tauri/packaging/${name}.desktop" "$stage/usr/share/applications/${name}.desktop"
 install -Dm644 "${root}/src-tauri/icons/icon.png" "$stage/usr/share/icons/hicolor/128x128/apps/${name}.png"
@@ -38,7 +49,7 @@ cat > "$stage/.PKGINFO" <<EOF
 pkgname = ${name}
 pkgbase = ${name}
 pkgver = ${ver}-${pkgrel}
-pkgdesc = Ultron Beta — TS UI experiment in a native Tauri window (simulated device bus, no hardware access)
+pkgdesc = Ultron Beta — TS UI in a native Tauri window, wired to the real Zig flashing core (Qualcomm EDL; hardware required)
 url = https://github.com/Redminote11tech/UltronTool
 builddate = ${builddate}
 packager = jade <jade@localhost>
@@ -54,6 +65,10 @@ cat > "$stage/.INSTALL" <<'EOF'
 post_install() {
   update-desktop-database -q 2>/dev/null || true
   gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
+  if [ -d /usr/lib/udev/rules.d ]; then
+    udevadm control --reload 2>/dev/null || true
+    udevadm trigger 2>/dev/null || true
+  fi
 }
 post_upgrade() {
   post_install
