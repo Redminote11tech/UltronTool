@@ -7,7 +7,7 @@ export const EASE_DECELERATE = [0.05, 0.7, 0.1, 1] as const;
 
 /** M3 fade-through for page navigation: exit 90ms, enter 210ms + scale 92→100. */
 export const pageVariants: Variants = {
-  initial: { opacity: 0, scale: 0.92 },
+  initial: { opacity: 0, scale: 0.98 },
   animate: { opacity: 1, scale: 1, transition: { duration: 0.21, ease: EASE_DECELERATE } },
   exit: { opacity: 0, transition: { duration: 0.09, ease: "linear" } },
 };

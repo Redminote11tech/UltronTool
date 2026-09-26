@@ -133,26 +133,33 @@ src-tauri/                    # Tauri 2 shell: daemon spawn + relay, capabilitie
 └── packaging/                #   build-beta-package.sh (Arch/CachyOS artifact)
 ```
 
-## Troubleshooting: blank/garbled window on NVIDIA + Wayland
+## Troubleshooting history: the "garbled window" (solved 2026-09-26)
 
-WebKitGTK's DMABUF renderer has a known failure class on proprietary NVIDIA
-drivers (blank/corrupted windows, `WebKitWebProcess` SIGSEGVs inside
-`libEGL_nvidia` — see the [Tauri Linux graphics notes](https://v2.tauri.app/develop/debug/linux-graphics/)
-and [WebKit bug 261874](https://bugs.webkit.org/show_bug.cgi?id=261874)).
-The shell therefore defaults to `WEBKIT_DISABLE_DMABUF_RENDERER=1` at
-startup (escape hatches: set that variable yourself, or
-`ULTRON_WEBKIT_COMPAT=off` to disable all defaults).
+The beta first launched as a dark window showing blurred garbage. Two real
+bugs, both fixed — and a wrong theory chased first, recorded here so nobody
+re-chases it:
 
-Diagnosed 2026-09-25 on CachyOS + NVIDIA 615.71.09 (GTX 1660 SUPER) + a
-Hyprland-family Wayland compositor: the frontend renders perfectly in a
-plain browser, in stock `MiniBrowser`, and in a bare Tauri builder — but
-shows garbage inside the Tauri shell, and none of the documented fallbacks
-(`WEBKIT_DISABLE_DMABUF_RENDERER`, `WEBKIT_DISABLE_COMPOSITING_MODE`,
-`WEBKIT_DMABUF_RENDERER_FORCE_SHM`, `WEBKIT_SKIA_ENABLE_CPU_RENDERING`,
-sandbox off, Mesa EGL vendor, `GDK_BACKEND=x11`, `GSK_RENDERER=cairo`)
-change it. Wayland-protocol capture shows the app stalls committing frames
-~1.3 s after start while the WebProcess stays alive. This is upstream
-territory (wry / WebKitGTK / compositor); the GTK app is unaffected.
+1. **Beta ≤ 0.3.0-3 never embedded the frontend.** Tauri only bundles
+   `frontendDist` when built with its `custom-protocol` feature; a plain
+   `cargo build --release` keeps the dev URL, so the installed app depended
+   on a live dev server and died with "Could not connect to localhost"
+   after any reboot. Fixed: `[features] custom-protocol = ["tauri/custom-protocol"]`;
+   release builds MUST pass `--features custom-protocol`.
+2. **Infinite re-render crash.** `BusProvider` dispatched `sourceSet` inside
+   a `useMemo` keyed on state: dispatch → state change → memo re-runs →
+   dispatch again — React aborted with "Too many re-renders" ~1.3 s after
+   load. The crashed page left the window transparent, and the compositor's
+   blur-on-translucent-windows painted the desktop backdrop scaled and
+   blurred on top — which looked exactly like a GPU driver bug and sent the
+   investigation chasing WebKitGTK/NVIDIA DMABUF issues (11 env workarounds,
+   all irrelevant). The tell was that the same content rendered perfectly in
+   a stock `MiniBrowser` and another Tauri app on the same machine. Fixed:
+   commands are memoized once; the daemon subscription lives in a
+   mount-once effect.
+
+The shell still defaults `WEBKIT_DISABLE_DMABUF_RENDERER=1` (escape hatch
+`ULTRON_WEBKIT_COMPAT=off`) as a precaution for the genuinely known
+WebKitGTK-on-NVIDIA blank-window class — it is simply not what bit us here.
 
 ## What's next (not started)
 

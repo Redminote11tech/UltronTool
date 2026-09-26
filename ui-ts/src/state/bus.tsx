@@ -2,7 +2,7 @@
  *  - daemon (real): line-JSON events from the Zig ultron-daemon via Tauri
  *  - sim (design iteration in a plain browser): scripted scenarios
  * Pages are transport-agnostic except where they check `source`. */
-import { createContext, useContext, useMemo, useReducer, useRef } from "react";
+import { createContext, useContext, useEffect, useMemo, useReducer, useRef } from "react";
 import type { ReactNode } from "react";
 import { SCENARIOS, VENDORS } from "./vendors";
 import type { Mode } from "./vendors";
@@ -224,7 +224,7 @@ export function BusProvider({ children }: { children: ReactNode }) {
   const pendingFlash = useRef<{ files: string[]; storage: Storage; skipInit: boolean } | null>(null);
   const lastTick = useRef<{ at: number; done: number } | null>(null);
 
-  const api = useMemo<Api>(() => {
+  const api = useMemo<Omit<Api, "state" | "dispatch">>(() => {
     const toast = (ok: boolean, title: string, body?: string) =>
       dispatch({ type: "toast", toast: { id: ++toastId, ok, title, body } });
 
@@ -354,81 +354,11 @@ export function BusProvider({ children }: { children: ReactNode }) {
       toast(false, "Job cancelled", "Device left in current mode");
     };
 
-    // Daemon event wiring (once, on mount).
-    if (isTauri()) {
-      dispatch({ type: "sourceSet", source: "daemon" });
-      let session: SessionState = "disconnected";
-      onDaemonEvent((e) => {
-        switch (e.ev) {
-          case "hello":
-            return;
-          case "log": {
-            const level: Level = e.level === "debug" ? "info" : e.level;
-            dispatch({ type: "log", level, text: e.text });
-            return;
-          }
-          case "device_added":
-            dispatch({ type: "devAdd", dev: e });
-            return;
-          case "device_removed":
-            dispatch({ type: "devRemove", path: e.path });
-            return;
-          case "state":
-            session = e.state;
-            dispatch({ type: "session", session: e.state });
-            return;
-          case "progress": {
-            const now = performance.now();
-            let rate = 0;
-            if (lastTick.current && now > lastTick.current.at) {
-              rate = Math.max(0, (e.done - lastTick.current.done) / ((now - lastTick.current.at) / 1000));
-            }
-            lastTick.current = { at: now, done: e.done };
-            const s = stateRef.current;
-            const frac = e.total > 0 ? e.done / e.total : 0;
-            const eta = rate > 0 ? Math.round((e.total - e.done) / rate) : 0;
-            if (!s.job || s.job.finished) {
-              dispatch({ type: "jobStart", title: "Device job", total: e.total });
-            }
-            dispatch({ type: "jobProgress", label: e.label, value: e.done, rate, eta });
-            void frac;
-            return;
-          }
-          case "finished": {
-            lastTick.current = null;
-            const chained = pendingFlash.current;
-            pendingFlash.current = null;
-            dispatch({ type: "jobEnd", failed: !e.success });
-            toast(e.success, e.success ? "Job finished" : "Job failed", e.message);
-            if (e.success && chained && session === "firehose_ready") {
-              sendFlashXml(chained.files);
-            }
-            return;
-          }
-          case "chip_info": {
-            const bits = [`Sahara v${e.protocol_version}`];
-            if (e.hwid) bits.push(`hwid ${e.hwid}`);
-            if (e.serial !== null) bits.push(`sn ${e.serial}`);
-            dispatch({ type: "chipEv", chip: bits.join(" · ") });
-            return;
-          }
-          case "partitions":
-            dispatch({ type: "partsEv", lun: e.lun, sector_size: e.sector_size, luns: e.luns, vip: e.vip, rows: e.parts });
-            return;
-          case "huawei_app":
-            return;
-          case "daemon_gone":
-            pendingFlash.current = null;
-            dispatch({ type: "daemonGone", reason: e.reason ?? "unknown" });
-            toast(false, "Backend stopped", e.reason ?? "The Zig daemon exited");
-            return;
-        }
-      });
-    }
+    // Daemon event wiring lives in a mount-once useEffect below — dispatching
+    // from a state-keyed memo here caused an infinite re-render loop that
+    // crashed React (the "garbled window" bug).
 
     return {
-      state,
-      dispatch,
       setMode,
       startFlash,
       connectDevice,
@@ -439,9 +369,83 @@ export function BusProvider({ children }: { children: ReactNode }) {
       cancelFlash,
       toast,
     };
-  }, [state]);
+  }, []);
 
-  return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
+  // Real daemon transport (mount-once): one subscription for the app's
+  // lifetime. A `.finished` closes a job and consumes the cancel flag,
+  // exactly like the GTK UI's jobDone().
+  useEffect(() => {
+    if (!isTauri()) return;
+    dispatch({ type: "sourceSet", source: "daemon" });
+    let session: SessionState = "disconnected";
+    return onDaemonEvent((e) => {
+      switch (e.ev) {
+        case "hello":
+          return;
+        case "log": {
+          const level: Level = e.level === "debug" ? "info" : e.level;
+          dispatch({ type: "log", level, text: e.text });
+          return;
+        }
+        case "device_added":
+          dispatch({ type: "devAdd", dev: e });
+          return;
+        case "device_removed":
+          dispatch({ type: "devRemove", path: e.path });
+          return;
+        case "state":
+          session = e.state;
+          dispatch({ type: "session", session: e.state });
+          return;
+        case "progress": {
+          const now = performance.now();
+          let rate = 0;
+          if (lastTick.current && now > lastTick.current.at) {
+            rate = Math.max(0, (e.done - lastTick.current.done) / ((now - lastTick.current.at) / 1000));
+          }
+          lastTick.current = { at: now, done: e.done };
+          const s = stateRef.current;
+          const eta = rate > 0 ? Math.round((e.total - e.done) / rate) : 0;
+          if (!s.job || s.job.finished) {
+            dispatch({ type: "jobStart", title: "Device job", total: e.total });
+          }
+          dispatch({ type: "jobProgress", label: e.label, value: e.done, rate, eta });
+          return;
+        }
+        case "finished": {
+          lastTick.current = null;
+          const chained = pendingFlash.current;
+          pendingFlash.current = null;
+          dispatch({ type: "jobEnd", failed: !e.success });
+          api.toast(e.success, e.success ? "Job finished" : "Job failed", e.message);
+          if (e.success && chained && session === "firehose_ready") {
+            sendDaemon({ cmd: "flash_xml", files: chained.files, allow_missing: false });
+          }
+          return;
+        }
+        case "chip_info": {
+          const bits = [`Sahara v${e.protocol_version}`];
+          if (e.hwid) bits.push(`hwid ${e.hwid}`);
+          if (e.serial !== null) bits.push(`sn ${e.serial}`);
+          dispatch({ type: "chipEv", chip: bits.join(" · ") });
+          return;
+        }
+        case "partitions":
+          dispatch({ type: "partsEv", lun: e.lun, sector_size: e.sector_size, luns: e.luns, vip: e.vip, rows: e.parts });
+          return;
+        case "huawei_app":
+          return;
+        case "daemon_gone":
+          pendingFlash.current = null;
+          dispatch({ type: "daemonGone", reason: e.reason ?? "unknown" });
+          api.toast(false, "Backend stopped", e.reason ?? "The Zig daemon exited");
+          return;
+      }
+    });
+  }, []);
+
+  const value: Api = { ...api, state, dispatch };
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
 export function useBus(): Api {
