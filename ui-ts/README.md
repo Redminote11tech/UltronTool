@@ -97,9 +97,14 @@ Native window with the real core (Tauri 2 shell in `../src-tauri`):
 ```sh
 zig build                 # repo root — also produces zig-out/bin/ultron-daemon
 cd src-tauri && cargo run # debug shell loads the dev server, spawns the daemon
-# release, self-contained (embeds ../ui-ts/dist):
-cd src-tauri && cargo build --release && ./target/release/ultron-ui
+# release, self-contained — the custom-protocol feature embeds ../ui-ts/dist:
+cd src-tauri && cargo build --release --features custom-protocol && ./target/release/ultron-ui
 ```
+
+> Building release WITHOUT `--features custom-protocol` produces a binary that
+> still points at the dev server (this shipped as a bug in beta ≤ 0.3.0-3:
+> after a reboot, with no dev server running, the app showed
+> "Could not connect to localhost").
 
 The shell resolves the daemon from `ULTRON_DAEMON_PATH`, the executable
 directory, or a `zig-out/` tree above it. The packaged version ships it as

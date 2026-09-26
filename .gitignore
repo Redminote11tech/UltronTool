@@ -29,3 +29,6 @@ AGENTS.md
 # TS UI experiment branch
 ui-ts/node_modules/
 ui-ts/dist/
+
+# Tauri generated schemas (churn on every build)
+src-tauri/gen/
