@@ -3241,13 +3241,17 @@ fn mtkProbeInner(ctx: *MtkProbeCtx) !void {
     defer usb_dev.close();
     var io = transport.Io.init(ui.alloc, usb_dev.transport());
     defer io.deinit();
+    // DA jobs speak the running agent protocol directly (refs/mtkclient).
+    // BROM sync is only valid before the agent has been uploaded.
     var sess = mtk_brom.Session{ .alloc = ui.alloc, .io = &io, .logger = ui.logger, .cancel = &ui.cancel };
-    try sess.configurePort();
-    var info = try sess.getHwCode();
-    try sess.getHwSwVer(&info);
-    ui.logger.info("✓ MTK chip: HW code 0x{X:0>4} (sub 0x{X:0>4}), SW version {d}.{d}.{d}.{d}", .{
-        info.hw_code, info.hw_sub_code, info.sw_ver[0], info.sw_ver[1], info.sw_ver[2], info.sw_ver[3],
-    });
+    if (ctx.kind == .probe or ctx.kind == .da_upload) {
+        try sess.configurePort();
+        var info = try sess.getHwCode();
+        try sess.getHwSwVer(&info);
+        ui.logger.info("✓ MTK chip: HW code 0x{X:0>4} (sub 0x{X:0>4}), SW version {d}.{d}.{d}.{d}", .{
+            info.hw_code, info.hw_sub_code, info.sw_ver[0], info.sw_ver[1], info.sw_ver[2], info.sw_ver[3],
+        });
+    }
 
     switch (ctx.kind) {
         .probe => {},
@@ -3259,14 +3263,7 @@ fn mtkProbeInner(ctx: *MtkProbeCtx) !void {
             try sess.jumpDa(ctx.addr);
         },
         .read, .write, .format => {
-            // The device has rebooted into the DA after JUMP_DA: a fresh
-            // open + DA session (the BROM transport is gone).
-            var da_sess: mtk_daflash.Session = undefined;
-            var da_usb = try usb.open(&mtk_usb_ids.policy, ctx.target, 15000, ui.logger, ui.alloc, &ui.cancel);
-            defer da_usb.close();
-            var da_io = transport.Io.init(ui.alloc, da_usb.transport());
-            defer da_io.deinit();
-            da_sess = .{ .alloc = ui.alloc, .io = &da_io, .logger = ui.logger, .cancel = &ui.cancel };
+            var da_sess = mtk_daflash.Session{ .alloc = ui.alloc, .io = &io, .logger = ui.logger, .cancel = &ui.cancel };
             try da_sess.checkStatus();
 
             switch (ctx.kind) {
