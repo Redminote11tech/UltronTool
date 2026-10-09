@@ -9,6 +9,10 @@ export class JobGate {
     this.active = ++this.sequence;
     return this.active;
   }
+  restore(id: number, target: string | null): void {
+    this.sequence = Math.max(this.sequence, id);
+    this.active = id; this.target = target;
+  }
   finish(id: number): boolean {
     if (id !== this.active) return false;
     this.active = null;

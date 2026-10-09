@@ -43,7 +43,43 @@ const Shared = struct {
     channel: *EventChannel,
     manager: ?*manager_mod.Manager,
     cancel: *std.atomic.Value(bool),
+    mutex: glib.Mutex = .{ .f_i = .{ 0, 0 } },
+    devices: std.ArrayList(ev.DeviceInfo) = .empty,
+    target: ?ev.DeviceKey = null,
+    job_active: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     stopping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn trackDevice(self: *Shared, event: ev.Event) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        switch (event) {
+            .device_added => |device| {
+                for (self.devices.items) |*old| {
+                    if (old.key.eql(device.key)) {
+                        old.* = device;
+                        return;
+                    }
+                }
+                self.devices.append(self.alloc, device) catch {};
+            },
+            .device_removed => |key| {
+                for (self.devices.items, 0..) |device, i| {
+                    if (device.key.eql(key)) {
+                        _ = self.devices.orderedRemove(i);
+                        break;
+                    }
+                }
+                if (self.target) |target| {
+                    if (target.eql(key)) {
+                        self.target = null;
+                        if (self.job_active.load(.acquire)) self.cancel.store(true, .release);
+                        if (self.manager) |manager| manager.enqueue(.invalidate);
+                    }
+                }
+            },
+            else => {},
+        }
+    }
 };
 
 /// stdin reader thread: lines → requests. Malformed lines are logged (and
@@ -98,7 +134,7 @@ fn handleLine(shared: *Shared, arena: std.mem.Allocator, line: []const u8) void 
     if (trimmed.len == 0) return;
 
     const parsed = codec.parseRequest(arena, trimmed) catch |e| {
-        shared.logger.warn("daemon: bad request ({s}): {s}", .{ @errorName(e), trimmed[0..@min(trimmed.len, 120)] });
+        shared.logger.warn("daemon: bad request ({s})", .{@errorName(e)});
         return;
     };
     switch (parsed) {
@@ -106,12 +142,33 @@ fn handleLine(shared: *Shared, arena: std.mem.Allocator, line: []const u8) void 
         .shutdown => shared.stopping.store(true, .release),
         .manager => |req| {
             if (shared.manager) |m| {
+                if (req == .connect) {
+                    shared.mutex.lock();
+                    shared.target = null;
+                    if (req.connect.target) |target| {
+                        for (shared.devices.items) |device| {
+                            if (target.bus == device.bus and target.devnum == device.devnum) {
+                                shared.target = device.key;
+                                break;
+                            }
+                        }
+                    }
+                    const found = shared.target != null;
+                    shared.mutex.unlock();
+                    if (!found) {
+                        rejectRequest(shared, "selected USB device is no longer available");
+                        return;
+                    }
+                }
+                shared.job_active.store(true, .release);
                 m.enqueue(req);
-            } else {
-                shared.logger.err("daemon: manager unavailable — request dropped", .{});
-            }
+            } else rejectRequest(shared, "session manager unavailable");
         },
     }
+}
+
+fn rejectRequest(shared: *Shared, message: []const u8) void {
+    shared.channel.push(.{ .finished = .{ .success = false, .message = ev.FixedStr(512).fromSlice(message) } });
 }
 
 /// stdout writer: one libc write per line, looping over partial writes.
@@ -219,6 +276,8 @@ pub fn daemonMain(init: std.process.Init) !void {
 
     // --- clean shutdown ---------------------------------------------------
     cancel.store(true, .release);
+    reader.join();
+    shared.devices.deinit(alloc);
     if (manager) |m| {
         m.enqueue(.shutdown);
         m.shutdown();
@@ -227,15 +286,17 @@ pub fn daemonMain(init: std.process.Init) !void {
     alloc.destroy(logger);
     alloc.destroy(channel);
     alloc.destroy(cancel);
-    // The reader thread stays blocked in read(0); it dies with the process.
-    _ = reader;
     std.process.exit(0);
 }
 
 /// Channel drain callback (runs on the pump thread).
 fn pumpEvent(ctx: *Shared, event: ev.Event) void {
+    ctx.trackDevice(event);
     switch (event) {
-        .finished => ctx.cancel.store(false, .release),
+        .finished => {
+            ctx.job_active.store(false, .release);
+            if (!ctx.stopping.load(.acquire)) ctx.cancel.store(false, .release);
+        },
         else => {},
     }
     var out = std.ArrayList(u8).empty;
@@ -243,4 +304,24 @@ fn pumpEvent(ctx: *Shared, event: ev.Event) void {
     codec.appendEvent(&out, ctx.alloc, event) catch return;
     out.append(ctx.alloc, '\n') catch return;
     writeLine(out.items);
+}
+
+test "daemon removal cancels only the owned target, independently of a webview" {
+    var logger = log.Logger{ .mirror_stderr = false };
+    var channel: EventChannel = .{};
+    var cancel = std.atomic.Value(bool).init(false);
+    var shared = Shared{ .alloc = std.testing.allocator, .logger = &logger, .channel = &channel, .manager = null, .cancel = &cancel };
+    defer shared.devices.deinit(shared.alloc);
+    const a = ev.DeviceInfo{ .key = .{ .path = ev.FixedStr(160).fromSlice("/usb/A") } };
+    const b = ev.DeviceInfo{ .key = .{ .path = ev.FixedStr(160).fromSlice("/usb/B") } };
+    shared.trackDevice(.{ .device_added = a });
+    shared.trackDevice(.{ .device_added = b });
+    shared.target = a.key;
+    shared.job_active.store(true, .release);
+    shared.trackDevice(.{ .device_removed = b.key });
+    try std.testing.expect(!cancel.load(.acquire));
+    try std.testing.expect(shared.target != null);
+    shared.trackDevice(.{ .device_removed = a.key });
+    try std.testing.expect(cancel.load(.acquire));
+    try std.testing.expect(shared.target == null);
 }

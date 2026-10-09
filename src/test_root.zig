@@ -33,4 +33,5 @@ test {
     _ = @import("protocol/qualcomm/manager.zig");
     _ = @import("device/scanner.zig");
     _ = @import("ipc/codec.zig");
+    _ = @import("ipc/daemon.zig");
 }

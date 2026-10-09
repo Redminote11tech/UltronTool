@@ -113,6 +113,8 @@ pub const Request = union(enum) {
     reset: void,
     /// Close the transport without touching the device.
     disconnect: void,
+    /// Scanner-owned cleanup: no GUI job was started, so emits no finished.
+    invalidate: void,
     /// Stop the worker thread (app shutdown).
     shutdown: void,
 };
@@ -214,7 +216,7 @@ pub const Manager = struct {
         dupeRequest(&item) catch {
             item.deinit();
             self.logger.err("manager: out of memory queuing request", .{});
-            pushFinished(self.channel, false, "OutOfMemory");
+            if (req != .invalidate) pushFinished(self.channel, false, "OutOfMemory");
             return;
         };
         self.mutex.lock();
@@ -222,7 +224,7 @@ pub const Manager = struct {
         self.pending.append(self.alloc, item) catch {
             item.deinit();
             self.logger.err("manager: failed to queue request", .{});
-            pushFinished(self.channel, false, "OutOfMemory");
+            if (req != .invalidate) pushFinished(self.channel, false, "OutOfMemory");
         };
     }
 
@@ -340,6 +342,10 @@ pub const Manager = struct {
                 self.teardown();
                 self.emitState(.disconnected);
                 pushFinished(self.channel, true, "disconnected");
+            },
+            .invalidate => {
+                self.teardown();
+                self.emitState(.disconnected);
             },
             .shutdown => {},
         }
@@ -2217,4 +2223,21 @@ test "manager progress preserves byte telemetry and unknown totals" {
     try std.testing.expectEqual(@as(u64, 8192), check.values[1].total);
     try std.testing.expectEqual(@as(f32, 0.75), check.values[1].fraction);
     try std.testing.expectEqual(@as(f32, -1), check.values[2].fraction);
+}
+
+test "scanner invalidation tears down state without completing a GUI job" {
+    var channel: EventChannel = .{};
+    var logger = log.Logger{ .mirror_stderr = false };
+    var cancel = std.atomic.Value(bool).init(false);
+    var opener = SimOpener{};
+    const mgr = try Manager.init(std.testing.allocator, &logger, &channel, &cancel, &SimOpener.open, @ptrCast(&opener));
+    defer mgr.shutdown();
+    mgr.state = .firehose_ready;
+    var item = QueueItem{ .req = .invalidate };
+    mgr.runJob(&item);
+    var collector = Collector{};
+    defer collector.deinit();
+    channel.drain(&collector, Collector.cb);
+    try std.testing.expectEqual(ev.SessionState.disconnected, mgr.state);
+    try std.testing.expectEqual(@as(usize, 0), collector.finished.items.len);
 }

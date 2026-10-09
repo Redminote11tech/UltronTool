@@ -16,3 +16,10 @@ test('selection cannot leave a connected or busy target', () => {
   assert.equal(canSelectDevice('A', 'B', 'disconnected', true), false);
   assert.equal(canSelectDevice('A', 'B', 'disconnected', false), true);
 });
+test('reload attaches to an active request and advances future IDs', () => {
+  const gate = new JobGate();
+  gate.restore(41, 'device-A');
+  assert.equal(gate.begin('device-B'), null);
+  assert.equal(gate.finish(41), true);
+  assert.equal(gate.begin('device-A'), 42);
+});

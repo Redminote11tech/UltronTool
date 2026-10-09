@@ -33,6 +33,8 @@ export type DaemonEvent =
   | { ev: "device_removed"; path: string }
   | { ev: "progress"; fraction: number; done: number; total: number; label: string }
   | { ev: "session_config"; storage: string; skip_init: boolean; vip_dir: string }
+  | { ev: "session_target"; path: string }
+  | { ev: "request_active"; request_id: number }
   | { ev: "state"; state: SessionState }
   | { ev: "finished"; request_id?: number; success: boolean; message: string }
   | {

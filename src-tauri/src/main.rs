@@ -61,7 +61,8 @@ fn relay(app: &AppHandle, value: serde_json::Value) {
                 snapshot.push(value.clone());
             }
         }
-        "hello" | "state" | "session_config" | "chip_info" | "partitions" | "daemon_gone" => {
+        "hello" | "state" | "session_target" | "session_config" | "chip_info" | "partitions"
+        | "daemon_gone" => {
             if event == "state" && value["state"] == "disconnected" {
                 snapshot.retain(|old| {
                     old["ev"] != "partitions"
@@ -84,9 +85,16 @@ fn daemon_start(app: AppHandle, state: State<DaemonState>) {
         *started = true;
         spawn_daemon(app.clone());
     } else {
+        let active = state.active_request.lock().expect("request mutex");
         let snapshot = state.snapshot.lock().expect("snapshot mutex");
         for value in snapshot.iter() {
             let _ = app.emit("daemon-event", value.to_string());
+        }
+        if let Some(id) = *active {
+            let _ = app.emit(
+                "daemon-event",
+                serde_json::json!({"ev":"request_active","request_id":id}).to_string(),
+            );
         }
     }
 }
@@ -182,7 +190,7 @@ fn spawn_daemon(app: AppHandle) {
 }
 
 #[tauri::command]
-fn daemon_send(line: String, state: State<DaemonState>) -> Result<(), String> {
+fn daemon_send(app: AppHandle, line: String, state: State<DaemonState>) -> Result<(), String> {
     if state.closing.load(Ordering::Acquire) {
         return Err("application is closing".into());
     }
@@ -198,6 +206,11 @@ fn daemon_send(line: String, state: State<DaemonState>) -> Result<(), String> {
             return Err("another operation is running".into());
         }
         *active = Some(request["request_id"].as_u64().ok_or("missing request ID")?);
+    }
+    if command == "connect" {
+        if let Some(path) = request["target_path"].as_str() {
+            relay(&app, serde_json::json!({"ev":"session_target","path":path}));
+        }
     }
     let result = (|| {
         let guard = state.child.lock().map_err(|_| "mutex poisoned")?;

@@ -13,201 +13,10 @@ import { isTauri } from "../lib/tauri";
 import { onDaemonEvent, sendDaemon } from "./daemon";
 import type { DaemonDevice, SessionState } from "./daemon";
 
-export type Level = "info" | "ok" | "warn" | "error" | "protocol";
-export type Page = "device" | "flash" | "console";
-export type Storage = "ufs" | "emmc" | "spinor" | "nand" | "nvme";
-export type Source = "sim" | "daemon";
-
-export interface LogLine {
-  id: number;
-  at: number;
-  level: Level;
-  text: string;
-}
-
-export interface Job {
-  title: string;
-  label: string;
-  value: number;
-  fraction: number | null;
-  total: number;
-  rate: number;
-  eta: number;
-  failed: boolean;
-  finished: boolean;
-}
-
-export interface Toast {
-  id: number;
-  ok: boolean;
-  title: string;
-  body?: string;
-}
-
-export interface PartRow {
-  name: string;
-  first_lba: number;
-  last_lba: number;
-}
-
-export interface StagedFile { name: string; size: number; paths: string[] }
-export interface FlashDraft {
-  scope: string; files: Record<string, StagedFile | null>; storage: Storage; skipInit: boolean;
-}
-const emptyDraft = (scope: string): FlashDraft => ({ scope, files: {}, storage: "ufs", skipInit: false });
-
-export interface State {
-  page: Page;
-  draft: FlashDraft;
-  /* sim */
-  mode: Mode;
-  scanning: boolean;
-  chip: string | null;
-  /* shared */
-  logs: LogLine[];
-  job: Job | null;
-  toasts: Toast[];
-  /* daemon */
-  source: Source;
-  devices: DaemonDevice[];
-  selectedPath: string | null;
-  session: SessionState;
-  configured: { storage: Storage; skipInit: boolean; vipDir: string } | null;
-  daemonGone: string | null;
-  parts: { lun: number; sector_size: number; luns: number; vip: boolean; rows: PartRow[] } | null;
-}
-
-type Action =
-  | { type: "draftFiles"; scope: string; update: (files: FlashDraft["files"]) => FlashDraft["files"] }
-  | { type: "draftSettings"; scope: string; storage?: Storage; skipInit?: boolean }
-  | { type: "page"; page: Page }
-  | { type: "log"; level: Level; text: string }
-  | { type: "clearLogs" }
-  | { type: "scanStart" }
-  | { type: "scanFound"; mode: Mode; chip: string }
-  | { type: "disconnect" }
-  | { type: "jobStart"; title: string; total: number }
-  | { type: "jobProgress"; label: string; value: number; rate: number; eta: number; total?: number; fraction?: number | null }
-  | { type: "jobEnd"; failed: boolean }
-  | { type: "toast"; toast: Toast }
-  | { type: "toastGone"; id: number }
-  | { type: "sourceSet"; source: Source }
-  | { type: "devAdd"; dev: DaemonDevice }
-  | { type: "devRemove"; path: string }
-  | { type: "devSelect"; path: string | null }
-  | { type: "configured"; storage: Storage; skipInit: boolean; vipDir: string }
-  | { type: "session"; session: SessionState }
-  | { type: "chipEv"; chip: string }
-  | { type: "partsEv"; lun: number; sector_size: number; luns: number; vip: boolean; rows: PartRow[] }
-  | { type: "daemonGone"; reason: string };
-
-const CHIP_NAMES: Record<Exclude<Mode, "none">, string> = {
-  qualcomm_edl: "SM8250 · Sahara v2.1",
-  qualcomm_crash: "SM8250 · ramdump",
-  samsung: "Exynos 2100 · Loke v2",
-  lg: "SDM845 · LAF 1.1",
-  mtk: "MT6785 · hw_code 0x0717",
-  spd: "UMS512 · BSL v1.0",
-};
-
-let logId = 0;
+export type { Level, Page, Storage, Source, Job, LogLine, State, FlashDraft, StagedFile } from "./model";
+import { initial, reducer, CHIP_NAMES } from "./model";
+import type { State, Level, Storage, Action } from "./model";
 let toastId = 0;
-
-const initial: State = {
-  page: "device",
-  draft: emptyDraft("sim:none"),
-  mode: "none",
-  scanning: false,
-  chip: null,
-  logs: [
-    { id: logId++, at: Date.now(), level: "info", text: "ultron ui — simulated bus (browser preview)" },
-  ],
-  job: null,
-  toasts: [],
-  source: "sim",
-  devices: [],
-  selectedPath: null,
-  session: "disconnected",
-  configured: null,
-  daemonGone: null,
-  parts: null,
-};
-
-function pushLog(s: State, level: Level, text: string): LogLine[] {
-  const next = [...s.logs, { id: logId++, at: Date.now(), level, text }];
-  return next.length > 600 ? next.slice(next.length - 600) : next;
-}
-
-function reducer(s: State, a: Action): State {
-  switch (a.type) {
-    case "draftFiles": return a.scope === s.draft.scope ? { ...s, draft: { ...s.draft, files: a.update(s.draft.files) } } : s;
-    case "draftSettings": return a.scope === s.draft.scope ? { ...s, draft: { ...s.draft, storage: a.storage ?? s.draft.storage, skipInit: a.skipInit ?? s.draft.skipInit } } : s;
-    case "page":
-      return { ...s, page: a.page };
-    case "log":
-      return { ...s, logs: pushLog(s, a.level, a.text) };
-    case "clearLogs":
-      return { ...s, logs: [] };
-    case "scanStart":
-      return { ...s, scanning: true, mode: "none", chip: null, logs: pushLog(s, "info", "usb: hotplug monitor — waiting for a download-mode device…") };
-    case "scanFound": {
-      const v = VENDORS[a.mode as Exclude<Mode, "none">];
-      let logs = pushLog(s, "info", `usb: device ${v.name} detected — class match, claiming interface`);
-      logs = pushLog({ ...s, logs }, "info", `probe: ${a.chip}`);
-      return { ...s, draft: emptyDraft(`sim:${a.mode}`), scanning: false, mode: a.mode, chip: a.chip, logs };
-    }
-    case "disconnect":
-      return { ...s, scanning: false, mode: "none", chip: null, logs: pushLog(s, "info", "usb: device removed — interface released") };
-    case "jobStart":
-      return {
-        ...s,
-        job: { title: a.title, label: "Preparing…", value: 0, fraction: null, total: a.total, rate: 0, eta: 0, failed: false, finished: false },
-        logs: pushLog(s, "info", `job: ${a.title}`),
-      };
-    case "jobProgress":
-      return s.job ? { ...s, job: { ...s.job, label: a.label, value: a.value, total: a.total ?? s.job.total, fraction: a.fraction !== undefined ? a.fraction : s.job.total > 0 ? a.value / s.job.total : null, rate: a.rate, eta: a.eta } } : s;
-    case "jobEnd":
-      if (!s.job) return s;
-      return {
-        ...s,
-        job: { ...s.job, finished: true, failed: a.failed, fraction: a.failed ? s.job.fraction : 1, value: a.failed ? s.job.value : s.job.total },
-        logs: pushLog(s, a.failed ? "error" : "ok", a.failed ? `job: ${s.job.title} — FAILED` : `job: ${s.job.title} — finished`),
-      };
-    case "toast":
-      return { ...s, toasts: [...s.toasts.slice(-3), a.toast] };
-    case "toastGone":
-      return { ...s, toasts: s.toasts.filter((t) => t.id !== a.id) };
-    case "sourceSet":
-      return { ...s, source: a.source, logs: pushLog(s, "info", `daemon: attached — real device bus (protocol v1)`) };
-    case "devAdd": {
-      const devices = s.devices.filter((d) => d.path !== a.dev.path).concat(a.dev);
-      return { ...s, devices, logs: pushLog(s, "info", `usb: ${a.dev.label} — ${a.dev.vid.toString(16).padStart(4, "0")}:${a.dev.pid.toString(16).padStart(4, "0")}`) };
-    }
-    case "devRemove": {
-      const devices = s.devices.filter((d) => d.path !== a.path);
-      const selectedPath = s.selectedPath === a.path ? null : s.selectedPath;
-      const removedSelected = s.selectedPath === a.path;
-      return { ...s, devices, selectedPath, ...(removedSelected ? { session: "disconnected" as const, parts: null, chip: null } : {}), logs: pushLog(s, "info", "usb: device removed — interface released") };
-    }
-    case "devSelect":
-      return canSelectDevice(s.selectedPath, a.path, s.session, !!s.job && !s.job.finished)
-        ? { ...s, draft: s.selectedPath === a.path ? s.draft : emptyDraft(`daemon:${a.path}`), selectedPath: a.path, parts: null, chip: null } : s;
-    case "configured":
-      return { ...s, configured: { storage: a.storage, skipInit: a.skipInit, vipDir: a.vipDir }, draft: { ...s.draft, storage: a.storage, skipInit: a.skipInit } };
-    case "session":
-      return { ...s, configured: a.session === "disconnected" ? null : s.configured, session: a.session, logs: pushLog(s, "info", `session: ${a.session}`) };
-    case "chipEv":
-      return { ...s, chip: a.chip, logs: pushLog(s, "info", `probe: ${a.chip}`) };
-    case "partsEv":
-      return {
-        ...s,
-        parts: { lun: a.lun, sector_size: a.sector_size, luns: a.luns, vip: a.vip, rows: a.rows },
-        logs: pushLog(s, a.vip ? "warn" : "info", a.vip ? "VIP session — partition browsing disabled, rawprogram flash only" : `gpt: ${a.rows.length} partitions on LUN ${a.lun} (${a.sector_size} B sectors, ${a.luns} LUNs)`),
-      };
-    case "daemonGone":
-      return { ...s, job: s.job ? { ...s.job, finished: true, failed: true } : null, parts: null, selectedPath: null, daemonGone: a.reason, session: "disconnected", devices: [], logs: pushLog(s, "error", `daemon: gone — ${a.reason}`) };
-  }
-}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const jitter = (base: number, spread: number) => base + (Math.random() - 0.5) * spread;
@@ -246,6 +55,7 @@ export function BusProvider({ children }: { children: ReactNode }) {
 
   const runToken = useRef(0);
   const gate = useRef(new JobGate());
+  const targetLost = useRef(false);
   const pendingFlash = useRef<{ files: string[]; storage: Storage; skipInit: boolean } | null>(null);
   const lastTick = useRef<Sample | null>(null);
 
@@ -370,8 +180,10 @@ export function BusProvider({ children }: { children: ReactNode }) {
       }
       if (!canSelectDevice(stateRef.current.selectedPath, dev.path, stateRef.current.session, gate.current.busy)) return;
       dispatch({ type: "devSelect", path: dev.path });
+      targetLost.current = false;
       submit({
         cmd: "connect",
+        target_path: dev.path,
         storage: stateRef.current.draft.storage,
         skip_storage_init: stateRef.current.draft.skipInit,
         vip_dir: stateRef.current.draft.files.vip?.paths[0],
@@ -390,6 +202,7 @@ export function BusProvider({ children }: { children: ReactNode }) {
     };
 
     const resetDevice = () => {
+      if (!stateRef.current.selectedPath || stateRef.current.session === "disconnected") return;
       pendingFlash.current = null;
       submit({ cmd: "reset" }, "Resetting device");
     };
@@ -445,15 +258,26 @@ export function BusProvider({ children }: { children: ReactNode }) {
           return;
         case "device_removed":
           if (e.path === gate.current.target) {
+            targetLost.current = true;
             pendingFlash.current = null;
-            void sendDaemon({ cmd: "cancel" }).catch(error => api.toast(false, "Cancel failed", String(error)));
+            if (gate.current.busy) void sendDaemon({ cmd: "cancel" }).catch(error => api.toast(false, "Cancel failed", String(error)));
+            // The daemon invalidates an idle session independently of the webview.
           }
           dispatch({ type: "devRemove", path: e.path });
+          return;
+        case "session_target":
+          gate.current.target = e.path;
+          dispatch({ type: "sessionTarget", path: e.path });
+          return;
+        case "request_active":
+          gate.current.restore(e.request_id, gate.current.target);
+          dispatch({ type: "jobStart", title: "Device operation", total: 0 });
           return;
         case "session_config":
           dispatch({ type: "configured", storage: e.storage as Storage, skipInit: e.skip_init, vipDir: e.vip_dir });
           return;
         case "state":
+          if (targetLost.current && e.state !== "disconnected") return;
           session = e.state;
           dispatch({ type: "session", session: e.state });
           return;
@@ -488,6 +312,7 @@ export function BusProvider({ children }: { children: ReactNode }) {
           return;
         }
         case "partitions":
+          if (targetLost.current) return;
           dispatch({ type: "partsEv", lun: e.lun, sector_size: e.sector_size, luns: e.luns, vip: e.vip, rows: e.parts });
           return;
         case "huawei_app":
