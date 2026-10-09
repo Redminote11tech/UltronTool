@@ -15,6 +15,8 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 struct DaemonState {
     child: Mutex<Option<Child>>,
     active_request: Mutex<Option<u64>>,
+    started: Mutex<bool>,
+    snapshot: Mutex<Vec<serde_json::Value>>,
 }
 
 impl DaemonState {
@@ -22,6 +24,44 @@ impl DaemonState {
         if let Some(mut c) = self.child.lock().expect("daemon mutex").take() {
             let _ = c.kill();
             let _ = c.wait();
+        }
+    }
+}
+
+// Cache only current state; replay never replays old job completions.
+fn relay(app: &AppHandle, value: serde_json::Value) {
+    let state = app.state::<DaemonState>();
+    let mut snapshot = state.snapshot.lock().expect("snapshot mutex");
+    let event = value["ev"].as_str().unwrap_or("");
+    match event {
+        "device_added" | "device_removed" => {
+            snapshot.retain(|old| !(old["ev"] == "device_added" && old["path"] == value["path"]));
+            if event == "device_added" {
+                snapshot.push(value.clone());
+            }
+        }
+        "hello" | "state" | "chip_info" | "partitions" | "daemon_gone" => {
+            if event == "state" && value["state"] == "disconnected" {
+                snapshot.retain(|old| old["ev"] != "partitions" && old["ev"] != "chip_info");
+            }
+            snapshot.retain(|old| old["ev"] != event);
+            snapshot.push(value.clone());
+        }
+        _ => {}
+    }
+    let _ = app.emit("daemon-event", value.to_string());
+}
+
+#[tauri::command]
+fn daemon_start(app: AppHandle, state: State<DaemonState>) {
+    let mut started = state.started.lock().expect("start mutex");
+    if !*started {
+        *started = true;
+        spawn_daemon(app.clone());
+    } else {
+        let snapshot = state.snapshot.lock().expect("snapshot mutex");
+        for value in snapshot.iter() {
+            let _ = app.emit("daemon-event", value.to_string());
         }
     }
 }
@@ -60,9 +100,9 @@ fn spawn_daemon(app: AppHandle) {
         eprintln!(
             "ultron-ui: daemon binary not found (set ULTRON_DAEMON_PATH or build `zig build`)"
         );
-        let _ = app.emit(
-            "daemon-event",
-            "{\"ev\":\"daemon_gone\",\"reason\":\"daemon binary not found\"}",
+        relay(
+            &app,
+            serde_json::json!({"ev":"daemon_gone","reason":"daemon binary not found"}),
         );
         return;
     };
@@ -75,12 +115,9 @@ fn spawn_daemon(app: AppHandle) {
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
-            let _ = app.emit(
-                "daemon-event",
-                format!(
-                    "{{\"ev\":\"daemon_gone\",\"reason\":\"spawn failed: {}\"}}",
-                    e
-                ),
+            relay(
+                &app,
+                serde_json::json!({"ev":"daemon_gone","reason":format!("spawn failed: {e}")}),
             );
             return;
         }
@@ -103,16 +140,14 @@ fn spawn_daemon(app: AppHandle) {
                             let id = state.active_request.lock().expect("request mutex").take();
                             value["request_id"] = serde_json::json!(id);
                         }
-                        if app_out.emit("daemon-event", value.to_string()).is_err() {
-                            break;
-                        }
+                        relay(&app_out, value);
                     }
                     Err(_) => break,
                 }
             }
-            let _ = app_out.emit(
-                "daemon-event",
-                "{\"ev\":\"daemon_gone\",\"reason\":\"daemon exited\"}",
+            relay(
+                &app_out,
+                serde_json::json!({"ev":"daemon_gone","reason":"daemon exited"}),
             );
         });
     }
@@ -170,12 +205,10 @@ fn main() {
         .manage(DaemonState {
             child: Mutex::new(None),
             active_request: Mutex::new(None),
+            started: Mutex::new(false),
+            snapshot: Mutex::new(Vec::new()),
         })
-        .invoke_handler(tauri::generate_handler![daemon_send])
-        .setup(|app| {
-            spawn_daemon(app.handle().clone());
-            Ok(())
-        })
+        .invoke_handler(tauri::generate_handler![daemon_send, daemon_start])
         .build(tauri::generate_context!())
         .expect("error while building ultron ui shell")
         .run(|app, event| {
