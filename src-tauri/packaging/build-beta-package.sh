@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the UltronTool-BETA package for Arch/CachyOS from the TS UI experiment.
+# Build the UltronTool-BETA package for Arch/CachyOS for the native Material 3 frontend.
 #
 # Contents: the self-contained Tauri release binary (embeds ui-ts/dist) as
 # /usr/bin/ultrontool-beta, the Zig IPC daemon (ultrontool-beta-daemon) it
@@ -12,7 +12,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 ver="0.3.0"
-pkgrel="6"
+pkgrel="7"
 name="ultrontool-beta"
 out="UltronTool-BETA-${ver}-${pkgrel}-x86_64.pkg.tar.zst"
 stage="$(mktemp -d)"
@@ -50,7 +50,7 @@ cat > "$stage/.PKGINFO" <<EOF
 pkgname = ${name}
 pkgbase = ${name}
 pkgver = ${ver}-${pkgrel}
-pkgdesc = Ultron Beta — TS UI in a native Tauri window, wired to the real Zig flashing core (Qualcomm EDL; hardware required)
+pkgdesc = Ultron Beta — Material 3 UI in a native Tauri window, wired to the real Zig flashing core (Qualcomm EDL; hardware required)
 url = https://github.com/Redminote11tech/UltronTool
 builddate = ${builddate}
 packager = jade <jade@localhost>
