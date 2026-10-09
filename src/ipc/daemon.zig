@@ -218,6 +218,7 @@ pub fn daemonMain(init: std.process.Init) !void {
     }
 
     // --- clean shutdown ---------------------------------------------------
+    cancel.store(true, .release);
     if (manager) |m| {
         m.enqueue(.shutdown);
         m.shutdown();

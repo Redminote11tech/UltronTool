@@ -9,23 +9,44 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 
 struct DaemonState {
     child: Mutex<Option<Child>>,
     active_request: Mutex<Option<u64>>,
     started: Mutex<bool>,
+    closing: AtomicBool,
     snapshot: Mutex<Vec<serde_json::Value>>,
 }
 
-impl DaemonState {
-    fn kill(&self) {
-        if let Some(mut c) = self.child.lock().expect("daemon mutex").take() {
-            let _ = c.kill();
-            let _ = c.wait();
+#[tauri::command]
+fn daemon_close(app: AppHandle, state: State<DaemonState>) -> Result<(), String> {
+    if state.closing.swap(true, Ordering::AcqRel) {
+        return Ok(());
+    }
+    let mut child = state
+        .child
+        .lock()
+        .map_err(|_| "daemon mutex poisoned")?
+        .take();
+    if let Some(ref mut child) = child {
+        if let Some(mut stdin) = child.stdin.take() {
+            // Cancel cooperatively and wait for worker cleanup. Never kill a flash.
+            let _ = stdin.write_all(b"{\"cmd\":\"cancel\"}\n{\"cmd\":\"shutdown\"}\n");
+            let _ = stdin.flush();
         }
     }
+    std::thread::spawn(move || {
+        if let Some(mut child) = child {
+            let _ = child.wait();
+        }
+        app.exit(0);
+    });
+    Ok(())
 }
 
 // Cache only current state; replay never replays old job completions.
@@ -158,6 +179,9 @@ fn spawn_daemon(app: AppHandle) {
 
 #[tauri::command]
 fn daemon_send(line: String, state: State<DaemonState>) -> Result<(), String> {
+    if state.closing.load(Ordering::Acquire) {
+        return Err("application is closing".into());
+    }
     let request: serde_json::Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
     let command = request["cmd"].as_str().ok_or("missing command")?;
     let is_job = !matches!(command, "cancel" | "shutdown");
@@ -206,14 +230,42 @@ fn main() {
             child: Mutex::new(None),
             active_request: Mutex::new(None),
             started: Mutex::new(false),
+            closing: AtomicBool::new(false),
             snapshot: Mutex::new(Vec::new()),
         })
-        .invoke_handler(tauri::generate_handler![daemon_send, daemon_start])
+        .invoke_handler(tauri::generate_handler![
+            daemon_send,
+            daemon_start,
+            daemon_close
+        ])
         .build(tauri::generate_context!())
         .expect("error while building ultron ui shell")
         .run(|app, event| {
-            if let RunEvent::Exit = event {
-                app.state::<DaemonState>().kill();
+            let state = app.state::<DaemonState>();
+            match event {
+                RunEvent::WindowEvent {
+                    event: tauri::WindowEvent::CloseRequested { api, .. },
+                    ..
+                } => {
+                    api.prevent_close();
+                    if !state.closing.load(Ordering::Acquire) {
+                        if state
+                            .active_request
+                            .lock()
+                            .expect("request mutex")
+                            .is_some()
+                        {
+                            let _ = app.emit("app-close-requested", ());
+                        } else {
+                            let _ = daemon_close(app.clone(), state);
+                        }
+                    }
+                }
+                RunEvent::ExitRequested { api, .. } if !state.closing.load(Ordering::Acquire) => {
+                    api.prevent_exit();
+                    let _ = daemon_close(app.clone(), state);
+                }
+                _ => {}
             }
         });
 }

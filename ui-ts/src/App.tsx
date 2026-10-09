@@ -1,6 +1,7 @@
 import { motion, AnimatePresence } from "motion/react";
 import { BusProvider, useBus } from "./state/bus";
 import { Rail } from "./components/Rail";
+import { CloseGuard } from "./components/CloseGuard";
 import { Toasts } from "./components/Toasts";
 import { DevicePage } from "./pages/DevicePage";
 import { FlashPage } from "./pages/FlashPage";
@@ -98,6 +99,7 @@ function Shell() {
         </div>
       </div>
       <Toasts />
+      <CloseGuard />
     </div>
   );
 }
