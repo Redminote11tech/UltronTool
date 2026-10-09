@@ -3506,6 +3506,9 @@ fn spdProbeInner(ctx: *SpdProbeCtx) !void {
     defer io.deinit();
     var sess = spd_bsl.Session{ .alloc = ui.alloc, .io = &io, .logger = ui.logger, .cancel = &ui.cancel };
     defer sess.deinit();
+    // Flash jobs reconnect to FDL2, whose framing uses the byte checksum.
+    // refs/spreadtrum keeps this stage after FDL1 execution.
+    if (ctx.kind == .read or ctx.kind == .write or ctx.kind == .erase) sess.setStage(false);
     try sess.configurePort();
     switch (ctx.kind) {
         .probe => {
