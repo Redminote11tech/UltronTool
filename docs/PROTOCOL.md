@@ -123,6 +123,8 @@ against an overall deadline; concatenated XML docs split on `<?xml` / `</data>`;
 - Program streaming: `chunk = min(max_payload / sector_size, remaining)` sectors;
   short final reads zero-padded to chunk × sector_size; ZLP write timeout 10 s
   (60 s for SPINOR); final ACK 120 s.
+- Failed payload writes abort immediately: USB timeouts can follow partial
+  delivery, so the host cannot safely retry or skip that chunk.
 - Program XML has `file_sector_offset` (file pre-seeked by offset × sector_size).
 
 ### 2.3 bkerler deltas worth honoring

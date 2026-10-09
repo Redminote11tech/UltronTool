@@ -692,7 +692,6 @@ pub const Session = struct {
         var ack_seen = false; // ACK may arrive while our last chunks are in flight
         var drain_mode = false; // op failed device-side: keep feeding the data phase to finish it
         var drain_deadline: i64 = 0;
-        var write_timeouts: u32 = 0;
         while (left > 0) {
             if (self.cancelled()) return Error.Cancelled;
             if (self.digest_gen) |g| g.chunkInit();
@@ -718,32 +717,10 @@ pub const Session = struct {
             if (self.digest_gen) |g| g.chunkUpdate(buf[0..@intCast(chunk_bytes)]);
             try self.sendVipTable();
 
-            _ = self.io.write(buf[0..@intCast(chunk_bytes)], zlp_timeout) catch |e| switch (e) {
-                Error.Timeout => {
-                    // A VIP session cannot recover here: the device counts
-                    // packets against the digest table, so a skipped or
-                    // repeated chunk desyncs the stream (qdl aborts too).
-                    if (self.vip != null) {
-                        self.logger.err("device stopped consuming the write during a VIP session — aborting", .{});
-                        return Error.Timeout;
-                    }
-                    write_timeouts += 1;
-                    if (!drain_mode) {
-                        self.logger.err("device stopped consuming the write — attempting to drain the data phase", .{});
-                        drain_mode = true;
-                        drain_deadline = monoNow() + 120 * std.time.us_per_s;
-                    }
-                    // Three strikes with zero consumption: nothing more to
-                    // drain over USB; escalate to the reset recovery chain.
-                    if (write_timeouts >= 3) {
-                        self.logger.err("device is not consuming data at all", .{});
-                        return Error.Timeout;
-                    }
-                    continue;
-                },
-                else => return e,
-            };
-            write_timeouts = 0;
+            // qdl aborts failed data writes. A timeout can follow a partial
+            // USB transfer: neither resending nor advancing to another file
+            // chunk is safe without knowing the exact device byte position.
+            _ = try self.io.write(buf[0..@intCast(chunk_bytes)], zlp_timeout);
             if (self.digest_gen) |g| g.chunkStore();
 
             // Mid-stream failure handling: a UFS write refusal makes some
@@ -928,7 +905,7 @@ pub const Session = struct {
         var body: []const u8 = undefined;
         if (u.wb) {
             body = std.fmt.bufPrint(&buf, "<ufs bNumberLU=\"{d}\" bBootEnable=\"{d}\" bDescrAccessEn=\"{d}\" bInitPowerMode=\"{d}\" bHighPriorityLUN=\"{d}\" bSecureRemovalType=\"{d}\" bInitActiveICCLevel=\"{d}\" wPeriodicRTCUpdate=\"{d}\" bConfigDescrLock=\"{d}\" bWriteBoosterBufferPreserveUserSpaceEn=\"{d}\" bWriteBoosterBufferType=\"{d}\" shared_wb_buffer_size_in_kb=\"{d}\"/>", .{
-                u.bNumberLU, u.bBootEnable, u.bDescrAccessEn, u.bInitPowerMode, u.bHighPriorityLUN, u.bSecureRemovalType, u.bInitActiveICCLevel, u.wPeriodicRTCUpdate, u.bConfigDescrLock,
+                u.bNumberLU,                              u.bBootEnable,             u.bDescrAccessEn,              u.bInitPowerMode, u.bHighPriorityLUN, u.bSecureRemovalType, u.bInitActiveICCLevel, u.wPeriodicRTCUpdate, u.bConfigDescrLock,
                 u.bWriteBoosterBufferPreserveUserSpaceEn, u.bWriteBoosterBufferType, u.shared_wb_buffer_size_in_kb,
             }) catch return Error.Io;
         } else {
@@ -948,7 +925,7 @@ pub const Session = struct {
             desc_attr = std.fmt.bufPrint(&desc_buf, " desc=\"{s}\"", .{xml.escapeAttr(&esc_buf, d) catch return Error.Io}) catch return Error.Io;
         }
         const body = std.fmt.bufPrint(&buf, "<ufs LUNum=\"{d}\" bLUEnable=\"{d}\" bBootLunID=\"{d}\" size_in_kb=\"{d}\" bDataReliability=\"{d}\" bLUWriteProtect=\"{d}\" bMemoryType=\"{d}\" bLogicalBlockSize=\"{d}\" bProvisioningType=\"{d}\" wContextCapabilities=\"{d}\"{s}/>", .{
-            u.LUNum, u.bLUEnable, u.bBootLunID, u.size_in_kb, u.bDataReliability, u.bLUWriteProtect, u.bMemoryType, u.bLogicalBlockSize, u.bProvisioningType, u.wContextCapabilities,
+            u.LUNum,   u.bLUEnable, u.bBootLunID, u.size_in_kb, u.bDataReliability, u.bLUWriteProtect, u.bMemoryType, u.bLogicalBlockSize, u.bProvisioningType, u.wContextCapabilities,
             desc_attr,
         }) catch return Error.Io;
         try self.sendSingleTag(body, ufs_tag_timeout_ms);
@@ -1578,4 +1555,29 @@ test "erase transport timeout and io stay fatal" {
         .start_sector = "0",
     };
     try std.testing.expectError(error.Timeout, env.sess.erase(&op));
+}
+
+test "program aborts a timed-out payload without sending the next chunk" {
+    var tmp = try fileio.TmpDir.init();
+    defer tmp.cleanup();
+    const image: [1024]u8 = @splat(0x5a);
+    try tmp.writeFile("timeout.img", &image);
+    var path_buf: [176]u8 = undefined;
+    const path = try tmp.filePath(&path_buf, "timeout.img");
+    const steps = [_]SimStep{
+        .{ .any_write = {} },
+        .{ .respond = "<?xml version=\"1.0\"?><data><response value=\"ACK\" rawmode=\"true\"/></data>" },
+        .{ .write_error = error.Timeout },
+        .{ .expect_write = image[512..] },
+    };
+    const env = try TestEnv.init(std.testing.allocator, &steps);
+    defer env.deinit(std.testing.allocator);
+    env.sess.max_payload_size = 512;
+    var file = try fileio.File.open(path);
+    defer file.close();
+    const op = rawprogram.Program{ .filename = path, .sector_size = 512, .num_sectors = 2, .start_sector = "0" };
+    try std.testing.expectError(error.Timeout, env.sess.program(&op, &file));
+    try std.testing.expectEqual(@as(usize, 3), env.h.step_idx);
+    try std.testing.expectEqual(@as(u64, 512), file.tell());
+    try std.testing.expect(env.h.failure == null);
 }

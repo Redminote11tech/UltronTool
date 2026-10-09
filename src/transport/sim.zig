@@ -24,6 +24,8 @@ pub const Step = union(enum) {
     /// A write of any content advances the script (paces respond steps that
     /// belong to the command issued by that write).
     any_write: void,
+    /// Fail the next write, including failures with uncertain partial delivery.
+    write_error: Error,
 };
 
 pub const Harness = struct {
@@ -65,7 +67,6 @@ pub const Harness = struct {
         self.queue.clearRetainingCapacity();
         if (self.on_reset) |f| f(self.on_reset_ctx);
     }
-
 
     /// Consume any immediately-reachable respond steps into the read queue.
     fn advance(self: *Harness) void {
@@ -120,6 +121,11 @@ pub const Harness = struct {
 
         if (self.step_idx < self.steps.len) {
             switch (self.steps[self.step_idx]) {
+                .write_error => |err| {
+                    self.step_idx += 1;
+                    self.advance();
+                    return err;
+                },
                 .any_write => {
                     self.step_idx += 1;
                     self.advance();
@@ -149,7 +155,6 @@ pub const Harness = struct {
     fn closeVt(ptr: *anyopaque) void {
         _ = ptr;
     }
-
 };
 
 test "harness matches writes and serves responses in order" {
