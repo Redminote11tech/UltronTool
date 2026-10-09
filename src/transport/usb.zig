@@ -89,6 +89,7 @@ pub const Usb = struct {
         .write = writeVt,
         .close = closeVt,
         .destroy = destroyVt,
+        .reset = resetVt,
         .set_write_zlp = setWriteZlpVt,
         .control = controlVt,
     };
@@ -174,11 +175,11 @@ pub const Usb = struct {
         while (data.len > 0) {
             const xfer = @min(data.len, self.out_chunk_size);
             var actual: c_int = 0;
-            var ret = c.libusb_bulk_transfer(self.handle, self.out_ep, @constCast(@ptrCast(data.ptr)), @intCast(xfer), &actual, @intCast(timeout_ms));
+            var ret = c.libusb_bulk_transfer(self.handle, self.out_ep, @ptrCast(@constCast(data.ptr)), @intCast(xfer), &actual, @intCast(timeout_ms));
             if (ret == c.LIBUSB_ERROR_PIPE) {
                 self.logger.warn("USB: bulk OUT stalled — clearing halt and retrying", .{});
                 _ = c.libusb_clear_halt(self.handle, self.out_ep);
-                ret = c.libusb_bulk_transfer(self.handle, self.out_ep, @constCast(@ptrCast(data.ptr)), @intCast(xfer), &actual, @intCast(timeout_ms));
+                ret = c.libusb_bulk_transfer(self.handle, self.out_ep, @ptrCast(@constCast(data.ptr)), @intCast(xfer), &actual, @intCast(timeout_ms));
             }
             if (ret != 0 and ret != c.LIBUSB_ERROR_TIMEOUT) {
                 self.logger.err("USB bulk write failed: {s} (ep 0x{x})", .{ errName(ret), self.out_ep });
@@ -433,4 +434,8 @@ test "serialFromProduct parses qdl-style strings" {
     try std.testing.expectEqualStrings("abc", serialFromProduct("QUSB_BULK_SN:abc def"));
     try std.testing.expectEqualStrings("abc", serialFromProduct("QUSB_BULK_SN:abc_x"));
     try std.testing.expectEqualStrings("", serialFromProduct("no serial here"));
+}
+
+test "USB transport exposes its reset hook" {
+    try std.testing.expect(Usb.vtable.reset != null);
 }
