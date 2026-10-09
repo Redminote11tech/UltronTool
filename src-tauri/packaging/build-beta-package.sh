@@ -12,29 +12,27 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 ver="0.3.0"
-pkgrel="5"
+pkgrel="6"
 name="ultrontool-beta"
 out="UltronTool-BETA-${ver}-${pkgrel}-x86_64.pkg.tar.zst"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 
+# Rebuild every shipped component from this checkout. Never package a stale
+# devUrl shell or silently omit the backend.
+npm --prefix "${root}/ui-ts" run build
+(cd "$root" && zig build -Doptimize=ReleaseSafe)
+cargo build --offline --release --features custom-protocol --manifest-path "${root}/src-tauri/Cargo.toml"
 bin="${root}/src-tauri/target/release/ultron-ui"
-if [[ ! -x "$bin" ]]; then
-  echo "release binary missing — run first:" >&2
-  echo "  cargo build --release --manifest-path ${root}/src-tauri/Cargo.toml" >&2
-  exit 1
-fi
+[[ -x "$bin" ]] || { echo "release GUI missing" >&2; exit 1; }
 
 install -Dm755 "$bin" "$stage/usr/bin/${name}"
 
 # The Zig IPC daemon rides along as a sibling of the GUI binary — the shell
 # resolves it via exe_dir at startup. udev rules grant device access.
 daemon="${root}/zig-out/bin/ultron-daemon"
-if [[ -x "$daemon" ]]; then
-  install -Dm755 "$daemon" "$stage/usr/bin/${name}-daemon"
-else
-  echo "warning: zig-out/bin/ultron-daemon missing — build it: zig build -Doptimize=ReleaseSafe" >&2
-fi
+[[ -x "$daemon" ]] || { echo "release daemon missing" >&2; exit 1; }
+install -Dm755 "$daemon" "$stage/usr/bin/${name}-daemon"
 # udev rules under the beta's own filename: the stable `ultron` package owns
 # 70-ultron.rules, and pacman refuses two packages owning one file. Both
 # files carry identical directives — udev applies them idempotently.
@@ -62,6 +60,8 @@ license = GPL-3.0
 depend = webkit2gtk-4.1
 depend = gtk3
 depend = hicolor-icon-theme
+depend = libusb
+depend = systemd-libs
 EOF
 
 cat > "$stage/.INSTALL" <<'EOF'
@@ -86,3 +86,5 @@ EOF
 
 echo "built: ${root}/${out}"
 pacman -Qip "${root}/${out}"
+
+echo "Install: sudo pacman -U ${root}/${out}"
