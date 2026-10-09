@@ -63,7 +63,11 @@ fn relay(app: &AppHandle, value: serde_json::Value) {
         }
         "hello" | "state" | "session_config" | "chip_info" | "partitions" | "daemon_gone" => {
             if event == "state" && value["state"] == "disconnected" {
-                snapshot.retain(|old| old["ev"] != "partitions" && old["ev"] != "chip_info" && old["ev"] != "session_config");
+                snapshot.retain(|old| {
+                    old["ev"] != "partitions"
+                        && old["ev"] != "chip_info"
+                        && old["ev"] != "session_config"
+                });
             }
             snapshot.retain(|old| old["ev"] != event);
             snapshot.push(value.clone());
@@ -212,6 +216,11 @@ fn daemon_send(line: String, state: State<DaemonState>) -> Result<(), String> {
     result
 }
 
+#[tauri::command]
+fn save_log(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(path, contents).map_err(|error| error.to_string())
+}
+
 fn main() {
     // WebKitGTK's DMABUF renderer is the known source of blank/garbled windows
     // (and WebProcess SIGSEGVs inside libEGL) on NVIDIA + Wayland — the
@@ -236,7 +245,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             daemon_send,
             daemon_start,
-            daemon_close
+            daemon_close,
+            save_log
         ])
         .build(tauri::generate_context!())
         .expect("error while building ultron ui shell")

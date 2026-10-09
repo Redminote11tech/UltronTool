@@ -57,3 +57,20 @@ export async function pickFiles(opts: {
   if (res === null) return [];
   return Array.isArray(res) ? res : [res];
 }
+
+/** Export every retained line; the native save dialog chooses the destination. */
+export async function saveLog(contents: string): Promise<boolean> {
+  if (isTauri()) {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const path = await save({ title: "Save session log", defaultPath: "ultron-session.log", filters: [{ name: "Log", extensions: ["log", "txt"] }] });
+    if (!path) return false;
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("save_log", { path, contents });
+  } else {
+    const url = URL.createObjectURL(new Blob([contents], { type: "text/plain;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url; link.download = "ultron-session.log"; link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  return true;
+}
