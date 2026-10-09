@@ -61,9 +61,9 @@ fn relay(app: &AppHandle, value: serde_json::Value) {
                 snapshot.push(value.clone());
             }
         }
-        "hello" | "state" | "chip_info" | "partitions" | "daemon_gone" => {
+        "hello" | "state" | "session_config" | "chip_info" | "partitions" | "daemon_gone" => {
             if event == "state" && value["state"] == "disconnected" {
-                snapshot.retain(|old| old["ev"] != "partitions" && old["ev"] != "chip_info");
+                snapshot.retain(|old| old["ev"] != "partitions" && old["ev"] != "chip_info" && old["ev"] != "session_config");
             }
             snapshot.retain(|old| old["ev"] != event);
             snapshot.push(value.clone());

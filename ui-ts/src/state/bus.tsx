@@ -50,8 +50,15 @@ export interface PartRow {
   last_lba: number;
 }
 
+export interface StagedFile { name: string; size: number; paths: string[] }
+export interface FlashDraft {
+  scope: string; files: Record<string, StagedFile | null>; storage: Storage; skipInit: boolean;
+}
+const emptyDraft = (scope: string): FlashDraft => ({ scope, files: {}, storage: "ufs", skipInit: false });
+
 export interface State {
   page: Page;
+  draft: FlashDraft;
   /* sim */
   mode: Mode;
   scanning: boolean;
@@ -65,11 +72,14 @@ export interface State {
   devices: DaemonDevice[];
   selectedPath: string | null;
   session: SessionState;
+  configured: { storage: Storage; skipInit: boolean; vipDir: string } | null;
   daemonGone: string | null;
   parts: { lun: number; sector_size: number; luns: number; vip: boolean; rows: PartRow[] } | null;
 }
 
 type Action =
+  | { type: "draftFiles"; scope: string; update: (files: FlashDraft["files"]) => FlashDraft["files"] }
+  | { type: "draftSettings"; scope: string; storage?: Storage; skipInit?: boolean }
   | { type: "page"; page: Page }
   | { type: "log"; level: Level; text: string }
   | { type: "clearLogs" }
@@ -85,6 +95,7 @@ type Action =
   | { type: "devAdd"; dev: DaemonDevice }
   | { type: "devRemove"; path: string }
   | { type: "devSelect"; path: string | null }
+  | { type: "configured"; storage: Storage; skipInit: boolean; vipDir: string }
   | { type: "session"; session: SessionState }
   | { type: "chipEv"; chip: string }
   | { type: "partsEv"; lun: number; sector_size: number; luns: number; vip: boolean; rows: PartRow[] }
@@ -104,6 +115,7 @@ let toastId = 0;
 
 const initial: State = {
   page: "device",
+  draft: emptyDraft("sim:none"),
   mode: "none",
   scanning: false,
   chip: null,
@@ -116,6 +128,7 @@ const initial: State = {
   devices: [],
   selectedPath: null,
   session: "disconnected",
+  configured: null,
   daemonGone: null,
   parts: null,
 };
@@ -127,6 +140,8 @@ function pushLog(s: State, level: Level, text: string): LogLine[] {
 
 function reducer(s: State, a: Action): State {
   switch (a.type) {
+    case "draftFiles": return a.scope === s.draft.scope ? { ...s, draft: { ...s.draft, files: a.update(s.draft.files) } } : s;
+    case "draftSettings": return a.scope === s.draft.scope ? { ...s, draft: { ...s.draft, storage: a.storage ?? s.draft.storage, skipInit: a.skipInit ?? s.draft.skipInit } } : s;
     case "page":
       return { ...s, page: a.page };
     case "log":
@@ -139,7 +154,7 @@ function reducer(s: State, a: Action): State {
       const v = VENDORS[a.mode as Exclude<Mode, "none">];
       let logs = pushLog(s, "info", `usb: device ${v.name} detected — class match, claiming interface`);
       logs = pushLog({ ...s, logs }, "info", `probe: ${a.chip}`);
-      return { ...s, scanning: false, mode: a.mode, chip: a.chip, logs };
+      return { ...s, draft: emptyDraft(`sim:${a.mode}`), scanning: false, mode: a.mode, chip: a.chip, logs };
     }
     case "disconnect":
       return { ...s, scanning: false, mode: "none", chip: null, logs: pushLog(s, "info", "usb: device removed — interface released") };
@@ -176,9 +191,11 @@ function reducer(s: State, a: Action): State {
     }
     case "devSelect":
       return canSelectDevice(s.selectedPath, a.path, s.session, !!s.job && !s.job.finished)
-        ? { ...s, selectedPath: a.path, parts: null, chip: null } : s;
+        ? { ...s, draft: s.selectedPath === a.path ? s.draft : emptyDraft(`daemon:${a.path}`), selectedPath: a.path, parts: null, chip: null } : s;
+    case "configured":
+      return { ...s, configured: { storage: a.storage, skipInit: a.skipInit, vipDir: a.vipDir }, draft: { ...s.draft, storage: a.storage, skipInit: a.skipInit } };
     case "session":
-      return { ...s, session: a.session, logs: pushLog(s, "info", `session: ${a.session}`) };
+      return { ...s, configured: a.session === "disconnected" ? null : s.configured, session: a.session, logs: pushLog(s, "info", `session: ${a.session}`) };
     case "chipEv":
       return { ...s, chip: a.chip, logs: pushLog(s, "info", `probe: ${a.chip}`) };
     case "partsEv":
@@ -355,6 +372,9 @@ export function BusProvider({ children }: { children: ReactNode }) {
       dispatch({ type: "devSelect", path: dev.path });
       submit({
         cmd: "connect",
+        storage: stateRef.current.draft.storage,
+        skip_storage_init: stateRef.current.draft.skipInit,
+        vip_dir: stateRef.current.draft.files.vip?.paths[0],
         bus: dev.bus || undefined,
         devnum: dev.devnum || undefined,
       }, "Connecting device", dev.path);
@@ -429,6 +449,9 @@ export function BusProvider({ children }: { children: ReactNode }) {
             void sendDaemon({ cmd: "cancel" }).catch(error => api.toast(false, "Cancel failed", String(error)));
           }
           dispatch({ type: "devRemove", path: e.path });
+          return;
+        case "session_config":
+          dispatch({ type: "configured", storage: e.storage as Storage, skipInit: e.skip_init, vipDir: e.vip_dir });
           return;
         case "state":
           session = e.state;

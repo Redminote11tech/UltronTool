@@ -32,6 +32,7 @@ export type DaemonEvent =
   | { ev: "device_added" } & DaemonDevice
   | { ev: "device_removed"; path: string }
   | { ev: "progress"; fraction: number; done: number; total: number; label: string }
+  | { ev: "session_config"; storage: string; skip_init: boolean; vip_dir: string }
   | { ev: "state"; state: SessionState }
   | { ev: "finished"; request_id?: number; success: boolean; message: string }
   | {

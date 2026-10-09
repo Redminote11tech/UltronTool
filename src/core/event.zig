@@ -27,7 +27,6 @@ pub fn FixedStr(comptime N: usize) type {
         pub fn slice(self: *const Self) []const u8 {
             return self.buf[0..self.len];
         }
-
     };
 }
 
@@ -172,6 +171,7 @@ pub const Event = union(enum) {
     chip_info: ChipInfoEvent,
     finished: Finished,
     session_state: SessionState,
+    session_config: struct { storage: FixedStr(16), skip_init: bool, vip_dir: FixedStr(512) },
     partitions: PartitionsEvent,
     huawei_app: HuaweiAppEvent,
 };

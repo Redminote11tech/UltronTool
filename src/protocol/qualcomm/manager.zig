@@ -696,6 +696,13 @@ pub const Manager = struct {
             self.emitState(.disconnected);
             return;
         };
+        self.storage = fh.storage;
+        self.skip_saved = skip_storage_init;
+        self.channel.push(.{ .session_config = .{
+            .storage = ev.FixedStr(16).fromSlice(@tagName(fh.storage)),
+            .skip_init = skip_storage_init,
+            .vip_dir = ev.FixedStr(512).fromSlice(self.vip_dir_saved orelse ""),
+        } });
         self.sector_size = fh.sector_size;
 
         if (fh.vip != null and fh.programmer_requires_vip) {

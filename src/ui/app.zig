@@ -4240,6 +4240,7 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
             if (info.pkhash.len > 0) appendFmt(&buf, &len, "OEM PK hash: 0x{s}\n", .{info.pkhash.slice()});
             labelTextZ(ui.dev_chip_label.?, buf[0..len]);
         },
+        .session_config => {},
         .session_state => |state| {
             if (ui.session_invalid and state != .disconnected) return;
             ui.session = state;

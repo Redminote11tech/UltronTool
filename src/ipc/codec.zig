@@ -156,6 +156,15 @@ pub fn appendEvent(list: *std.ArrayList(u8), alloc: std.mem.Allocator, event: ev
             try appendJsonString(list, alloc, sessionStateName(s));
             try list.append(alloc, '}');
         },
+        .session_config => |config| {
+            try list.appendSlice(alloc, "{\"ev\":\"session_config\",\"storage\":");
+            try appendJsonString(list, alloc, config.storage.slice());
+            try list.appendSlice(alloc, ",\"skip_init\":");
+            try list.appendSlice(alloc, if (config.skip_init) "true" else "false");
+            try list.appendSlice(alloc, ",\"vip_dir\":");
+            try appendJsonString(list, alloc, config.vip_dir.slice());
+            try list.append(alloc, '}');
+        },
         .partitions => |p| {
             try list.appendSlice(alloc, "{\"ev\":\"partitions\",\"lun\":");
             try appendInt(list, alloc, p.lun);
@@ -535,4 +544,14 @@ test "parseRequest rejects garbage and unknown commands" {
     try testing.expectError(error.BadField, parseRequest(arena, "{\"cmd\":\"connect\",\"storage\":\"scsi\"}"));
     try testing.expectError(error.BadField, parseRequest(arena, "{\"cmd\":\"upload_loader\"}"));
     try testing.expectError(error.BadField, parseRequest(arena, "{\"cmd\":\"flash_xml\",\"files\":\"a.xml\"}"));
+}
+
+test "configured session reports actual storage and VIP settings" {
+    const out = try collectEvent(testing.allocator, .{ .session_config = .{
+        .storage = ev.FixedStr(16).fromSlice("emmc"),
+        .skip_init = true,
+        .vip_dir = ev.FixedStr(512).fromSlice("/tables"),
+    } });
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("{\"ev\":\"session_config\",\"storage\":\"emmc\",\"skip_init\":true,\"vip_dir\":\"/tables\"}", out);
 }

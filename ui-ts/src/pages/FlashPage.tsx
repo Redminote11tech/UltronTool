@@ -13,13 +13,6 @@ import { Progress } from "../components/Progress";
 import { bytes, eta, rate } from "../lib/format";
 import { item, stagger } from "../lib/motion";
 
-interface Filled {
-  name: string;
-  size: number;
-  /** real filesystem paths (daemon); empty in sim */
-  paths: string[];
-}
-
 const QUALCOMM_SLOTS: SlotCfg[] = [
   { id: "programmer", label: "Firehose programmer", hint: ".mbn / .elf — vendor-signed, user-supplied", required: true, fake: "firehose.mbn", fakeSize: 3_210_000 },
   { id: "rawprogram", label: "rawprogram XML", hint: "rawprogram*.xml — flash plan", required: true, fake: "rawprogram0.xml", fakeSize: 84_000 },
@@ -31,14 +24,15 @@ const MBN_FILTERS = [{ name: "Firehose programmer", extensions: ["mbn", "elf", "
 const XML_FILTERS = [{ name: "rawprogram / patch XML", extensions: ["xml"] }];
 
 export function FlashPage() {
-  const { state, startFlash, cancelFlash, startFlashReal } = useBus();
-  const [files, setFiles] = useState<Record<string, Filled | null>>({});
+  const { state, dispatch, toast, startFlash, cancelFlash, startFlashReal } = useBus();
+  const { files, storage, skipInit } = state.draft;
+  const setFiles = (update: (files: typeof state.draft.files) => typeof state.draft.files) => dispatch({ type: "draftFiles", scope: state.draft.scope, update });
+  const setStorage = (storage: Storage) => dispatch({ type: "draftSettings", scope: state.draft.scope, storage });
+  const setSkipInit = (skipInit: boolean) => dispatch({ type: "draftSettings", scope: state.draft.scope, skipInit });
   const [attaching, setAttaching] = useState<string | null>(null);
   const [erase, setErase] = useState(false);
   const [verify, setVerify] = useState(true);
   const [reboot, setReboot] = useState(true);
-  const [storage, setStorage] = useState<Storage>("ufs");
-  const [skipInit, setSkipInit] = useState(false);
   const [review, setReview] = useState<FlashPlan | null>(null);
 
   const daemon = state.source === "daemon";
@@ -50,6 +44,7 @@ export function FlashPage() {
 
   const selectedDev = daemon ? state.devices.find((d) => d.path === state.selectedPath) ?? null : null;
   const session = state.session;
+  const configLocked = running || (daemon && session === "firehose_ready");
 
   const requiredMissing = slots.some((s) => {
     if (!s.required || s.disabledNote) return false;
@@ -65,7 +60,7 @@ export function FlashPage() {
     : mode !== null && !requiredMissing && !running;
 
   const simFill = (s: SlotCfg) => {
-    if (s.disabledNote || files[s.id] || attaching) return;
+    if (running || (configLocked && (s.id === "vip" || s.id === "programmer")) || s.disabledNote || files[s.id] || attaching) return;
     setAttaching(s.id);
     window.setTimeout(() => {
       setFiles((f) => ({ ...f, [s.id]: { name: s.fake, size: s.fakeSize, paths: [] } }));
@@ -94,8 +89,8 @@ export function FlashPage() {
   };
 
   const pick = (s: SlotCfg) => {
-    if (s.disabledNote || files[s.id] || attaching) return;
-    if (daemon) void daemonPick(s);
+    if (running || (configLocked && (s.id === "vip" || s.id === "programmer")) || s.disabledNote || files[s.id] || attaching) return;
+    if (daemon) void daemonPick(s).catch(error => toast(false, "File selection failed", String(error)));
     else simFill(s);
   };
 
@@ -113,7 +108,7 @@ export function FlashPage() {
         files: [...(files["rawprogram"]?.paths ?? []), ...(files["patch"]?.paths ?? [])],
         storage,
         skipInit,
-        vipDir: files["vip"]?.paths[0],
+        vipDir: session === "firehose_ready" ? state.configured?.vipDir || undefined : files["vip"]?.paths[0],
       });
       return;
     }
@@ -245,7 +240,7 @@ export function FlashPage() {
                     {s.id === "vip" && <FolderOpen size={14} />}
                     <span className="mono">{f.name}</span>
                     {f.size > 0 && <span className="size mono">{bytes(f.size)}</span>}
-                    <button className="slot-x" onClick={clear(s.id)} aria-label="remove">
+                    <button className="slot-x" disabled={running || (configLocked && (s.id === "vip" || s.id === "programmer"))} onClick={clear(s.id)} aria-label="remove">
                       <X size={14} />
                     </button>
                   </motion.div>
@@ -263,7 +258,7 @@ export function FlashPage() {
                   <b>Storage</b>
                   <span>firehose MemoryName — set at configure time</span>
                 </div>
-                <select className="select" value={storage} onChange={(e) => setStorage(e.target.value as Storage)} style={{ height: 36 }}>
+                <select aria-label="Storage" disabled={configLocked} className="select" value={storage} onChange={(e) => setStorage(e.target.value as Storage)} style={{ height: 36 }}>
                   <option value="ufs">UFS</option>
                   <option value="emmc">eMMC</option>
                   <option value="spinor">SPI NOR</option>
@@ -274,6 +269,7 @@ export function FlashPage() {
               <SwitchRow
                 title="Skip storage init"
                 note="SkipStorageInit — for programmers that refuse init"
+                disabled={configLocked}
                 on={skipInit}
                 onChange={setSkipInit}
               />
