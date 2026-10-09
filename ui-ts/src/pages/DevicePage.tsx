@@ -48,10 +48,9 @@ function DeviceCard({
   const supported = dev.mode === "qualcomm_edl" || dev.mode === "qualcomm_crash";
 
   return (
-    <motion.button
+    <motion.div
       className="card pad"
       variants={item}
-      onClick={onSelect}
       style={{
         width: "100%", textAlign: "left", cursor: "pointer", border: 0, display: "block",
         boxShadow: selected
@@ -60,7 +59,7 @@ function DeviceCard({
         transition: "box-shadow 200ms cubic-bezier(0.2, 0, 0, 1)",
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+      <button type="button" className="device-select" disabled={busy || (session !== "disconnected" && !selected)} onClick={onSelect} style={{ display: "flex", alignItems: "center", gap: 14 }}>
         <span
           style={{
             width: 44, height: 44, borderRadius: 12, flex: "none",
@@ -81,7 +80,7 @@ function DeviceCard({
         </div>
         {!supported && <span className="req opt">TS FLOW PENDING</span>}
         {selected && supported && <Check size={16} color="var(--accent)" />}
-      </div>
+      </button>
 
       {selected && supported && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
@@ -108,18 +107,18 @@ function DeviceCard({
             </Button>
           )}
           {session !== "disconnected" && (
-            <Button variant="text" onClick={actions.onReset}>
+            <Button variant="text" disabled={busy} onClick={actions.onReset}>
               <Power size={14} /> Reset
             </Button>
           )}
           {session !== "disconnected" && (
-            <Button variant="text" onClick={actions.onDisconnect}>
+            <Button variant="text" disabled={busy} onClick={actions.onDisconnect}>
               <RefreshCw size={13} /> Disconnect
             </Button>
           )}
         </div>
       )}
-    </motion.button>
+    </motion.div>
   );
 }
 
@@ -186,7 +185,7 @@ export function DevicePage() {
                           actions={{
                             onConnect: () => connectDevice(d),
                             onOpenFlash: () => dispatch({ type: "page", page: "flash" }),
-                            onReset: () => resetDevice(),
+                            onReset: () => setConfirmReset(true),
                             onDisconnect: () => disconnectDevice(),
                           }}
                         />
@@ -270,7 +269,7 @@ export function DevicePage() {
         </p>
       )}
 
-      <Modal open={confirmReset}>
+      <Modal open={confirmReset} onClose={() => setConfirmReset(false)} label="Reset device">
         <h3>Reset the device?</h3>
         <p>
           A protocol reset reboots the device out of download mode. Unsaved flash
@@ -282,6 +281,7 @@ export function DevicePage() {
             variant="filled"
             onClick={() => {
               setConfirmReset(false);
+              if (daemon) { resetDevice(); return; }
               dispatch({ type: "log", level: "info", text: "reset: device rebooted (sim)" });
               toast(true, "Device reset", "Rebooting out of download mode");
               setMode("none");

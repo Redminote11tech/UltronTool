@@ -1,24 +1,18 @@
-import { motion, AnimatePresence } from "motion/react";
+import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
-import { dialog } from "../lib/motion";
 
-/** M3 basic dialog: 28dp corners on surface-container-high, scrim behind. */
-export function Modal({ open, children }: { open: boolean; children: ReactNode }) {
-  return (
-    <AnimatePresence>
-      {open && (
-        <motion.div
-          className="modal-back"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.15 }}
-        >
-          <motion.div className="modal-panel" variants={dialog} initial="initial" animate="animate" exit="exit">
-            {children}
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>
-  );
+/** Native modal semantics: focus containment, Escape and focus restoration. */
+export function Modal({ open, children, onClose, label = "Confirm operation" }: {
+  open: boolean; children: ReactNode; onClose?: () => void; label?: string;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dialog = ref.current;
+    if (!dialog) return;
+    if (open && !dialog.open) dialog.showModal();
+    if (!open && dialog.open) dialog.close();
+    return () => { if (dialog.open) dialog.close(); };
+  }, [open]);
+  return <dialog ref={ref} className="modal-panel" aria-label={label}
+    onCancel={() => onClose?.()} onClose={() => onClose?.()}>{children}</dialog>;
 }
