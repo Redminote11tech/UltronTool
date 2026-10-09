@@ -90,40 +90,28 @@ fn readerRun(shared: *Shared) void {
     const arena = arena_state.allocator();
 
     var buf: [8192]u8 = undefined;
-    var pending: [8192]u8 = undefined;
-    var pending_len: usize = 0;
-
+    var pending = std.ArrayList(u8).empty;
+    defer pending.deinit(shared.alloc);
+    var discarded = false;
     while (!shared.stopping.load(.acquire)) {
-        const n = std.posix.read(0, &buf) catch |e| {
-            shared.logger.err("daemon: stdin read failed: {s}", .{@errorName(e)});
-            break;
-        };
-        if (n == 0) {
-            shared.logger.info("daemon: stdin closed — shutting down", .{});
-            break;
-        }
-        var rest = buf[0..n];
-        while (std.mem.indexOfScalar(u8, rest, '\n')) |nl| {
-            const line = rest[0..nl];
-            rest = rest[nl + 1 ..];
-            var full: []const u8 = line;
-            if (pending_len > 0) {
-                const avail = pending.len - pending_len;
-                const take = @min(avail, line.len);
-                @memcpy(pending[pending_len..][0..take], line[0..take]);
-                pending_len += take;
-                full = pending[0..pending_len];
+        const n = std.posix.read(0, &buf) catch break;
+        if (n == 0) break;
+        for (buf[0..n]) |byte| {
+            if (shared.stopping.load(.acquire)) break;
+            if (byte == '\n') {
+                if (discarded) rejectRequest(shared, "request exceeds size limit") else handleLine(shared, arena, pending.items);
+                pending.clearRetainingCapacity();
+                discarded = false;
+                // enqueue has copied every request string before this reset.
+                _ = arena_state.reset(.retain_capacity);
+            } else if (!discarded) {
+                if (pending.items.len >= 1024 * 1024) {
+                    discarded = true;
+                    pending.clearRetainingCapacity();
+                } else pending.append(shared.alloc, byte) catch {
+                    discarded = true;
+                };
             }
-            handleLine(shared, arena, full);
-            pending_len = 0;
-        }
-        // Keep the remainder for the next read.
-        const take = @min(pending.len - pending_len, rest.len);
-        @memcpy(pending[pending_len..][0..take], rest[0..take]);
-        pending_len += take;
-        if (rest.len > take) {
-            shared.logger.err("daemon: request line exceeds buffer — dropped", .{});
-            pending_len = 0;
         }
     }
     shared.stopping.store(true, .release);
@@ -135,6 +123,7 @@ fn handleLine(shared: *Shared, arena: std.mem.Allocator, line: []const u8) void 
 
     const parsed = codec.parseRequest(arena, trimmed) catch |e| {
         shared.logger.warn("daemon: bad request ({s})", .{@errorName(e)});
+        rejectRequest(shared, @errorName(e));
         return;
     };
     switch (parsed) {
@@ -231,12 +220,14 @@ pub fn daemonMain(init: std.process.Init) !void {
         logger.warn("failed to start device scanner", .{});
     };
 
-    const manager = manager_mod.Manager.init(alloc, logger, channel, cancel, &usbOpen, @ptrCast(logger)) catch |e| blk: {
+    var manager = manager_mod.Manager.init(alloc, logger, channel, cancel, &usbOpen, @ptrCast(logger)) catch |e| blk: {
         logger.warn("session manager unavailable: {s}", .{@errorName(e)});
         break :blk null;
     };
     if (manager) |m| m.start() catch {
         logger.warn("failed to start session manager", .{});
+        m.shutdown();
+        manager = null;
     };
     shared.manager = manager;
 
@@ -324,4 +315,24 @@ test "daemon removal cancels only the owned target, independently of a webview" 
     shared.trackDevice(.{ .device_removed = a.key });
     try std.testing.expect(cancel.load(.acquire));
     try std.testing.expect(shared.target == null);
+}
+
+test "invalid or unavailable daemon requests produce explicit failed completions" {
+    var logger = log.Logger{ .mirror_stderr = false };
+    var channel: EventChannel = .{};
+    var cancel = std.atomic.Value(bool).init(false);
+    var shared = Shared{ .alloc = std.testing.allocator, .logger = &logger, .channel = &channel, .manager = null, .cancel = &cancel };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    handleLine(&shared, arena.allocator(), "invalid JSON");
+    handleLine(&shared, arena.allocator(), "{\"cmd\":\"connect\",\"bus\":1,\"devnum\":2}");
+    const Check = struct {
+        failures: usize = 0,
+        fn cb(self: *@This(), event: ev.Event) void {
+            if (event == .finished and !event.finished.success) self.failures += 1;
+        }
+    };
+    var check = Check{};
+    channel.drain(&check, Check.cb);
+    try std.testing.expectEqual(@as(usize, 2), check.failures);
 }
