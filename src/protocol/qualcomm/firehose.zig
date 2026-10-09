@@ -734,7 +734,7 @@ pub const Session = struct {
                 Error.Cancelled => return e,
                 else => Response{ .kind = .timeout },
             };
-            if (mid.isAck()) ack_seen = true;
+            if (mid.isAck() or (mid.kind == .nak and left == chunk_sectors)) ack_seen = true;
             // Under VIP a refusal means the digest stream desynced — there
             // is no way to resume against a signed table.
             if (self.vip != null and (mid.error_seen or mid.kind == .nak)) {
@@ -769,6 +769,8 @@ pub const Session = struct {
                 return error.WriteFailed;
             }
         }
+        // Finishing the data phase restores command mode, not the failed write.
+        if (drain_mode) return error.WriteFailed;
         self.logger.info("flashed \"{s}\" successfully", .{op.label orelse fname});
         return num_sectors;
     }
@@ -1351,6 +1353,56 @@ test "drain streams the image's remaining bytes instead of zeros" {
         .{ .expect_write = image[1024..2048] },
         .{ .respond = nak },
         .{ .respond = nak },
+    };
+
+    const env = try TestEnv.init(std.testing.allocator, &steps);
+    defer env.deinit(std.testing.allocator);
+    errdefer if (env.h.failure) |f| std.debug.print("SIM MISMATCH: expected vs got: {s}\n", .{f});
+    env.sess.max_payload_size = 1024;
+    env.sess.sector_size = 512;
+
+    var file = try fileio.File.open(path);
+    defer file.close();
+
+    const op = rawprogram.Program{
+        .sector_size = 512,
+        .num_sectors = 4,
+        .partition = 0,
+        .start_sector = "8192",
+        .filename = path,
+        .label = "oeminfo",
+    };
+    try std.testing.expectError(error.WriteFailed, env.sess.program(&op, &file));
+    try std.testing.expect(env.h.failure == null);
+}
+
+test "draining a refused write remains failed even after a final ACK" {
+    const image_len = 2048; // 512-byte sectors → 4 sectors → 2 chunks
+    const image = try std.testing.allocator.alloc(u8, image_len);
+    defer std.testing.allocator.free(image);
+    for (image, 0..) |*b, i| b.* = @truncate(i * 7 + 3);
+
+    const setup_ack = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><response value=\"ACK\"/></data>";
+    // nv9-style refusal: a log line mid-data-phase instead of an immediate NAK.
+    const faillog = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><log value=\"Write Failed sector 2, size 2 result 3\"/><response value=\"NAK\"/></data>";
+
+    var tmp_dir = try fileio.TmpDir.init();
+    defer tmp_dir.cleanup();
+    try tmp_dir.writeFile("oeminfo.img", image);
+    var pbuf: [176]u8 = undefined;
+    const path = try tmp_dir.filePath(&pbuf, "oeminfo.img");
+
+    const expected_setup = try std.fmt.allocPrint(std.testing.allocator, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><program SECTOR_SIZE_IN_BYTES=\"{d}\" num_partition_sectors=\"{d}\" physical_partition_number=\"{d}\" start_sector=\"{s}\" filename=\"{s}\"/></data>", .{ 512, 4, 0, "8192", path });
+    defer std.testing.allocator.free(expected_setup);
+
+    const steps = [_]SimStep{
+        .{ .expect_write = expected_setup },
+        .{ .respond = setup_ack },
+        .{ .expect_write = image[0..1024] },
+        .{ .respond = faillog },
+        // Drain chunk: must be the image's own second half, NOT zeros.
+        .{ .expect_write = image[1024..2048] },
+        .{ .respond = setup_ack },
     };
 
     const env = try TestEnv.init(std.testing.allocator, &steps);
