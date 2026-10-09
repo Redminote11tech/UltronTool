@@ -1,328 +1,99 @@
-import { motion, AnimatePresence } from "motion/react";
-import { FileText, Lock, Loader2, X, Zap, ShieldAlert, FolderOpen } from "lucide-react";
-import { useState } from "react";
+import { FileText, FolderOpen, X, Loader2, HardDriveDownload, ArrowRight, CheckCircle2, TriangleAlert } from "lucide-react";
+import { useRef, useState } from "react";
 import { useBus } from "../state/bus";
 import type { FlashPlan, Storage } from "../state/bus";
 import { SLOTS, VENDORS } from "../state/vendors";
 import type { SlotCfg } from "../state/vendors";
 import { pickFiles } from "../lib/tauri";
-import { Button, HoldButton } from "../components/Button";
-import { Modal } from "../components/Modal";
+import { Button } from "../components/Button";
 import { SwitchRow } from "../components/Switch";
+import { Modal } from "../components/Modal";
 import { Progress } from "../components/Progress";
 import { bytes, eta, rate } from "../lib/format";
-import { item, stagger } from "../lib/motion";
 
 const QUALCOMM_SLOTS: SlotCfg[] = [
-  { id: "programmer", label: "Firehose programmer", hint: ".mbn / .elf — vendor-signed, user-supplied", required: true, fake: "firehose.mbn", fakeSize: 3_210_000 },
-  { id: "rawprogram", label: "rawprogram XML", hint: "rawprogram*.xml — flash plan", required: true, fake: "rawprogram0.xml", fakeSize: 84_000 },
-  { id: "patch", label: "patch XML", hint: "patch*.xml — partition table patches", required: false, fake: "patch0.xml", fakeSize: 12_000 },
-  { id: "vip", label: "VIP digest tables", hint: "folder with DigestsToSign.bin.mbn — only for programmers enforcing VIP", required: false, fake: "DigestsToSign", fakeSize: 0 },
+  { id: "programmer", label: "Firehose programmer", hint: "A signed .mbn or .elf programmer for your device", required: true, fake: "firehose.mbn", fakeSize: 3_210_000 },
+  { id: "rawprogram", label: "Rawprogram XML", hint: "The flash plan and its referenced raw image files", required: true, fake: "rawprogram0.xml", fakeSize: 84_000 },
+  { id: "patch", label: "Patch XML", hint: "Optional partition table patches", required: false, fake: "patch0.xml", fakeSize: 12_000 },
+  { id: "vip", label: "VIP digest tables", hint: "Required only when the programmer enforces signed digest tables", required: false, fake: "DigestsToSign", fakeSize: 0 },
 ];
-
-const MBN_FILTERS = [{ name: "Firehose programmer", extensions: ["mbn", "elf", "bin"] }];
-const XML_FILTERS = [{ name: "rawprogram / patch XML", extensions: ["xml"] }];
-
 export function FlashPage() {
   const { state, dispatch, toast, startFlash, cancelFlash, startFlashReal } = useBus();
-  const { files, storage, skipInit } = state.draft;
-  const setFiles = (update: (files: typeof state.draft.files) => typeof state.draft.files) => dispatch({ type: "draftFiles", scope: state.draft.scope, update });
-  const setStorage = (storage: Storage) => dispatch({ type: "draftSettings", scope: state.draft.scope, storage });
-  const setSkipInit = (skipInit: boolean) => dispatch({ type: "draftSettings", scope: state.draft.scope, skipInit });
+  const { files, storage, skipInit, scope } = state.draft;
   const [attaching, setAttaching] = useState<string | null>(null);
-  const [erase, setErase] = useState(false);
-  const [verify, setVerify] = useState(true);
-  const [reboot, setReboot] = useState(true);
-  const [review, setReview] = useState<FlashPlan | null>(null);
-
-  const daemon = state.source === "daemon";
+  const pickerOpen = useRef(false);
+  const [review, setReview] = useState<FlashPlan | "simulation" | null>(null);
+  const real = state.source === "daemon";
+  const selected = state.devices.find(dev => dev.path === state.selectedPath);
   const mode = state.mode === "none" ? null : state.mode;
-  const slots: SlotCfg[] = daemon ? QUALCOMM_SLOTS : mode ? SLOTS[mode] : [];
+  const slots = real ? QUALCOMM_SLOTS : mode ? SLOTS[mode] : [];
   const job = state.job;
-  const running = job !== null && !job.finished;
-  const destructive = !daemon && erase;
-
-  const selectedDev = daemon ? state.devices.find((d) => d.path === state.selectedPath) ?? null : null;
-  const session = state.session;
-  const configLocked = running || (daemon && session === "firehose_ready");
-
-  const requiredMissing = slots.some((s) => {
-    if (!s.required || s.disabledNote) return false;
-    if (s.id === "programmer" && daemon && session === "firehose_ready") return false; // programmer already lives on the device
-    return !files[s.id];
-  });
-  const canStart = daemon
-    ? selectedDev !== null &&
-      !requiredMissing &&
-      !running &&
-      !state.daemonGone &&
-      (session === "firehose_ready" || (session === "needs_loader" && !!files["programmer"]))
-    : mode !== null && !requiredMissing && !running;
-
-  const simFill = (s: SlotCfg) => {
-    if (running || (configLocked && (s.id === "vip" || s.id === "programmer")) || s.disabledNote || files[s.id] || attaching) return;
-    setAttaching(s.id);
-    window.setTimeout(() => {
-      setFiles((f) => ({ ...f, [s.id]: { name: s.fake, size: s.fakeSize, paths: [] } }));
-      setAttaching(null);
-    }, 380);
+  const running = !!job && !job.finished;
+  const configured = state.session === "firehose_ready";
+  const locked = running || real && configured;
+  const supported = !real || selected?.mode === "qualcomm_edl" || selected?.mode === "qualcomm_crash";
+  const missing = slots.some(slot => slot.required && !slot.disabledNote && !(real && configured && slot.id === "programmer") && !files[slot.id]);
+  const canStart = !running && !attaching && !missing && (real ? !!selected && supported && !state.daemonGone && (configured || state.session === "needs_loader") : !!mode);
+  const updateFile = (id: string, value: typeof files[string]) => dispatch({ type: "draftFiles", scope, update: previous => ({ ...previous, [id]: value }) });
+  const pick = async (slot: SlotCfg) => {
+    if (pickerOpen.current || running || slot.disabledNote || locked && ["programmer", "vip"].includes(slot.id)) return;
+    if (!real) { updateFile(slot.id, { name: slot.fake, size: slot.fakeSize, paths: [] }); return; }
+    pickerOpen.current = true; setAttaching(slot.id);
+    try {
+      const paths = await pickFiles({ directory: slot.id === "vip", multiple: !["vip", "programmer"].includes(slot.id), title: slot.label,
+        filters: slot.id === "vip" ? undefined : [{ name: slot.label, extensions: slot.id === "programmer" ? ["mbn", "elf", "bin"] : ["xml"] }] });
+      if (paths.length) updateFile(slot.id, { name: paths[0].split("/").pop() ?? paths[0], size: 0, paths });
+    } catch (error) { toast(false, "File selection failed", String(error)); }
+    finally { pickerOpen.current = false; setAttaching(null); }
   };
-
-  const daemonPick = async (s: SlotCfg) => {
-    if (s.id === "vip") {
-      const dirs = await pickFiles({ directory: true, title: "VIP digest tables folder" });
-      if (dirs.length === 0) return;
-      setFiles((f) => ({ ...f, vip: { name: dirs[0].split("/").pop() ?? dirs[0], size: 0, paths: [dirs[0]] } }));
-      return;
-    }
-    const filters = s.id === "programmer" ? MBN_FILTERS : XML_FILTERS;
-    const paths = await pickFiles({ multiple: s.id !== "programmer", filters, title: s.label });
-    if (paths.length === 0) return;
-    setFiles((f) => ({
-      ...f,
-      [s.id]: {
-        name: paths.length === 1 ? (paths[0].split("/").pop() ?? paths[0]) : `${paths[0].split("/").pop()} +${paths.length - 1}`,
-        size: 0,
-        paths,
-      },
-    }));
+  const prepareReview = () => {
+    if (!canStart) return;
+    if (!real) { setReview("simulation"); return; }
+    if (!selected) return;
+    setReview({ target: { path: selected.path, bus: selected.bus, devnum: selected.devnum },
+      programmer: configured ? undefined : files.programmer?.paths[0],
+      files: [...files.rawprogram!.paths, ...(files.patch?.paths ?? [])], storage, skipInit,
+      vipDir: configured ? state.configured?.vipDir || undefined : files.vip?.paths[0] });
   };
-
-  const pick = (s: SlotCfg) => {
-    if (running || (configLocked && (s.id === "vip" || s.id === "programmer")) || s.disabledNote || files[s.id] || attaching) return;
-    if (daemon) void daemonPick(s).catch(error => toast(false, "File selection failed", String(error)));
-    else simFill(s);
-  };
-
-  const clear = (id: string) => (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setFiles((f) => ({ ...f, [id]: null }));
-  };
-
-  const onStart = () => {
-    if (daemon) {
-      if (!selectedDev) return;
-      setReview({
-        target: { path: selectedDev.path, bus: selectedDev.bus, devnum: selectedDev.devnum },
-        programmer: files["programmer"]?.paths[0],
-        files: [...(files["rawprogram"]?.paths ?? []), ...(files["patch"]?.paths ?? [])],
-        storage,
-        skipInit,
-        vipDir: session === "firehose_ready" ? state.configured?.vipDir || undefined : files["vip"]?.paths[0],
-      });
-      return;
-    }
-    startFlash();
-  };
-
-  const fileCount = Object.values(files).filter(Boolean).length;
-
-  if (!daemon && !mode) {
-    return (
-      <div className="page" style={{ display: "grid", placeItems: "center", minHeight: "60vh" }}>
-        <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} style={{ textAlign: "center", color: "var(--text-2)" }}>
-          <div className="m3-empty-icon" style={{ marginBottom: 16 }}>
-            <Zap size={36} strokeWidth={1.6} />
-          </div>
-          <p>No device — connect one on the Device page to unlock flashing.</p>
-        </motion.div>
-      </div>
-    );
-  }
-
-  if (daemon && !selectedDev) {
-    return (
-      <div className="page" style={{ display: "grid", placeItems: "center", minHeight: "60vh" }}>
-        <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} style={{ textAlign: "center", color: "var(--text-2)" }}>
-          <div className="m3-empty-icon" style={{ marginBottom: 16 }}>
-            <Zap size={36} strokeWidth={1.6} />
-          </div>
-          <p>{state.devices.length === 0 ? "No device on the bus — connect one first." : "Select a device on the Device page first."}</p>
-        </motion.div>
-      </div>
-    );
-  }
-
-  const v = daemon ? VENDORS[(selectedDev?.mode ?? "qualcomm_edl") as keyof typeof VENDORS] : VENDORS[mode!];
-  const sessionNote = daemon
-    ? session === "needs_loader"
-      ? "Device waits for a firehose programmer — Start uploads it, then flashes."
-      : session === "firehose_ready"
-        ? "Firehose session is live — Start flashes the staged rawprogram/patch plan."
-        : "Connect the device on the Device page first."
-    : `Simulated ${v.name} session`;
-
-  return (
-    <div className="page">
-      <AnimatePresence mode="wait">
-        {job && (
-          <motion.div
-            key="job"
-            className="card pad"
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.25, ease: [0.05, 0.7, 0.1, 1] }}
-            style={{ marginBottom: 20 }}
-          >
-            {job.finished && !job.failed && (
-              <motion.div className="banner-ok" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-                ✔ {job.label || "Job finished"}
-              </motion.div>
-            )}
-            {job.finished && job.failed && (
-              <motion.div className="banner-err" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-                ⚠ {job.label || "Job failed"}
-              </motion.div>
-            )}
-            {!job.finished && (
-              <>
-                <Progress value={job.fraction ?? 0} total={job.fraction === null ? 0 : 1} />
-                <div className="prog-meta">
-                  <span className="prog-pct mono">{job.fraction !== null ? `${(job.fraction * 100).toFixed(1)}%` : "—"}</span>
-                  {job.total > 0 && <span className="mono">{bytes(job.value)} / {bytes(job.total)}</span>}
-                  {job.rate > 0 && <span className="mono">{rate(job.rate)}</span>}
-                  <span style={{ marginLeft: "auto" }} className="mono">{job.eta > 0 ? `ETA ${eta(job.eta)}` : ""}</span>
-                  <Button variant="text" onClick={cancelFlash}>Cancel</Button>
-                </div>
-                <div className="prog-label">{job.label}</div>
-              </>
-            )}
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <Modal open={review !== null} onClose={() => setReview(null)} label="Review flash plan">
-        <h3>Flash this device?</h3>
-        <p>This plan can overwrite or erase device data. Back up anything you need before continuing.</p>
-        {review && <><dl><dt>USB device</dt><dd>Bus {review.target.bus}, address {review.target.devnum}</dd>
-          <dt>Device path</dt><dd className="mono">{review.target.path}</dd>
-          <dt>Storage</dt><dd>{review.storage.toUpperCase()} · {review.skipInit ? "Skip initialization" : "Initialize storage"}</dd></dl>
-          <p>Programmer: <span className="mono">{review.programmer ?? "Already running on device"}</span></p>
-          <p>VIP tables: <span className="mono">{review.vipDir ?? "None"}</span></p>
-          <ul>{review.files.map(path => <li key={path} className="mono">{path}</li>)}</ul></>}
-        <div className="modal-actions"><Button onClick={() => setReview(null)}>Cancel</Button>
-          <Button variant="error" disabled={running} onClick={() => { if (review) startFlashReal(review); setReview(null); }}>Flash device</Button></div>
-      </Modal>
-      <div className="flash-grid">
-        <motion.div key={daemon ? "daemon" : mode} variants={stagger} initial="initial" animate="animate">
-          <div className="flash-head">
-            <span className="dot" style={{ background: v.color }} />
-            <b>{v.name} flash plan</b>
-            <span className="note">
-              {daemon ? `${selectedDev?.label} · ${session.replace("_", " ")}` : `slot layout mirrors the ${v.name} module's real inputs`}
-            </span>
-          </div>
-
-          {slots.map((s) => {
-            const f = files[s.id];
-            return (
-              <motion.div
-                key={s.id}
-                variants={item}
-                className={`slot ${f ? "filled" : ""} ${s.disabledNote ? "disabled" : ""}`}
-                onClick={() => pick(s)}
-              >
-                <div className="slot-title">
-                  {s.disabledNote ? <Lock size={16} /> : <FileText size={16} color={f ? "var(--accent)" : undefined} />}
-                  {s.label}
-                  <span className={`req ${s.required ? "yes" : "opt"}`}>
-                    {s.disabledNote ? "SOON" : s.required ? "REQUIRED" : "OPTIONAL"}
-                  </span>
-                </div>
-                <p className="slot-hint">{s.disabledNote ?? s.hint}</p>
-
-                {attaching === s.id && (
-                  <div className="slot-file"><Loader2 size={14} className="spin" /> reading…</div>
-                )}
-                {f && (
-                  <motion.div className="slot-file" initial={{ opacity: 0, x: -6 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.2, ease: [0.2, 0, 0, 1] }}>
-                    {s.id === "vip" && <FolderOpen size={14} />}
-                    <span className="mono">{f.name}</span>
-                    {f.size > 0 && <span className="size mono">{bytes(f.size)}</span>}
-                    <button className="slot-x" disabled={running || (configLocked && (s.id === "vip" || s.id === "programmer"))} onClick={clear(s.id)} aria-label="remove">
-                      <X size={14} />
-                    </button>
-                  </motion.div>
-                )}
-              </motion.div>
-            );
-          })}
-        </motion.div>
-
-        <motion.div className="card pad" variants={stagger} initial="initial" animate="animate" style={{ position: "sticky", top: 28 }}>
-          {daemon ? (
-            <motion.div variants={item}>
-              <div className="switch-row" style={{ borderTop: 0 }}>
-                <div className="switch-label">
-                  <b>Storage</b>
-                  <span>firehose MemoryName — set at configure time</span>
-                </div>
-                <select aria-label="Storage" disabled={configLocked} className="select" value={storage} onChange={(e) => setStorage(e.target.value as Storage)} style={{ height: 36 }}>
-                  <option value="ufs">UFS</option>
-                  <option value="emmc">eMMC</option>
-                  <option value="spinor">SPI NOR</option>
-                  <option value="nand">NAND</option>
-                  <option value="nvme">NVMe</option>
-                </select>
-              </div>
-              <SwitchRow
-                title="Skip storage init"
-                note="SkipStorageInit — for programmers that refuse init"
-                disabled={configLocked}
-                on={skipInit}
-                onChange={setSkipInit}
-              />
-            </motion.div>
-          ) : (
-            <motion.div variants={item}>
-              <SwitchRow title="Erase user data" note="Destructive — hold-to-confirm on start" on={erase} onChange={setErase} danger />
-              <SwitchRow title="Verify digests" note="VIP table / md5 checks during write" on={verify} onChange={setVerify} />
-              <SwitchRow title="Reboot after flash" note="Send protocol reset on success" on={reboot} onChange={setReboot} />
-            </motion.div>
-          )}
-
-          <motion.div variants={item} style={{ marginTop: 14 }}>
-            <div className="summary-row"><span>Files staged</span><span className="v mono">{fileCount}</span></div>
-            <div className="summary-row">
-              <span>Session</span>
-              <span className="v" style={{ color: session === "firehose_ready" ? "var(--ok)" : session === "needs_loader" ? "var(--warn)" : "var(--text-2)" }}>
-                {daemon ? session.replace("_", " ") : "simulated"}
-              </span>
-            </div>
-            {state.parts && (
-              <div className="summary-row">
-                <span>Partitions</span>
-                <span className="v mono">{state.parts.rows.length} · {state.parts.sector_size} B</span>
-              </div>
-            )}
-          </motion.div>
-
-          <motion.div variants={item} style={{ marginTop: 20 }}>
-            {destructive ? (
-              <HoldButton
-                disabled={requiredMissing || running}
-                onConfirm={onStart}
-                label={<><ShieldAlert size={16} /> Hold to erase + flash</>}
-                holdingLabel="Keep holding…"
-              />
-            ) : (
-              <Button variant="filled" large block disabled={!canStart} onClick={onStart}>
-                <Zap size={16} /> {daemon ? "Review flash plan" : "Start simulation"}
-              </Button>
-            )}
-            <p style={{ fontSize: 12, color: "var(--text-2)", textAlign: "center", margin: "12px 0 0" }}>
-              {daemon
-                ? sessionNote
-                : requiredMissing
-                  ? "Stage the required files to enable start"
-                  : destructive
-                    ? "Destructive op — press and hold"
-                    : `Simulated ${v.name} session`}
-            </p>
-          </motion.div>
-        </motion.div>
-      </div>
+  if (real ? !selected || !supported : !mode) return <div className="card empty-state"><HardDriveDownload size={42} strokeWidth={1.5} /><h3>{selected && !supported ? "Use the GTK application" : "Choose a device first"}</h3><p>{selected && !supported ? "This vendor’s hardware flow is available in GTK. The TS backend currently supports Qualcomm." : "Select and connect a device before preparing a flash plan."}</p><Button variant="tonal" onClick={() => dispatch({ type: "page", page: "device" })}>Go to devices<ArrowRight size={17} /></Button></div>;
+  const name = real ? selected!.label : VENDORS[mode!].name;
+  return <div className="page">
+    {!real && <div className="notice"><TriangleAlert size={20} /><div><b>Simulation only</b><p>Files and progress are fabricated. No data will be written to a device.</p></div></div>}
+    {job && <section className="card pad job-card" aria-live="polite">
+      {job.finished ? <div className={job.failed ? "banner-err" : "banner-ok"}>{job.failed ? <TriangleAlert size={18} /> : <CheckCircle2 size={18} />} {job.failed ? "Operation failed" : "Operation complete"}. Check the session log for details.</div>
+        : <><div className="job-heading"><div><h2>{job.title}</h2><p>{job.label}</p></div><Button variant="outlined" onClick={cancelFlash}>Cancel operation</Button></div>
+          <Progress value={job.fraction ?? 0} total={job.fraction === null ? 0 : 1} />
+          <div className="prog-meta"><b>{job.fraction === null ? "Working…" : `${(job.fraction * 100).toFixed(1)}%`}</b>{job.total > 0 && <span className="mono">{bytes(job.value)} / {bytes(job.total)}</span>}{job.rate > 0 && <span className="mono">{rate(job.rate)}</span>}{job.eta > 0 && <span className="mono">{eta(job.eta)} remaining</span>}</div></>}
+    </section>}
+    <div className="flash-grid">
+      <section><div className="flash-head"><b>Firmware files</b><span className="note">{name}{real ? ` · USB ${selected!.bus}:${selected!.devnum}` : " · simulated device"}</span></div>
+        {slots.map(slot => {
+          const file = files[slot.id];
+          const slotLocked = running || !!slot.disabledNote || locked && ["programmer", "vip"].includes(slot.id);
+          const actualVip = real && configured && slot.id === "vip" ? state.configured?.vipDir : null;
+          return <div className={`slot ${file ? "filled" : ""}`} key={slot.id}>
+            <div className="slot-title">{slot.id === "vip" ? <FolderOpen size={18} /> : <FileText size={18} />}<span>{slot.label}</span><span className="req">{slot.required && !(real && configured && slot.id === "programmer") ? "Required" : "Optional"}</span></div>
+            <p className="slot-hint">{slot.disabledNote ?? (real && configured && slot.id === "programmer" ? "The programmer is already running on the device." : slot.hint)}</p>
+            {actualVip ? <div className="slot-file"><span className="mono">{actualVip}</span></div> : file ? <div className="staged-paths">{(real ? file.paths : [file.name]).map(path => <div className="slot-file" key={path}><span className="mono">{path}</span></div>)}
+              <Button variant="text" disabled={slotLocked} onClick={() => updateFile(slot.id, null)}><X size={15} />Remove</Button></div> : <Button variant="outlined" disabled={slotLocked || !!attaching} onClick={() => void pick(slot)}>{attaching === slot.id ? <Loader2 size={16} /> : <FolderOpen size={16} />}{attaching === slot.id ? "Choosing…" : real ? "Choose file" : "Stage sample"}</Button>}
+          </div>;
+        })}
+      </section>
+      <aside className="card pad plan-options"><h2>{real ? "Session settings" : "Preview plan"}</h2>
+        {real ? <><div className="switch-row"><div className="switch-label"><b>Storage type</b><span>{configured ? "Configured on device" : "Applied when connecting or uploading the programmer"}</span></div>
+          <select className="select" aria-label="Storage type" value={storage} disabled={locked} onChange={e => dispatch({ type: "draftSettings", scope, storage: e.target.value as Storage })}>{([['ufs','UFS'],['emmc','eMMC'],['spinor','SPI NOR'],['nand','NAND'],['nvme','NVMe']] as const).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></div>
+          <SwitchRow title="Skip storage initialization" note="Use only if required by your programmer" on={skipInit} disabled={locked} onChange={skipInit => dispatch({ type: "draftSettings", scope, skipInit })} />
+          {configured && <p className="settings-note">Disconnect to change storage or VIP configuration.</p>}
+        </> : <p className="settings-note">Preview the {name} workflow with sample inputs. Firmware files and transfer speeds are simulated.</p>}
+        <div className="plan-summary"><div className="summary-row"><span>Device</span><b>{name}</b></div><div className="summary-row"><span>Files staged</span><b>{Object.values(files).filter(Boolean).length}</b></div><div className="summary-row"><span>Session</span><b>{real ? state.session.replaceAll('_',' ') : "Simulation"}</b></div>{state.parts && <div className="summary-row"><span>Partitions</span><b>{state.parts.rows.length}</b></div>}</div>
+        <Button variant="filled" large block disabled={!canStart} onClick={prepareReview}>{real ? "Review flash plan" : "Run simulation"}<ArrowRight size={17} /></Button>
+        <p className="start-note">{running ? "Wait for the current operation to finish." : missing ? "Stage the required files to continue." : real && state.session === "disconnected" ? "Connect this device on the Devices page." : real ? "You’ll confirm the device and files before any writes." : "No hardware is modified."}</p>
+      </aside>
     </div>
-  );
+    <Modal open={review !== null} label={real ? "Review flash plan" : "Run simulation"} onClose={() => setReview(null)}>
+      <h3>{real ? "Flash this device?" : "Run this simulation?"}</h3><p>{real ? "This XML plan can overwrite partitions or erase device data. Check every file and back up anything you need." : "This preview uses sample files and fabricated progress. No USB commands are sent."}</p>
+      {review && review !== "simulation" && <><dl><dt>USB target</dt><dd>Bus {review.target.bus} · address {review.target.devnum}</dd><dt>Device path</dt><dd className="mono">{review.target.path}</dd><dt>Storage</dt><dd>{review.storage.toUpperCase()} · {review.skipInit ? "Skip initialization" : "Initialize storage"}</dd></dl><p>Programmer: <span className="mono">{review.programmer ?? "Already running"}</span></p><p>VIP tables: <span className="mono">{review.vipDir ?? "None"}</span></p><ul>{review.files.map(path => <li className="mono" key={path}>{path}</li>)}</ul></>}
+      <div className="modal-actions"><Button onClick={() => setReview(null)}>Cancel</Button><Button variant={real ? "error" : "filled"} disabled={running} onClick={() => { if (review === "simulation") startFlash(); else if (review) startFlashReal(review); setReview(null); }}>{real ? "Flash device" : "Run simulation"}</Button></div>
+    </Modal>
+  </div>;
 }
