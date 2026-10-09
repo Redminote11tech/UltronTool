@@ -1323,15 +1323,12 @@ fn refreshMainPage(ui: *Ui) void {
 
     // Qualcomm-only tools inside the connected section: hidden on Samsung
     // and LG.
-    if (vendor) {
-        if (ui.xml_row) |w| gtk.Widget.setVisible(w.as(gtk.Widget), 0);
-        if (ui.ufs_row) |w| gtk.Widget.setVisible(w.as(gtk.Widget), 0);
-        if (ui.huawei_row) |w| gtk.Widget.setVisible(w.as(gtk.Widget), 0);
-        if (ui.pending_row) |w| gtk.Widget.setVisible(w.as(gtk.Widget), 0);
-        if (ui.lun_row) |w| gtk.Widget.setVisible(w, 0);
-        inline for (.{ ui.flash_xml_btn, ui.ufs_btn, ui.huawei_btn, ui.write_all_btn, ui.refresh_btn, ui.reset_btn }) |maybe| {
-            if (maybe) |b| gtk.Widget.setVisible(b.as(gtk.Widget), 0);
-        }
+    inline for (.{ ui.xml_row, ui.ufs_row, ui.huawei_row, ui.pending_row }) |maybe| {
+        if (maybe) |w| gtk.Widget.setVisible(w.as(gtk.Widget), @intFromBool(!vendor));
+    }
+    if (ui.lun_row) |w| gtk.Widget.setVisible(w, @intFromBool(!vendor and ui.parts != null and ui.parts.?.luns > 1));
+    inline for (.{ ui.flash_xml_btn, ui.ufs_btn, ui.huawei_btn, ui.write_all_btn, ui.refresh_btn, ui.reset_btn }) |maybe| {
+        if (maybe) |b| gtk.Widget.setVisible(b.as(gtk.Widget), @intFromBool(!vendor));
     }
 
     if (has_device) {
