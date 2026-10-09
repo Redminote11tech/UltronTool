@@ -117,6 +117,9 @@ pub const Ui = struct {
     devices: std.ArrayList(ev.DeviceInfo) = .empty,
     /// User's target choice: null = automatic (first device found).
     selected_key: ?ev.DeviceKey = null,
+    device_generation: u64 = 0,
+    chooser_generation: u64 = 0,
+    session_invalid: bool = false,
     session: ev.SessionState = .disconnected,
     parts: ?ev.PartitionsEvent = null,
 
@@ -292,6 +295,10 @@ pub const Ui = struct {
     }
 
     fn startJob(self: *Ui) void {
+        if (self.device) |dev| {
+            self.selected_key = dev.key;
+            self.session_invalid = false;
+        }
         self.outstanding += 1;
         self.setBusy(true);
         if (self.spinner) |sp| {
@@ -338,6 +345,7 @@ const RowCtx = struct {
 const ConfirmCtx = struct {
     ui: *Ui,
     kind: ConfirmKind,
+    generation: u64,
 };
 
 const ConfirmKind = union(enum) {
@@ -1500,6 +1508,7 @@ fn openChooserFull(ui: *Ui, kind: ChooserKind, title: [:0]const u8, save: bool, 
     // a chooser is open — the response handlers act on state captured then.
     gtk.NativeDialog.setModal(chooser.as(gtk.NativeDialog), 1);
     ui.chooser = kind;
+    ui.chooser_generation = ui.device_generation;
     _ = gtk.NativeDialog.signals.response.connect(chooser, *Ui, &onChooserResponse, ui, .{});
     gtk.NativeDialog.show(chooser.as(gtk.NativeDialog));
 }
@@ -1512,6 +1521,10 @@ fn onChooserResponse(chooser: *gtk.FileChooserNative, response_id: c_int, ui: *U
     ui.mtk_write_pick = false;
     ui.spd_write_pick = false;
     if (response_id != @intFromEnum(gtk.ResponseType.accept)) return;
+    if (ui.chooser_generation != ui.device_generation or ui.session_invalid) {
+        ui.toast("Device changed while the chooser was open — select the file again");
+        return;
+    }
     const file = gtk.FileChooser.getFile(chooser.as(gtk.FileChooser)) orelse {
         ui.logger.err("file chooser returned no file", .{});
         ui.toast("Could not read the selected file");
@@ -1863,26 +1876,28 @@ fn readStorageSelection(ui: *Ui) void {
 
 /// Sync ui.device from the visible-device list and the user's selection.
 fn syncActiveDevice(ui: *Ui) void {
+    var next: ?ev.DeviceInfo = null;
     if (ui.selected_key) |want| {
         for (ui.devices.items) |d| {
             if (d.key.eql(want)) {
-                ui.device = d;
-                return;
+                next = d;
+                break;
             }
         }
+        // A pinned session must never fall through to another USB device.
+    } else if (ui.devices.items.len > 0) {
+        next = ui.devices.items[ui.devices.items.len - 1];
     }
-    ui.device = if (ui.devices.items.len > 0) ui.devices.items[ui.devices.items.len - 1] else null;
+    const changed = if (ui.device) |old| (if (next) |dev| !old.key.eql(dev.key) else true) else next != null;
+    if (changed) ui.device_generation +%= 1;
+    ui.device = next;
 }
 
-/// The transport filter for the currently selected device (null = auto).
 fn activeTarget(ui: *Ui) ?transport.Target {
     const dev = ui.device orelse return null;
-    if (ui.devices.items.len < 2) return null;
-    return .{
-        .bus = dev.bus,
-        .devnum = dev.devnum,
-        .serial = if (dev.serial.len > 0) dev.serial.slice() else null,
-    };
+    // Scanner serial is iSerial; qdl's serial filter means product's _SN:.
+    // USB bus/address identifies precisely the device displayed by the GUI.
+    return .{ .bus = dev.bus, .devnum = dev.devnum };
 }
 
 /// Rebuild the device dropdown (only shown with 2+ devices pre-connect).
@@ -1891,7 +1906,7 @@ fn refreshDeviceSelector(ui: *Ui) void {
     const row = ui.device_sel_row orelse return;
     // Clear previous dropdown (if any).
     while (gtk.Widget.getFirstChild(slot.as(gtk.Widget))) |child| gtk.Widget.unparent(child);
-    const show = ui.devices.items.len > 1 and ui.session == .disconnected;
+    const show = ui.devices.items.len > 0 and (ui.devices.items.len > 1 or ui.device == null) and ui.session == .disconnected and !ui.busy();
     gtk.Widget.setVisible(row, @intFromBool(show));
     if (!show) return;
 
@@ -1925,6 +1940,7 @@ fn refreshDeviceSelector(ui: *Ui) void {
 }
 
 fn onDeviceSelected(drop: *gtk.DropDown, _: *gobject.ParamSpec, ui: *Ui) callconv(.c) void {
+    if (ui.busy() or ui.session != .disconnected) return;
     const selected = gtk.DropDown.getSelected(drop);
     if (selected == 0) {
         ui.selected_key = null;
@@ -2290,7 +2306,7 @@ fn confirmDialog(ui: *Ui, heading: [:0]const u8, body: []const u8, apply_label: 
     adw.MessageDialog.setCloseResponse(dlg, "cancel");
 
     const ctx = ui.alloc.create(ConfirmCtx) catch return;
-    ctx.* = .{ .ui = ui, .kind = kind };
+    ctx.* = .{ .ui = ui, .kind = kind, .generation = ui.device_generation };
     _ = adw.MessageDialog.signals.response.connect(dlg, *ConfirmCtx, &onConfirmResponse, ctx, .{});
     gtk.Window.present(dlg.as(gtk.Window));
 }
@@ -2298,9 +2314,12 @@ fn confirmDialog(ui: *Ui, heading: [:0]const u8, body: []const u8, apply_label: 
 fn onConfirmResponse(dlg: *adw.MessageDialog, response: [*:0]const u8, ctx: *ConfirmCtx) callconv(.c) void {
     const ui = ctx.ui;
     const kind = ctx.kind;
+    const generation = ctx.generation;
     ui.alloc.destroy(ctx);
     gtk.Window.destroy(dlg.as(gtk.Window));
-    const applied = std.mem.eql(u8, std.mem.span(response), "apply");
+    const stale = generation != ui.device_generation or ui.session_invalid or ui.busy();
+    const applied = std.mem.eql(u8, std.mem.span(response), "apply") and !stale;
+    if (stale) ui.toast("Device or operation changed — review the action again");
     if (!applied) {
         // Dismissal frees every staged slot this dialog could own.
         if (kind == .huawei_app) {
@@ -4139,6 +4158,7 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
             ui.logger.info("device connected: {s} ({x:0>4}:{x:0>4})", .{ dev.mode.displayName(), dev.vid, dev.pid });
         },
         .device_removed => |key| {
+            const active_removed = if (ui.device) |dev| dev.key.eql(key) else false;
             for (ui.devices.items, 0..) |d, i| {
                 if (d.key.eql(key)) {
                     _ = ui.devices.orderedRemove(i);
@@ -4147,7 +4167,7 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
             }
             syncActiveDevice(ui);
             refreshDeviceSelector(ui);
-            if (ui.device == null and ui.devices.items.len == 0) {
+            if (active_removed) {
                 if (ui.session == .samsung_ready or ui.session == .lg_ready) {
                     // Samsung/LG sessions are one-shot; nothing to tear down.
                 } else if (ui.session != .disconnected and ui.manager != null and !ui.busy()) {
@@ -4155,7 +4175,11 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
                 } else if (ui.session != .disconnected) {
                     ui.cancel.store(true, .release);
                 }
+                ui.session_invalid = true;
                 ui.session = .disconnected;
+                ui.parts = null;
+                if (ui.parts_list) |list| listBoxClear(list);
+                clearPendingWrites(ui);
                 ui.mtk_da_ready = false;
                 refreshMainPage(ui);
                 ui.logger.info("device disconnected", .{});
@@ -4220,6 +4244,7 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
             labelTextZ(ui.dev_chip_label.?, buf[0..len]);
         },
         .session_state => |state| {
+            if (ui.session_invalid and state != .disconnected) return;
             ui.session = state;
             if (state == .disconnected) {
                 ui.parts = null;
@@ -4233,6 +4258,7 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
             refreshMainPage(ui);
         },
         .partitions => |parts| {
+            if (ui.session_invalid) return;
             ui.parts = parts;
             rebuildPartitions(ui, &parts);
             refreshHuaweiRow(ui);
@@ -4246,7 +4272,7 @@ fn handleEvent(ui: *Ui, event: ev.Event) void {
         },
         .finished => |fin| {
             ui.jobDone();
-            if (fin.success and std.mem.eql(u8, fin.message.slice(), "DA uploaded and started")) {
+            if (!ui.session_invalid and fin.success and std.mem.eql(u8, fin.message.slice(), "DA uploaded and started")) {
                 ui.mtk_da_ready = true;
             }
             if (!fin.success) {
