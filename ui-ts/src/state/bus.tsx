@@ -193,6 +193,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const jitter = (base: number, spread: number) => base + (Math.random() - 0.5) * spread;
 
 export interface FlashPlan {
+  target: { path: string; bus: number; devnum: number };
   programmer?: string;
   files: string[];
   storage: Storage;
@@ -309,6 +310,11 @@ export function BusProvider({ children }: { children: ReactNode }) {
     const startFlashReal = (plan: FlashPlan) => {
       const s = stateRef.current;
       if (s.source !== "daemon" || s.daemonGone) return;
+      const selected = s.devices.find(dev => dev.path === s.selectedPath);
+      if (!selected || selected.path !== plan.target.path || selected.bus !== plan.target.bus || selected.devnum !== plan.target.devnum) {
+        toast(false, "Device changed", "Review the flash plan for the connected device again");
+        return;
+      }
       if (gate.current.busy || (s.job && !s.job.finished)) return;
       if (s.session === "needs_loader") {
         if (!plan.programmer) {

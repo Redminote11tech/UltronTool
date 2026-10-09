@@ -2,11 +2,12 @@ import { motion, AnimatePresence } from "motion/react";
 import { FileText, Lock, Loader2, X, Zap, ShieldAlert, FolderOpen } from "lucide-react";
 import { useState } from "react";
 import { useBus } from "../state/bus";
-import type { Storage } from "../state/bus";
+import type { FlashPlan, Storage } from "../state/bus";
 import { SLOTS, VENDORS } from "../state/vendors";
 import type { SlotCfg } from "../state/vendors";
 import { pickFiles } from "../lib/tauri";
 import { Button, HoldButton } from "../components/Button";
+import { Modal } from "../components/Modal";
 import { SwitchRow } from "../components/Switch";
 import { Progress } from "../components/Progress";
 import { bytes, eta, rate } from "../lib/format";
@@ -38,6 +39,7 @@ export function FlashPage() {
   const [reboot, setReboot] = useState(true);
   const [storage, setStorage] = useState<Storage>("ufs");
   const [skipInit, setSkipInit] = useState(false);
+  const [review, setReview] = useState<FlashPlan | null>(null);
 
   const daemon = state.source === "daemon";
   const mode = state.mode === "none" ? null : state.mode;
@@ -104,7 +106,9 @@ export function FlashPage() {
 
   const onStart = () => {
     if (daemon) {
-      startFlashReal({
+      if (!selectedDev) return;
+      setReview({
+        target: { path: selectedDev.path, bus: selectedDev.bus, devnum: selectedDev.devnum },
         programmer: files["programmer"]?.paths[0],
         files: [...(files["rawprogram"]?.paths ?? []), ...(files["patch"]?.paths ?? [])],
         storage,
@@ -156,7 +160,7 @@ export function FlashPage() {
   return (
     <div className="page">
       <AnimatePresence mode="wait">
-        {running && job && (
+        {job && (
           <motion.div
             key="job"
             className="card pad"
@@ -193,6 +197,18 @@ export function FlashPage() {
         )}
       </AnimatePresence>
 
+      <Modal open={review !== null} onClose={() => setReview(null)} label="Review flash plan">
+        <h3>Flash this device?</h3>
+        <p>This plan can overwrite or erase device data. Back up anything you need before continuing.</p>
+        {review && <><dl><dt>USB device</dt><dd>Bus {review.target.bus}, address {review.target.devnum}</dd>
+          <dt>Device path</dt><dd className="mono">{review.target.path}</dd>
+          <dt>Storage</dt><dd>{review.storage.toUpperCase()} · {review.skipInit ? "Skip initialization" : "Initialize storage"}</dd></dl>
+          <p>Programmer: <span className="mono">{review.programmer ?? "Already running on device"}</span></p>
+          <p>VIP tables: <span className="mono">{review.vipDir ?? "None"}</span></p>
+          <ul>{review.files.map(path => <li key={path} className="mono">{path}</li>)}</ul></>}
+        <div className="modal-actions"><Button onClick={() => setReview(null)}>Cancel</Button>
+          <Button variant="error" disabled={running} onClick={() => { if (review) startFlashReal(review); setReview(null); }}>Flash device</Button></div>
+      </Modal>
       <div className="flash-grid">
         <motion.div key={daemon ? "daemon" : mode} variants={stagger} initial="initial" animate="animate">
           <div className="flash-head">
@@ -296,7 +312,7 @@ export function FlashPage() {
               />
             ) : (
               <Button variant="filled" large block disabled={!canStart} onClick={onStart}>
-                <Zap size={16} /> Start flash
+                <Zap size={16} /> {daemon ? "Review flash plan" : "Start simulation"}
               </Button>
             )}
             <p style={{ fontSize: 12, color: "var(--text-2)", textAlign: "center", margin: "12px 0 0" }}>
