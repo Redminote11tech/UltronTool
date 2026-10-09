@@ -154,6 +154,10 @@ against an overall deadline; concatenated XML docs split on `<?xml` / `</data>`;
 ## 4. Session orchestration (qdl op-list design)
 
 1. Parse selected files in user-given order → flat op list (program / patch / erase / …).
+   Sparse rawprogram declarations and sparse image magic are rejected before the
+   plan executes; qdl-style sparse chunk replay is not implemented. Single-partition
+   writes also require raw images. Huawei/Samsung container paths expand sparse
+   members through their existing conversion flow.
 2. Prepend CONFIGURE op if any ops need one.
 3. Append SET_BOOTABLE if a boot partition was programmed.
 4. Append RESET unless disabled.

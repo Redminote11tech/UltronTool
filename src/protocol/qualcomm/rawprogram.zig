@@ -11,6 +11,7 @@ const std = @import("std");
 const xml = @import("xml.zig");
 const log = @import("../../core/log.zig");
 const fileio = @import("../../core/fileio.zig");
+const sparse = @import("../../firmware/sparse.zig");
 
 pub const Loader = struct {
     arena: std.heap.ArenaAllocator,
@@ -66,6 +67,15 @@ pub const Loader = struct {
                 p.start_sector = try self.dupStr(attr(node, "start_sector") orelse "");
                 p.label = try self.dupOptStr(attr(node, "label"));
 
+                // qdl expands sparse programs into raw/fill chunk operations.
+                // Until that replay exists here, reject the whole plan before
+                // any earlier operation can write a sparse container to disk.
+                if (attr(node, "sparse")) |value| {
+                    if (std.ascii.eqlIgnoreCase(value, "true") or std.mem.eql(u8, value, "1")) {
+                        logger.err("sparse rawprogram images are unsupported: expand the image and use a raw XML plan", .{});
+                        return error.UnsupportedSparseImage;
+                    }
+                }
                 const filename = attr(node, "filename");
                 if (filename) |fname| {
                     p.filename = try self.resolvePath(xml_dir, fname);
@@ -78,6 +88,15 @@ pub const Loader = struct {
                         }
                         logger.info("...ignoring", .{});
                         p.filename = null;
+                    } else {
+                        var image = try fileio.File.open(p.filename.?);
+                        defer image.close();
+                        const offset = @as(u64, p.file_offset) * p.sector_size;
+                        try image.seekTo(offset);
+                        sparse.requireRaw(&image) catch |e| {
+                            logger.err("{s}: sparse containers cannot be sent as raw image data", .{p.filename.?});
+                            return e;
+                        };
                     }
                 }
                 _ = a;
@@ -270,4 +289,23 @@ test "allow_missing drops programs with absent images" {
     try std.testing.expectEqual(@as(usize, 2), ops.len);
     try std.testing.expect(ops[0].tag.program.filename != null);
     try std.testing.expect(ops[1].tag.program.filename == null);
+}
+
+test "rawprogram refuses declared and undeclared sparse containers before execution" {
+    var tmp = try fileio.TmpDir.init();
+    defer tmp.cleanup();
+    try tmp.writeFile("sparse.img", "\x3a\xff\x26\xedcontainer");
+    try tmp.writeFile("declared.xml", "<data><program filename=\"sparse.img\" sparse=\"true\"/></data>");
+    try tmp.writeFile("undeclared.xml", "<data><program filename=\"sparse.img\"/></data>");
+    const logger = try std.testing.allocator.create(log.Logger);
+    defer std.testing.allocator.destroy(logger);
+    logger.* = .{ .mirror_stderr = false };
+    for ([_][]const u8{ "declared.xml", "undeclared.xml" }) |name| {
+        var loader = Loader.init(std.testing.allocator);
+        defer loader.deinit();
+        var path_buf: [176]u8 = undefined;
+        const path = try tmp.filePath(&path_buf, name);
+        try std.testing.expectError(error.UnsupportedSparseImage, loader.loadFile(path, false, logger));
+        try std.testing.expectEqual(@as(usize, 0), loader.opsSlice().len);
+    }
 }

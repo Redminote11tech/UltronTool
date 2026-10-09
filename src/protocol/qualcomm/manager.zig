@@ -612,7 +612,7 @@ pub const Manager = struct {
             .logger = self.logger,
             .images = &images,
             .cancel = self.cancel,
-            .progress = .{ .ctx = @constCast(@ptrCast(self.channel)), .cb = saharaProgressCb },
+            .progress = .{ .ctx = @ptrCast(@constCast(self.channel)), .cb = saharaProgressCb },
         };
         self.logger.info("uploading loader {s} over Sahara", .{programmer});
         sa.run(.{ .detect_firehose = false }) catch |e| {
@@ -942,6 +942,12 @@ pub const Manager = struct {
         };
         defer file.close();
 
+        sparse.requireRaw(&file) catch {
+            self.logger.err("single-partition writes require raw images; expand the sparse container first", .{});
+            pushFinished(self.channel, false, "sparse image unsupported — use an expanded raw image");
+            return;
+        };
+
         if (max_sectors > std.math.maxInt(u32)) {
             pushFinished(self.channel, false, "partition too large");
             return;
@@ -1237,7 +1243,7 @@ pub const Manager = struct {
             }
 
             self.logger.info("UPDATE.APP: flashing {s} to {s} (LBA {d}, {d} sectors{s})", .{
-                m.entry,          m.label, m.first_lba, needed,
+                m.entry,                                        m.label, m.first_lba, needed,
                 if (entry.is_sparse) ", sparse to raw" else "",
             });
 

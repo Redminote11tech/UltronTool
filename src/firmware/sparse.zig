@@ -23,6 +23,15 @@ pub fn isSparse(bytes: *const [4]u8) bool {
     return std.mem.readInt(u32, bytes, .little) == sparse_magic;
 }
 
+/// Refuse sparse containers on paths that only stream raw image bytes.
+/// Preserve the caller's file position; qdl expands sparse chunks separately.
+pub fn requireRaw(file: *fileio.File) !void {
+    const pos = file.tell();
+    defer file.seekTo(pos) catch {};
+    var magic: [4]u8 = undefined;
+    if ((try file.readAll(&magic)) == 4 and isSparse(&magic)) return error.UnsupportedSparseImage;
+}
+
 /// Peek the expanded raw size of a sparse image at the file's current
 /// position (leaves the position moved).
 pub fn rawSizeAt(file: *fileio.File) !u64 {
