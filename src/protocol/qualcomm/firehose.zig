@@ -757,7 +757,7 @@ pub const Session = struct {
             }
 
             left -= chunk_sectors;
-            self.progress.report(op.label orelse fname, num_sectors - left, num_sectors);
+            if (!drain_mode) self.progress.report(op.label orelse fname, (num_sectors - left) * sector_size, num_sectors * sector_size);
         }
 
         if (!ack_seen) {

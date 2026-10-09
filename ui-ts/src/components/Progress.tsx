@@ -4,6 +4,7 @@ import { EASE_EMPHASIZED } from "../lib/motion";
 /** M3 linear progress: thin track, active indicator easing toward the value,
  * stop-dot separator. `indeterminate` shows the spec's scanning bar. */
 export function Progress({ value, total }: { value: number; total: number }) {
+  if (total <= 0) return <IndeterminateProgress />;
   const pct = total > 0 ? Math.min(100, (value / total) * 100) : 0;
   return (
     <div
@@ -26,5 +27,5 @@ export function Progress({ value, total }: { value: number; total: number }) {
 }
 
 export function IndeterminateProgress() {
-  return <div className="prog-track indeterminate" aria-label="loading" />;
+  return <div className="prog-track indeterminate" role="progressbar" aria-label="Operation in progress" />;
 }

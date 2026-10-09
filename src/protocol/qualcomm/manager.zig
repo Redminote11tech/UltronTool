@@ -1542,7 +1542,7 @@ fn saharaProgressCb(ctx: ?*anyopaque, name: []const u8, done: u64, total: u64) v
     const frac: f32 = if (total == 0) 0 else @as(f32, @floatFromInt(done)) / @as(f32, @floatFromInt(total));
     var buf: [160]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, "uploading {s}", .{name}) catch name;
-    channel.push(.{ .progress = .{ .fraction = 0.2 * frac, .label = ev.FixedStr(160).fromSlice(text) } });
+    channel.push(.{ .progress = .{ .fraction = 0.2 * frac, .label = ev.FixedStr(160).fromSlice(text), .done = done, .total = total } });
 }
 
 fn firehoseProgressCb(ctx: ?*anyopaque, name: []const u8, done: u64, total: u64) void {
@@ -1553,7 +1553,7 @@ fn firehoseProgressCb(ctx: ?*anyopaque, name: []const u8, done: u64, total: u64)
 
     var label = ev.FixedStr(160){};
     label.set(name);
-    ectx.channel.push(.{ .progress = .{ .fraction = base + step * op_frac, .label = label } });
+    ectx.channel.push(.{ .progress = .{ .fraction = if (total == 0) -1 else base + step * op_frac, .label = label, .done = done, .total = total } });
 }
 
 // ----------------------------------------------------------------------
@@ -2185,4 +2185,29 @@ test "manager recovery emits exactly one failure when reopening fails" {
     try std.testing.expectEqual(@as(usize, 1), collector.finished.items.len);
     try std.testing.expect(!collector.finished.items[0].success);
     try std.testing.expectEqualStrings("session error: Timeout", collector.finished.items[0].message.slice());
+}
+
+test "manager progress preserves byte telemetry and unknown totals" {
+    var channel: EventChannel = .{};
+    saharaProgressCb(@ptrCast(&channel), "loader", 512, 1024);
+    var exec = ExecCtx{ .channel = &channel, .op_idx = 1, .op_total = 2 };
+    firehoseProgressCb(@ptrCast(&exec), "boot", 4096, 8192);
+    firehoseProgressCb(@ptrCast(&exec), "draining", 0, 0);
+    const Check = struct {
+        count: usize = 0,
+        values: [3]ev.Progress = undefined,
+        fn cb(self: *@This(), event: ev.Event) void {
+            if (event == .progress) {
+                self.values[self.count] = event.progress;
+                self.count += 1;
+            }
+        }
+    };
+    var check = Check{};
+    channel.drain(&check, Check.cb);
+    try std.testing.expectEqual(@as(usize, 3), check.count);
+    try std.testing.expectEqual(@as(u64, 512), check.values[0].done);
+    try std.testing.expectEqual(@as(u64, 8192), check.values[1].total);
+    try std.testing.expectEqual(@as(f32, 0.75), check.values[1].fraction);
+    try std.testing.expectEqual(@as(f32, -1), check.values[2].fraction);
 }

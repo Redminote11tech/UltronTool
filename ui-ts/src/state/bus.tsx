@@ -6,6 +6,8 @@ import { createContext, useContext, useEffect, useMemo, useReducer, useRef } fro
 import type { ReactNode } from "react";
 import { SCENARIOS, VENDORS } from "./vendors";
 import type { Mode } from "./vendors";
+import { progressSample } from "./progress";
+import type { Sample } from "./progress";
 import { JobGate, canSelectDevice } from "./jobGate";
 import { isTauri } from "../lib/tauri";
 import { onDaemonEvent, sendDaemon } from "./daemon";
@@ -27,6 +29,7 @@ export interface Job {
   title: string;
   label: string;
   value: number;
+  fraction: number | null;
   total: number;
   rate: number;
   eta: number;
@@ -74,7 +77,7 @@ type Action =
   | { type: "scanFound"; mode: Mode; chip: string }
   | { type: "disconnect" }
   | { type: "jobStart"; title: string; total: number }
-  | { type: "jobProgress"; label: string; value: number; rate: number; eta: number }
+  | { type: "jobProgress"; label: string; value: number; rate: number; eta: number; total?: number; fraction?: number | null }
   | { type: "jobEnd"; failed: boolean }
   | { type: "toast"; toast: Toast }
   | { type: "toastGone"; id: number }
@@ -143,16 +146,16 @@ function reducer(s: State, a: Action): State {
     case "jobStart":
       return {
         ...s,
-        job: { title: a.title, label: "Preparing…", value: 0, total: a.total, rate: 0, eta: 0, failed: false, finished: false },
+        job: { title: a.title, label: "Preparing…", value: 0, fraction: null, total: a.total, rate: 0, eta: 0, failed: false, finished: false },
         logs: pushLog(s, "info", `job: ${a.title}`),
       };
     case "jobProgress":
-      return s.job ? { ...s, job: { ...s.job, label: a.label, value: a.value, rate: a.rate, eta: a.eta } } : s;
+      return s.job ? { ...s, job: { ...s.job, label: a.label, value: a.value, total: a.total ?? s.job.total, fraction: a.fraction !== undefined ? a.fraction : s.job.total > 0 ? a.value / s.job.total : null, rate: a.rate, eta: a.eta } } : s;
     case "jobEnd":
       if (!s.job) return s;
       return {
         ...s,
-        job: { ...s.job, finished: true, failed: a.failed, value: a.failed ? s.job.value : s.job.total },
+        job: { ...s.job, finished: true, failed: a.failed, fraction: a.failed ? s.job.fraction : 1, value: a.failed ? s.job.value : s.job.total },
         logs: pushLog(s, a.failed ? "error" : "ok", a.failed ? `job: ${s.job.title} — FAILED` : `job: ${s.job.title} — finished`),
       };
     case "toast":
@@ -227,7 +230,7 @@ export function BusProvider({ children }: { children: ReactNode }) {
   const runToken = useRef(0);
   const gate = useRef(new JobGate());
   const pendingFlash = useRef<{ files: string[]; storage: Storage; skipInit: boolean } | null>(null);
-  const lastTick = useRef<{ at: number; done: number } | null>(null);
+  const lastTick = useRef<Sample | null>(null);
 
   const api = useMemo<Omit<Api, "state" | "dispatch"> & { submit: (cmd: Record<string, unknown>, title: string, target?: string | null) => boolean }>(() => {
     const toast = (ok: boolean, title: string, body?: string) =>
@@ -433,17 +436,13 @@ export function BusProvider({ children }: { children: ReactNode }) {
           return;
         case "progress": {
           const now = performance.now();
-          let rate = 0;
-          if (lastTick.current && now > lastTick.current.at) {
-            rate = Math.max(0, (e.done - lastTick.current.done) / ((now - lastTick.current.at) / 1000));
-          }
-          lastTick.current = { at: now, done: e.done };
+          const progress = progressSample(lastTick.current, e, now);
+          lastTick.current = progress.sample;
           const s = stateRef.current;
-          const eta = rate > 0 ? Math.round((e.total - e.done) / rate) : 0;
           if (!s.job || s.job.finished) {
             dispatch({ type: "jobStart", title: "Device job", total: e.total });
           }
-          dispatch({ type: "jobProgress", label: e.label, value: e.done, rate, eta });
+          dispatch({ type: "jobProgress", label: e.label, value: e.done, total: e.total, fraction: progress.fraction, rate: progress.rate, eta: progress.eta });
           return;
         }
         case "finished": {

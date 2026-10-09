@@ -182,9 +182,9 @@ export function FlashPage() {
             )}
             {!job.finished && (
               <>
-                <Progress value={job.value} total={job.total} />
+                <Progress value={job.fraction ?? 0} total={job.fraction === null ? 0 : 1} />
                 <div className="prog-meta">
-                  <span className="prog-pct mono">{job.total > 0 ? `${((job.value / job.total) * 100).toFixed(1)}%` : "—"}</span>
+                  <span className="prog-pct mono">{job.fraction !== null ? `${(job.fraction * 100).toFixed(1)}%` : "—"}</span>
                   {job.total > 0 && <span className="mono">{bytes(job.value)} / {bytes(job.total)}</span>}
                   {job.rate > 0 && <span className="mono">{rate(job.rate)}</span>}
                   <span style={{ marginLeft: "auto" }} className="mono">{job.eta > 0 ? `ETA ${eta(job.eta)}` : ""}</span>
