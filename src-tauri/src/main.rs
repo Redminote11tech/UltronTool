@@ -14,6 +14,7 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 
 struct DaemonState {
     child: Mutex<Option<Child>>,
+    active_request: Mutex<Option<u64>>,
 }
 
 impl DaemonState {
@@ -56,8 +57,13 @@ fn daemon_path() -> Option<std::path::PathBuf> {
 
 fn spawn_daemon(app: AppHandle) {
     let Some(path) = daemon_path() else {
-        eprintln!("ultron-ui: daemon binary not found (set ULTRON_DAEMON_PATH or build `zig build`)");
-        let _ = app.emit("daemon-event", "{\"ev\":\"daemon_gone\",\"reason\":\"daemon binary not found\"}");
+        eprintln!(
+            "ultron-ui: daemon binary not found (set ULTRON_DAEMON_PATH or build `zig build`)"
+        );
+        let _ = app.emit(
+            "daemon-event",
+            "{\"ev\":\"daemon_gone\",\"reason\":\"daemon binary not found\"}",
+        );
         return;
     };
     let child = Command::new(&path)
@@ -71,7 +77,10 @@ fn spawn_daemon(app: AppHandle) {
         Err(e) => {
             let _ = app.emit(
                 "daemon-event",
-                format!("{{\"ev\":\"daemon_gone\",\"reason\":\"spawn failed: {}\"}}", e),
+                format!(
+                    "{{\"ev\":\"daemon_gone\",\"reason\":\"spawn failed: {}\"}}",
+                    e
+                ),
             );
             return;
         }
@@ -85,14 +94,26 @@ fn spawn_daemon(app: AppHandle) {
             for line in reader.lines() {
                 match line {
                     Ok(l) => {
-                        if app_out.emit("daemon-event", &l).is_err() {
+                        let mut value: serde_json::Value = match serde_json::from_str(&l) {
+                            Ok(value) => value,
+                            Err(_) => continue,
+                        };
+                        if value["ev"] == "finished" {
+                            let state = app_out.state::<DaemonState>();
+                            let id = state.active_request.lock().expect("request mutex").take();
+                            value["request_id"] = serde_json::json!(id);
+                        }
+                        if app_out.emit("daemon-event", value.to_string()).is_err() {
                             break;
                         }
                     }
                     Err(_) => break,
                 }
             }
-            let _ = app_out.emit("daemon-event", "{\"ev\":\"daemon_gone\",\"reason\":\"daemon exited\"}");
+            let _ = app_out.emit(
+                "daemon-event",
+                "{\"ev\":\"daemon_gone\",\"reason\":\"daemon exited\"}",
+            );
         });
     }
 
@@ -102,13 +123,34 @@ fn spawn_daemon(app: AppHandle) {
 
 #[tauri::command]
 fn daemon_send(line: String, state: State<DaemonState>) -> Result<(), String> {
-    let guard = state.child.lock().map_err(|_| "mutex poisoned")?;
-    let child = guard.as_ref().ok_or("daemon not running")?;
-    let mut stdin = child.stdin.as_ref().ok_or("daemon stdin closed")?;
-    let mut full = line;
-    full.push('\n');
-    stdin.write_all(full.as_bytes()).map_err(|e| e.to_string())?;
-    stdin.flush().map_err(|e| e.to_string())
+    let request: serde_json::Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+    let command = request["cmd"].as_str().ok_or("missing command")?;
+    let is_job = !matches!(command, "cancel" | "shutdown");
+    let mut active = state
+        .active_request
+        .lock()
+        .map_err(|_| "request mutex poisoned")?;
+    if is_job {
+        if active.is_some() {
+            return Err("another operation is running".into());
+        }
+        *active = Some(request["request_id"].as_u64().ok_or("missing request ID")?);
+    }
+    let result = (|| {
+        let guard = state.child.lock().map_err(|_| "mutex poisoned")?;
+        let child = guard.as_ref().ok_or("daemon not running")?;
+        let mut stdin = child.stdin.as_ref().ok_or("daemon stdin closed")?;
+        let mut full = line;
+        full.push('\n');
+        stdin
+            .write_all(full.as_bytes())
+            .map_err(|e| e.to_string())?;
+        stdin.flush().map_err(|e| e.to_string())
+    })();
+    if result.is_err() && is_job {
+        *active = None;
+    }
+    result
 }
 
 fn main() {
@@ -125,7 +167,10 @@ fn main() {
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(DaemonState { child: Mutex::new(None) })
+        .manage(DaemonState {
+            child: Mutex::new(None),
+            active_request: Mutex::new(None),
+        })
         .invoke_handler(tauri::generate_handler![daemon_send])
         .setup(|app| {
             spawn_daemon(app.handle().clone());

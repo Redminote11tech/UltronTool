@@ -33,7 +33,7 @@ export type DaemonEvent =
   | { ev: "device_removed"; path: string }
   | { ev: "progress"; fraction: number; done: number; total: number; label: string }
   | { ev: "state"; state: SessionState }
-  | { ev: "finished"; success: boolean; message: string }
+  | { ev: "finished"; request_id?: number; success: boolean; message: string }
   | {
       ev: "chip_info";
       protocol_version: number;
@@ -63,8 +63,8 @@ export function parseDaemonLine(line: string): DaemonEvent | null {
   }
 }
 
-export function sendDaemon(cmd: unknown): void {
-  void daemonSend(cmd).catch(() => {});
+export function sendDaemon(cmd: unknown): Promise<void> {
+  return daemonSend(cmd);
 }
 
 /** Subscribe with a callback per parsed event; returns the unsubscribe fn. */

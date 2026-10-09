@@ -6,6 +6,7 @@ import { createContext, useContext, useEffect, useMemo, useReducer, useRef } fro
 import type { ReactNode } from "react";
 import { SCENARIOS, VENDORS } from "./vendors";
 import type { Mode } from "./vendors";
+import { JobGate, canSelectDevice } from "./jobGate";
 import { isTauri } from "../lib/tauri";
 import { onDaemonEvent, sendDaemon } from "./daemon";
 import type { DaemonDevice, SessionState } from "./daemon";
@@ -167,10 +168,12 @@ function reducer(s: State, a: Action): State {
     case "devRemove": {
       const devices = s.devices.filter((d) => d.path !== a.path);
       const selectedPath = s.selectedPath === a.path ? null : s.selectedPath;
-      return { ...s, devices, selectedPath, session: "disconnected", logs: pushLog(s, "info", "usb: device removed — interface released") };
+      const removedSelected = s.selectedPath === a.path;
+      return { ...s, devices, selectedPath, ...(removedSelected ? { session: "disconnected" as const, parts: null, chip: null } : {}), logs: pushLog(s, "info", "usb: device removed — interface released") };
     }
     case "devSelect":
-      return { ...s, selectedPath: a.path };
+      return canSelectDevice(s.selectedPath, a.path, s.session, !!s.job && !s.job.finished)
+        ? { ...s, selectedPath: a.path, parts: null, chip: null } : s;
     case "session":
       return { ...s, session: a.session, logs: pushLog(s, "info", `session: ${a.session}`) };
     case "chipEv":
@@ -182,7 +185,7 @@ function reducer(s: State, a: Action): State {
         logs: pushLog(s, a.vip ? "warn" : "info", a.vip ? "VIP session — partition browsing disabled, rawprogram flash only" : `gpt: ${a.rows.length} partitions on LUN ${a.lun} (${a.sector_size} B sectors, ${a.luns} LUNs)`),
       };
     case "daemonGone":
-      return { ...s, daemonGone: a.reason, session: "disconnected", devices: [], logs: pushLog(s, "error", `daemon: gone — ${a.reason}`) };
+      return { ...s, job: s.job ? { ...s.job, finished: true, failed: true } : null, parts: null, selectedPath: null, daemonGone: a.reason, session: "disconnected", devices: [], logs: pushLog(s, "error", `daemon: gone — ${a.reason}`) };
   }
 }
 
@@ -221,12 +224,30 @@ export function BusProvider({ children }: { children: ReactNode }) {
   stateRef.current = state;
 
   const runToken = useRef(0);
+  const gate = useRef(new JobGate());
   const pendingFlash = useRef<{ files: string[]; storage: Storage; skipInit: boolean } | null>(null);
   const lastTick = useRef<{ at: number; done: number } | null>(null);
 
-  const api = useMemo<Omit<Api, "state" | "dispatch">>(() => {
+  const api = useMemo<Omit<Api, "state" | "dispatch"> & { submit: (cmd: Record<string, unknown>, title: string, target?: string | null) => boolean }>(() => {
     const toast = (ok: boolean, title: string, body?: string) =>
       dispatch({ type: "toast", toast: { id: ++toastId, ok, title, body } });
+
+    const submit = (cmd: Record<string, unknown>, title: string, target = stateRef.current.selectedPath) => {
+      const id = gate.current.begin(target);
+      if (id === null) return false;
+      dispatch({ type: "jobStart", title, total: 0 });
+      void sendDaemon({ ...cmd, request_id: id }).catch((error: unknown) => {
+        if (!gate.current.finish(id)) return;
+        pendingFlash.current = null;
+        dispatch({ type: "jobEnd", failed: true });
+        toast(false, "Command failed", String(error));
+      });
+      return true;
+    };
+    const targetFields = () => {
+      const dev = stateRef.current.devices.find(d => d.path === stateRef.current.selectedPath);
+      return dev ? { bus: dev.bus, devnum: dev.devnum } : {};
+    };
 
     // ------------------------------------------------------------- sim
     const setMode = (m: Mode) => {
@@ -283,12 +304,12 @@ export function BusProvider({ children }: { children: ReactNode }) {
 
     // ---------------------------------------------------------- daemon
     const sendFlashXml = (files: string[]) =>
-      sendDaemon({ cmd: "flash_xml", files, allow_missing: false });
+      submit({ cmd: "flash_xml", files, allow_missing: false }, "Flashing XML plan");
 
     const startFlashReal = (plan: FlashPlan) => {
       const s = stateRef.current;
       if (s.source !== "daemon" || s.daemonGone) return;
-      if (s.job && !s.job.finished) return;
+      if (gate.current.busy || (s.job && !s.job.finished)) return;
       if (s.session === "needs_loader") {
         if (!plan.programmer) {
           toast(false, "Loader required", "Stage a firehose programmer first");
@@ -297,13 +318,14 @@ export function BusProvider({ children }: { children: ReactNode }) {
         // Chain: upload the loader; when the session turns firehose_ready and
         // the connect job finishes, the flash_xml plan is sent automatically.
         pendingFlash.current = { files: plan.files, storage: plan.storage, skipInit: plan.skipInit };
-        sendDaemon({
+        submit({
+          ...targetFields(),
           cmd: "upload_loader",
           programmer: plan.programmer,
           storage: plan.storage,
           skip_storage_init: plan.skipInit,
           vip_dir: plan.vipDir ?? undefined,
-        });
+        }, "Uploading programmer");
         return;
       }
       if (s.session === "firehose_ready") {
@@ -320,32 +342,33 @@ export function BusProvider({ children }: { children: ReactNode }) {
         toast(false, "Flow pending", `${dev.label}: the TS UI covers Qualcomm for now — use the GTK app`);
         return;
       }
-      sendDaemon({
+      if (!canSelectDevice(stateRef.current.selectedPath, dev.path, stateRef.current.session, gate.current.busy)) return;
+      dispatch({ type: "devSelect", path: dev.path });
+      submit({
         cmd: "connect",
-        serial: dev.serial || undefined,
         bus: dev.bus || undefined,
         devnum: dev.devnum || undefined,
-      });
+      }, "Connecting device", dev.path);
     };
 
     const uploadLoader = (programmer: string, storage: Storage, skipInit: boolean, vipDir?: string) => {
-      sendDaemon({ cmd: "upload_loader", programmer, storage, skip_storage_init: skipInit, vip_dir: vipDir ?? undefined });
+      submit({ ...targetFields(), cmd: "upload_loader", programmer, storage, skip_storage_init: skipInit, vip_dir: vipDir ?? undefined }, "Uploading programmer");
     };
 
     const disconnectDevice = () => {
       pendingFlash.current = null;
-      sendDaemon({ cmd: "disconnect" });
+      submit({ cmd: "disconnect" }, "Disconnecting");
     };
 
     const resetDevice = () => {
       pendingFlash.current = null;
-      sendDaemon({ cmd: "reset" });
+      submit({ cmd: "reset" }, "Resetting device");
     };
 
     const cancelFlash = () => {
       if (stateRef.current.source === "daemon") {
         pendingFlash.current = null;
-        sendDaemon({ cmd: "cancel" });
+        void sendDaemon({ cmd: "cancel" }).catch(error => toast(false, "Cancel failed", String(error)));
         return;
       }
       ++runToken.current;
@@ -368,6 +391,7 @@ export function BusProvider({ children }: { children: ReactNode }) {
       startFlashReal,
       cancelFlash,
       toast,
+      submit,
     };
   }, []);
 
@@ -391,6 +415,10 @@ export function BusProvider({ children }: { children: ReactNode }) {
           dispatch({ type: "devAdd", dev: e });
           return;
         case "device_removed":
+          if (e.path === gate.current.target) {
+            pendingFlash.current = null;
+            void sendDaemon({ cmd: "cancel" }).catch(error => api.toast(false, "Cancel failed", String(error)));
+          }
           dispatch({ type: "devRemove", path: e.path });
           return;
         case "state":
@@ -413,13 +441,14 @@ export function BusProvider({ children }: { children: ReactNode }) {
           return;
         }
         case "finished": {
+          if (!gate.current.finish(e.request_id ?? -1)) return;
           lastTick.current = null;
           const chained = pendingFlash.current;
           pendingFlash.current = null;
           dispatch({ type: "jobEnd", failed: !e.success });
           api.toast(e.success, e.success ? "Job finished" : "Job failed", e.message);
           if (e.success && chained && session === "firehose_ready") {
-            sendDaemon({ cmd: "flash_xml", files: chained.files, allow_missing: false });
+            api.submit({ cmd: "flash_xml", files: chained.files, allow_missing: false }, "Flashing XML plan");
           }
           return;
         }
@@ -437,6 +466,7 @@ export function BusProvider({ children }: { children: ReactNode }) {
           return;
         case "daemon_gone":
           pendingFlash.current = null;
+          if (gate.current.active !== null) gate.current.finish(gate.current.active);
           dispatch({ type: "daemonGone", reason: e.reason ?? "unknown" });
           api.toast(false, "Backend stopped", e.reason ?? "The Zig daemon exited");
           return;
