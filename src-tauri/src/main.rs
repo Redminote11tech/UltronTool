@@ -286,7 +286,16 @@ fn main() {
                 }
                 RunEvent::ExitRequested { api, .. } if !state.closing.load(Ordering::Acquire) => {
                     api.prevent_exit();
-                    let _ = daemon_close(app.clone(), state);
+                    if state
+                        .active_request
+                        .lock()
+                        .expect("request mutex")
+                        .is_some()
+                    {
+                        let _ = app.emit("app-close-requested", ());
+                    } else {
+                        let _ = daemon_close(app.clone(), state);
+                    }
                 }
                 _ => {}
             }
