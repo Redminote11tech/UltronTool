@@ -1,5 +1,9 @@
 # Ultron roadmap — protocol modules
 
+Material 3 is the primary UI direction. GTK remains a compatibility interface
+until [UI migration and validation](UI_MIGRATION.md) are complete. Precision Dark
+is retired from active development.
+
 Priority order is owner-set: **1) Samsung (Odin) → 2) MediaTek → 3) Unisoc (FDL) → 4) LG (LAF)**.
 Every module follows the same landing rules (see "Landing a module"): GUI only, logic
 ported from the listed references, one atomic commit per step, sim-harness tests before

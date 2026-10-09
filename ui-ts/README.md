@@ -1,8 +1,10 @@
-# Ultron TypeScript UI
+# Ultron Material 3 UI
 
 A React frontend in a native Tauri 2 / WebKitGTK window, backed by the same
 Zig Qualcomm session manager as the GTK application. This branch also fixes
-backend and GTK issues; both interfaces remain available.
+backend and GTK issues. Material 3 is the primary design direction; GTK is
+a temporary compatibility interface until the migration checklist is complete.
+Precision Dark is retired from active development.
 
 ![Material 3 device screen](docs/material3-review-2026-10-09.jpg)
 
@@ -121,12 +123,13 @@ The shell still defaults `WEBKIT_DISABLE_DMABUF_RENDERER=1` (escape hatch
 `ULTRON_WEBKIT_COMPAT=off`) as a precaution for the genuinely known
 WebKitGTK-on-NVIDIA blank-window class — it is simply not what bit us here.
 
-## What's next (not started)
+## Migration
 
 1. Port the vendor one-shot flows (Samsung tar.md5, LG, MTK, Unisoc) from the
    GTK UI layer into daemon jobs, then light up their pages here.
 2. Surface partition ops, UFS provisioning and the Huawei UPDATE.APP path
    (the daemon protocol already carries them).
 3. Drag-and-drop onto slots.
-4. Decision point: promote the TS UI or keep it as a parallel skin — the
-   owner's call after trying both on hardware.
+4. Retire GTK after feature parity and native/hardware validation.
+
+See [the migration checklist](../docs/UI_MIGRATION.md) for the retirement gates.

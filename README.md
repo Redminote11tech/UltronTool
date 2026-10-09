@@ -6,7 +6,9 @@
 
 **Flash and unbrick phones over their download modes — natively on Linux.**
 
-A native GTK4/libadwaita GUI. Qualcomm **Sahara** and **Firehose** are
+A native Linux GUI with a **Material 3 TypeScript frontend** in Tauri/WebKitGTK.
+The Zig backend is shared with the temporary GTK4/libadwaita compatibility UI.
+Qualcomm **Sahara** and **Firehose** are
 reimplemented in Zig, and the same plugin interface carries Samsung **Odin**,
 LG **LAF**, MediaTek **BROM/DA** and Unisoc **BSL/FDL** modules.
 
@@ -15,7 +17,7 @@ Qualcomm Sahara/Firehose in **Zig** — a graphical successor to the classic
 [`qdl`](https://github.com/linux-msm/qdl) command-line tool, extended into a
 multi-vendor flashing suite.
 
-GPL-3.0 · Zig 0.16 · GTK4/libadwaita · Linux (Wayland/X11)
+GPL-3.0 · Zig 0.16 · Material 3 · Tauri/WebKitGTK · Linux (Wayland/X11)
 
 </div>
 
@@ -29,12 +31,17 @@ GPL-3.0 · Zig 0.16 · GTK4/libadwaita · Linux (Wayland/X11)
 > little or no time with real hardware yet — see
 > [Help wanted](#help-wanted-hardware-validation).
 
-> **On the `ts-ui` branch** an experiment explores a second frontend: a
-> Material 3 TypeScript UI in a native Tauri window, wired to the same core
-> through a new headless `ultron-daemon` (line-JSON over stdio, no CLI). Its
-> Qualcomm EDL flash flow works end-to-end; see
-> [`ui-ts/README.md`](ui-ts/README.md). Everything below describes the
-> shipped GTK app.
+> **UI direction:** Material 3 is the primary interface on this branch. Precision
+> Dark is retired from active development; its historical Git branch is retained.
+> The native Material 3 build currently exposes Qualcomm EDL flashing. GTK remains
+> available for vendor flows and advanced operations until they are ported and
+> validated. See [`ui-ts/README.md`](ui-ts/README.md) for the current UI and
+> [the migration checklist](docs/UI_MIGRATION.md) for the remaining work.
+>
+> **Build the primary interface:** `bash src-tauri/packaging/build-beta-package.sh`
+> (Arch/CachyOS package; self-contained frontend plus daemon).
+> The feature list and GTK build/package instructions below describe the
+> compatibility interface's broader coverage.
 
 ## Why Ultron?
 
@@ -172,12 +179,12 @@ treated as ground truth and drive the fixes.
 Requires **Zig 0.16.x** (the GUI uses zig-gobject v0.3.2, GNOME 50 bindings).
 
 ```
-zig build --release=fast
+zig build -Doptimize=ReleaseSafe
 zig build test      # unit tests (Sahara/Firehose/GPT over a simulated device)
 ```
 
 `zig build` also produces `zig-out/bin/ultron-daemon` — the headless IPC
-bridge used by the experimental TS UI on this branch; the GTK app does not
+bridge used by the primary Material 3 UI on this branch; the GTK app does not
 need it.
 
 ## Packaging (Arch / CachyOS)
