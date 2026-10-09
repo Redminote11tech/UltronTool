@@ -4,6 +4,10 @@ A React frontend in a native Tauri 2 / WebKitGTK window, backed by the same
 Zig Qualcomm session manager as the GTK application. This branch also fixes
 backend and GTK issues; both interfaces remain available.
 
+![Material 3 device screen](docs/material3-review-2026-10-09.jpg)
+
+Browser simulation preview; the native window lists detected USB devices.
+
 ## Interface
 
 The layout uses clean Material 3: a persistent navigation sidebar, clear device
