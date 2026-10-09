@@ -182,6 +182,7 @@ pub const Manager = struct {
     target_serial_owned: ?[]u8 = null,
     /// A USB reset recovery may run once per connect.
     reset_used: bool = false,
+    recovery_failure: ?ev.FixedStr(512) = null,
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -359,16 +360,25 @@ pub const Manager = struct {
         channel.push(.{ .finished = .{ .success = success, .message = m } });
     }
 
+    fn finish(self: *Manager, success: bool, msg: []const u8) void {
+        if (self.recovery_failure) |failure| {
+            self.recovery_failure = null;
+            pushFinished(self.channel, false, failure.slice());
+        } else {
+            pushFinished(self.channel, success, msg);
+        }
+    }
+
     fn requireSession(self: *Manager) ?*firehose.Session {
         if (self.fh) |fh| return fh;
-        pushFinished(self.channel, false, "not connected");
+        self.finish(false, "not connected");
         return null;
     }
 
     /// Allocate the per-session IO wrapper around the open transport.
     fn makeIo(self: *Manager, t: transport.Transport) ?*transport.Io {
         const io = self.alloc.create(transport.Io) catch {
-            pushFinished(self.channel, false, "OutOfMemory");
+            self.finish(false, "OutOfMemory");
             return null;
         };
         io.* = transport.Io.init(self.alloc, t);
@@ -379,7 +389,7 @@ pub const Manager = struct {
     /// Open a transport and probe what is running.
     fn connect(self: *Manager, programmer: ?[]const u8, storage: firehose.StorageType, skip_storage_init: bool, vip_dir: ?[]const u8, target: ?transport.Target) void {
         if (self.cancel.load(.acquire)) {
-            pushFinished(self.channel, false, "Cancelled");
+            self.finish(false, "Cancelled");
             return;
         }
         self.reset_used = false;
@@ -392,7 +402,7 @@ pub const Manager = struct {
         // re-send it), so just re-announce the state.
         if (self.state == .needs_loader and self.t != null) {
             self.emitState(.needs_loader);
-            pushFinished(self.channel, true, "loader required");
+            self.finish(true, "loader required");
             return;
         }
 
@@ -401,7 +411,7 @@ pub const Manager = struct {
 
         const t = self.opener(self.opener_ctx, self.logger, self.target_saved, 8000, self.alloc) catch |e| {
             self.logger.err("failed to open device: {s}", .{@errorName(e)});
-            pushFinished(self.channel, false, @errorName(e));
+            self.finish(false, @errorName(e));
             self.emitState(.disconnected);
             return;
         };
@@ -422,7 +432,7 @@ pub const Manager = struct {
         var attempt: u32 = 0;
         while (attempt < 3) : (attempt += 1) {
             if (self.cancel.load(.acquire)) {
-                pushFinished(self.channel, false, "Cancelled");
+                self.finish(false, "Cancelled");
                 return;
             }
             n = self.io.?.read(&buf, 1000) catch 0;
@@ -452,7 +462,7 @@ pub const Manager = struct {
                 } else {
                     self.logger.info("device is in EDL mode: a firehose loader is required (connection kept open)", .{});
                     self.emitState(.needs_loader);
-                    pushFinished(self.channel, true, "loader required");
+                    self.finish(true, "loader required");
                 }
                 return;
             }
@@ -496,7 +506,7 @@ pub const Manager = struct {
         self.teardown();
         glib.usleep(2000 * std.time.us_per_ms); // let re-enumeration settle
         if (!self.openTransport()) {
-            self.recoverFailed();
+            // openTransport already completed the job, including its error.
             return false;
         }
 
@@ -505,7 +515,7 @@ pub const Manager = struct {
         var attempt: u32 = 0;
         while (attempt < 5) : (attempt += 1) {
             if (self.cancel.load(.acquire)) {
-                pushFinished(self.channel, false, "Cancelled");
+                self.finish(false, "Cancelled");
                 return false;
             }
             n = self.io.?.read(&buf, 1000) catch 0;
@@ -528,7 +538,7 @@ pub const Manager = struct {
                     self.uploadLoader(p, storage, skip_storage_init, self.vip_dir_saved, self.target_saved);
                 } else {
                     self.emitState(.needs_loader);
-                    pushFinished(self.channel, true, "loader required");
+                    self.finish(true, "loader required");
                 }
                 return true;
             }
@@ -541,7 +551,7 @@ pub const Manager = struct {
         if (n2 >= 5 and std.mem.eql(u8, buf[0..5], "<?xml")) {
             self.logger.info("device acknowledged the reset command — it will re-enumerate shortly; Connect again in a few seconds", .{});
             self.teardown();
-            pushFinished(self.channel, true, "reset command sent");
+            self.finish(true, "reset command sent");
             self.emitState(.disconnected);
             return true;
         }
@@ -554,14 +564,14 @@ pub const Manager = struct {
         self.teardown();
         self.logger.err("the firehose programmer is wedged and did not recover from a USB reset", .{});
         self.logger.err("manual recovery: power the device OFF completely (hold Power ~10 s), then boot it back into EDL (for most devices hold Vol- + Vol+ while plugging USB) and Connect", .{});
-        pushFinished(self.channel, false, "device wedged — power it off, then boot to EDL and Connect");
+        self.finish(false, "device wedged — power it off, then boot to EDL and Connect");
         self.emitState(.disconnected);
     }
 
     fn openTransport(self: *Manager) bool {
         const t = self.opener(self.opener_ctx, self.logger, self.target_saved, 8000, self.alloc) catch |e| {
             self.logger.err("failed to open device: {s}", .{@errorName(e)});
-            pushFinished(self.channel, false, @errorName(e));
+            self.finish(false, @errorName(e));
             self.emitState(.disconnected);
             return false;
         };
@@ -578,13 +588,13 @@ pub const Manager = struct {
 
     fn uploadLoader(self: *Manager, programmer: []const u8, storage: firehose.StorageType, skip_storage_init: bool, vip_dir: ?[]const u8, target: ?transport.Target) void {
         if (self.cancel.load(.acquire)) {
-            pushFinished(self.channel, false, "Cancelled");
+            self.finish(false, "Cancelled");
             return;
         }
         self.skip_saved = skip_storage_init;
         self.rememberLoader(programmer);
         self.rememberVipDir(vip_dir);
-        self.rememberTarget(target);
+        if (target != null or self.t == null) self.rememberTarget(target);
 
         // Fresh connection if the probe consumed/closed one: the device
         // re-issues its HELLO on reopen.
@@ -596,7 +606,7 @@ pub const Manager = struct {
         const data = fileio.readFileAlloc(self.alloc, programmer, 64 * 1024 * 1024) catch |e| {
             self.logger.err("unable to read programmer {s}", .{programmer});
             self.teardown();
-            pushFinished(self.channel, false, @errorName(e));
+            self.finish(false, @errorName(e));
             self.emitState(.disconnected);
             return;
         };
@@ -621,7 +631,7 @@ pub const Manager = struct {
             }
             self.logger.err("Sahara transfer failed: {s}", .{@errorName(e)});
             self.teardown();
-            pushFinished(self.channel, false, @errorName(e));
+            self.finish(false, @errorName(e));
             self.emitState(.disconnected);
             return;
         };
@@ -634,7 +644,7 @@ pub const Manager = struct {
     fn configureNow(self: *Manager, storage: firehose.StorageType, skip_storage_init: bool) void {
         const io = self.io orelse return;
         const fh = self.alloc.create(firehose.Session) catch {
-            pushFinished(self.channel, false, "OutOfMemory");
+            self.finish(false, "OutOfMemory");
             return;
         };
         fh.* = .{
@@ -649,14 +659,14 @@ pub const Manager = struct {
         // streamed ahead of the very first packet.
         if (self.vip_dir_saved) |dir| {
             const v = self.alloc.create(vip.Transfer) catch {
-                pushFinished(self.channel, false, "OutOfMemory");
+                self.finish(false, "OutOfMemory");
                 return;
             };
             v.* = vip.Transfer.init(self.alloc, dir) catch |e| {
                 self.alloc.destroy(v);
                 self.logger.err("failed to load VIP digest tables from {s}: {s}", .{ dir, @errorName(e) });
                 self.teardown();
-                pushFinished(self.channel, false, "VIP tables folder must contain DigestsToSign.bin.mbn");
+                self.finish(false, "VIP tables folder must contain DigestsToSign.bin.mbn");
                 self.emitState(.disconnected);
                 return;
             };
@@ -667,7 +677,7 @@ pub const Manager = struct {
             if (e == Error.VipRequired) {
                 self.teardown();
                 self.logger.err("the programmer requires VIP digest tables — flash with a VIP tables folder selected", .{});
-                pushFinished(self.channel, false, "programmer requires VIP — select the VIP digest tables folder and reconnect");
+                self.finish(false, "programmer requires VIP — select the VIP digest tables folder and reconnect");
                 self.emitState(.disconnected);
                 return;
             }
@@ -682,7 +692,7 @@ pub const Manager = struct {
                 return;
             }
             self.teardown();
-            pushFinished(self.channel, false, @errorName(e));
+            self.finish(false, @errorName(e));
             self.emitState(.disconnected);
             return;
         };
@@ -697,7 +707,7 @@ pub const Manager = struct {
             self.channel.push(.{ .partitions = .{ .lun = 0, .sector_size = 0, .luns = 1, .vip = true } });
             self.logger.info("✓ loader uploaded — Firehose ready (VIP)", .{});
             self.emitState(.firehose_ready);
-            pushFinished(self.channel, true, "connected (VIP)");
+            self.finish(true, "connected (VIP)");
             return;
         }
 
@@ -794,13 +804,13 @@ pub const Manager = struct {
         const fh = self.requireSession() orelse return;
         const sector_size = self.sector_size;
         if (sector_size == 0) {
-            pushFinished(self.channel, false, "sector size unknown");
+            self.finish(false, "sector size unknown");
             return;
         }
 
         // 1. LBA 0..1: protective MBR + GPT header.
         const head_buf = self.alloc.alloc(u8, 2 * sector_size) catch {
-            pushFinished(self.channel, false, "OutOfMemory");
+            self.finish(false, "OutOfMemory");
             return;
         };
         defer self.alloc.free(head_buf);
@@ -815,20 +825,20 @@ pub const Manager = struct {
             return;
         };
         if (!ok) {
-            pushFinished(self.channel, false, "GPT read refused by programmer");
+            self.finish(false, "GPT read refused by programmer");
             return;
         }
 
         const header = gpt.parseHeader(head_buf, sector_size) catch |e| {
             self.logger.err("no valid GPT on LUN {d}: {s}", .{ lun, @errorName(e) });
-            pushFinished(self.channel, false, "no GPT found");
+            self.finish(false, "no GPT found");
             return;
         };
 
         // 2. Entry array.
         const entry_sectors = header.entrySectors(sector_size);
         const ent_buf = self.alloc.alloc(u8, @intCast(entry_sectors * sector_size)) catch {
-            pushFinished(self.channel, false, "OutOfMemory");
+            self.finish(false, "OutOfMemory");
             return;
         };
         defer self.alloc.free(ent_buf);
@@ -844,13 +854,13 @@ pub const Manager = struct {
             return;
         };
         if (!ok2) {
-            pushFinished(self.channel, false, "GPT entries read refused");
+            self.finish(false, "GPT entries read refused");
             return;
         }
 
         const list = gpt.parseEntries(self.alloc, ent_buf, header, sector_size) catch |e| {
             self.logger.err("GPT parse failed: {s}", .{@errorName(e)});
-            pushFinished(self.channel, false, @errorName(e));
+            self.finish(false, @errorName(e));
             return;
         };
         defer list.deinit(self.alloc);
@@ -868,24 +878,24 @@ pub const Manager = struct {
         }
         self.logger.info("✓ partition table loaded: {d} partitions on LUN {d}", .{ event.count, lun });
         self.channel.push(.{ .partitions = event });
-        pushFinished(self.channel, true, "partitions loaded");
+        self.finish(true, "partitions loaded");
     }
 
     fn readPartition(self: *Manager, path: []const u8, first_lba: u64, num_sectors: u64, lun: u32, label: []const u8) void {
         const fh = self.requireSession() orelse return;
         const sector_size = self.sector_size;
         if (sector_size == 0) {
-            pushFinished(self.channel, false, "sector size unknown");
+            self.finish(false, "sector size unknown");
             return;
         }
         if (num_sectors > std.math.maxInt(u32)) {
-            pushFinished(self.channel, false, "partition too large");
+            self.finish(false, "partition too large");
             return;
         }
 
         var file = fileio.File.create(path) catch |e| {
             self.logger.err("unable to create {s}: {s}", .{ path, @errorName(e) });
-            pushFinished(self.channel, false, @errorName(e));
+            self.finish(false, @errorName(e));
             return;
         };
         defer file.close();
@@ -898,7 +908,7 @@ pub const Manager = struct {
             .start_sector = std.fmt.bufPrint(&start_buf, "{d}", .{first_lba}) catch "0",
         };
         const chunk = self.alloc.alloc(u8, 1024 * 1024) catch {
-            pushFinished(self.channel, false, "OutOfMemory");
+            self.finish(false, "OutOfMemory");
             return;
         };
         defer self.alloc.free(chunk);
@@ -923,7 +933,7 @@ pub const Manager = struct {
             self.channel.push(.{ .finished = .{ .success = true, .message = msg } });
         } else {
             self.logger.err("read of {s} failed", .{label});
-            pushFinished(self.channel, false, "read failed");
+            self.finish(false, "read failed");
         }
     }
 
@@ -931,32 +941,32 @@ pub const Manager = struct {
         const fh = self.requireSession() orelse return;
         const sector_size = self.sector_size;
         if (sector_size == 0) {
-            pushFinished(self.channel, false, "sector size unknown");
+            self.finish(false, "sector size unknown");
             return;
         }
 
         var file = fileio.File.open(path) catch |e| {
             self.logger.err("unable to open {s}", .{path});
-            pushFinished(self.channel, false, @errorName(e));
+            self.finish(false, @errorName(e));
             return;
         };
         defer file.close();
 
         sparse.requireRaw(&file) catch {
             self.logger.err("single-partition writes require raw images; expand the sparse container first", .{});
-            pushFinished(self.channel, false, "sparse image unsupported — use an expanded raw image");
+            self.finish(false, "sparse image unsupported — use an expanded raw image");
             return;
         };
 
         if (max_sectors > std.math.maxInt(u32)) {
-            pushFinished(self.channel, false, "partition too large");
+            self.finish(false, "partition too large");
             return;
         }
         const file_size = file.size() catch 0;
         const needed: u64 = (file_size + sector_size - 1) / sector_size;
         if (needed > max_sectors) {
             self.logger.err("{s} ({d} sectors) does not fit partition {s} ({d} sectors) — aborted", .{ path, needed, label, max_sectors });
-            pushFinished(self.channel, false, "image larger than partition");
+            self.finish(false, "image larger than partition");
             return;
         }
 
@@ -1020,11 +1030,11 @@ pub const Manager = struct {
         const fh = self.requireSession() orelse return;
         const sector_size = self.sector_size;
         if (sector_size == 0) {
-            pushFinished(self.channel, false, "sector size unknown");
+            self.finish(false, "sector size unknown");
             return;
         }
         if (num_sectors == 0 or num_sectors > std.math.maxInt(u32)) {
-            pushFinished(self.channel, false, "nothing to erase");
+            self.finish(false, "nothing to erase");
             return;
         }
 
@@ -1138,16 +1148,16 @@ pub const Manager = struct {
     fn provisionUfs(self: *Manager, path: []const u8, finalize: bool) void {
         const fh = self.requireSession() orelse return;
         if (self.storage != .ufs) {
-            pushFinished(self.channel, false, "UFS provisioning needs storage type UFS");
+            self.finish(false, "UFS provisioning needs storage type UFS");
             return;
         }
         if (fh.vip != null) {
-            pushFinished(self.channel, false, "UFS provisioning is unavailable in VIP sessions");
+            self.finish(false, "UFS provisioning is unavailable in VIP sessions");
             return;
         }
 
         var cfg = ufs.load(self.alloc, path, finalize, self.logger) catch {
-            pushFinished(self.channel, false, "provisioning XML rejected");
+            self.finish(false, "provisioning XML rejected");
             return;
         };
         defer cfg.deinit(self.alloc);
@@ -1156,7 +1166,7 @@ pub const Manager = struct {
         self.logger.info("UFS provisioning: {d} LUN(s), bConfigDescrLock={d} ({s})", .{ cfg.bodies.items.len, cfg.common.bConfigDescrLock, if (finalize) "FINALIZE" else "no finalize" });
 
         ufs.execute(&cfg, fh, self.logger) catch {
-            pushFinished(self.channel, false, "UFS provisioning failed");
+            self.finish(false, "UFS provisioning failed");
             return;
         };
 
@@ -1166,7 +1176,7 @@ pub const Manager = struct {
         };
         self.teardown();
         self.emitState(.disconnected);
-        pushFinished(self.channel, true, "UFS provisioning finished");
+        self.finish(true, "UFS provisioning finished");
     }
 
     fn removeTempWorkFile(tmp: *fileio.TempDirDyn, name: []const u8) void {
@@ -1184,29 +1194,29 @@ pub const Manager = struct {
         const fh = self.requireSession() orelse return;
         const sector_size = self.sector_size;
         if (sector_size == 0) {
-            pushFinished(self.channel, false, "sector size unknown");
+            self.finish(false, "sector size unknown");
             return;
         }
         if (fh.vip != null) {
-            pushFinished(self.channel, false, "UPDATE.APP flashing is unavailable in VIP sessions");
+            self.finish(false, "UPDATE.APP flashing is unavailable in VIP sessions");
             return;
         }
 
         var app = fileio.File.open(path) catch |e| {
             self.logger.err("unable to open {s}", .{path});
-            pushFinished(self.channel, false, @errorName(e));
+            self.finish(false, @errorName(e));
             return;
         };
         defer app.close();
 
         var index = updateapp.parse(self.alloc, &app, self.logger) catch |e| {
-            pushFinished(self.channel, false, @errorName(e));
+            self.finish(false, @errorName(e));
             return;
         };
         defer index.deinit(self.alloc);
 
         var tmp = fileio.TempDirDyn.init(self.alloc) catch {
-            pushFinished(self.channel, false, "OutOfMemory");
+            self.finish(false, "OutOfMemory");
             return;
         };
         defer tmp.cleanup();
@@ -1225,7 +1235,7 @@ pub const Manager = struct {
             if (self.cancel.load(.acquire)) {
                 self.teardown();
                 self.emitState(.disconnected);
-                pushFinished(self.channel, false, "Cancelled");
+                self.finish(false, "Cancelled");
                 return;
             }
             ectx.op_idx = i;
@@ -1321,7 +1331,7 @@ pub const Manager = struct {
                         src.close();
                         removeTempWorkFile(&tmp, tmp_name);
                     }
-                    pushFinished(self.channel, false, "digest mismatch — batch stopped");
+                    self.finish(false, "digest mismatch — batch stopped");
                     return;
                 },
             }
@@ -1346,26 +1356,26 @@ pub const Manager = struct {
         for (files) |file| {
             loader.loadFile(file, allow_missing, self.logger) catch |e| {
                 self.logger.err("failed to load {s}", .{file});
-                pushFinished(self.channel, false, @errorName(e));
+                self.finish(false, @errorName(e));
                 return;
             };
         }
         const ops = loader.opsSlice();
         if (ops.len == 0) {
-            pushFinished(self.channel, false, "no operations in XML files");
+            self.finish(false, "no operations in XML files");
             return;
         }
 
         var op_list = std.ArrayList(ExecOp).empty;
         defer op_list.deinit(self.alloc);
         for (ops) |op| op_list.append(self.alloc, .{ .op = op }) catch {
-            pushFinished(self.channel, false, "OutOfMemory");
+            self.finish(false, "OutOfMemory");
             return;
         };
         if (findBootablePartition(ops)) |part| {
             self.logger.info("adding set-bootable for partition {d}", .{part});
             op_list.append(self.alloc, .{ .set_bootable = part }) catch {
-                pushFinished(self.channel, false, "OutOfMemory");
+                self.finish(false, "OutOfMemory");
                 return;
             };
         }
@@ -1385,7 +1395,7 @@ pub const Manager = struct {
                 // the only safe continuation is a fresh session.
                 self.teardown();
                 self.emitState(.disconnected);
-                pushFinished(self.channel, false, "Cancelled");
+                self.finish(false, "Cancelled");
                 return;
             }
             ectx.op_idx = i;
@@ -1396,7 +1406,7 @@ pub const Manager = struct {
                         self.logger.info("programming {s} (label {s})", .{ fname, p.label orelse "?" });
                         var file = fileio.File.open(fname) catch |e| {
                             self.logger.err("unable to open image {s}", .{fname});
-                            pushFinished(self.channel, false, @errorName(e));
+                            self.finish(false, @errorName(e));
                             return;
                         };
                         defer file.close();
@@ -1407,7 +1417,7 @@ pub const Manager = struct {
                         switch (self.verifyWrite(fh, p, &file, written, p.label orelse fname)) {
                             .verified, .unavailable => {},
                             .mismatch => {
-                                pushFinished(self.channel, false, "digest mismatch — batch stopped");
+                                self.finish(false, "digest mismatch — batch stopped");
                                 return;
                             },
                         }
@@ -1416,7 +1426,7 @@ pub const Manager = struct {
                         self.logger.info("erasing partition {s} ({d} sectors)", .{ e.start_sector, e.num_sectors });
                         fh.erase(e) catch |e2| switch (e2) {
                             Error.EraseFailed => {
-                                pushFinished(self.channel, false, "erase refused by device — batch stopped");
+                                self.finish(false, "erase refused by device — batch stopped");
                                 return;
                             },
                             else => {
@@ -1440,7 +1450,7 @@ pub const Manager = struct {
                 },
             }
         }
-        pushFinished(self.channel, true, "flash finished");
+        self.finish(true, "flash finished");
     }
 
     /// Transport-level failure: the session is history. A failed operation
@@ -1449,7 +1459,6 @@ pub const Manager = struct {
     /// state with the loader re-uploaded automatically (once per connect).
     fn sessionError(self: *Manager, e: Error) void {
         self.logger.err("session error: {s} — disconnecting", .{@errorName(e)});
-        self.teardown();
         self.emitState(.disconnected);
         var msg_buf: [512]u8 = undefined;
         const msg = std.fmt.bufPrint(&msg_buf, "session error: {s}", .{@errorName(e)}) catch "session error";
@@ -1462,10 +1471,12 @@ pub const Manager = struct {
         // the job and un-busy the UI mid-recovery.
         if (e != Error.Gone and e != Error.Cancelled and !self.reset_used) {
             self.reset_used = true;
+            self.recovery_failure = ev.FixedStr(512).fromSlice(msg);
             _ = self.tryResetRecover(self.storage, self.skip_saved, self.last_programmer);
             return;
         }
-        pushFinished(self.channel, false, msg);
+        self.teardown();
+        self.finish(false, msg);
     }
 };
 
@@ -2154,4 +2165,24 @@ test "manager: stuck rawmode device is reset and recovered to needs_loader" {
     // And the fresh device greeted with HELLO on the post-reset connection.
     try std.testing.expect(std.mem.indexOf(u8, fresh.written.items, "x") == null or true);
     try std.testing.expect(std.mem.startsWith(u8, fresh.queue.items, "") or fresh.step_idx == 1);
+}
+
+test "manager recovery emits exactly one failure when reopening fails" {
+    var channel: EventChannel = .{};
+    var logger = log.Logger{ .mirror_stderr = false };
+    var cancel = std.atomic.Value(bool).init(false);
+    const Fail = struct {
+        fn open(_: *anyopaque, _: *log.Logger, _: ?transport.Target, _: u32, _: std.mem.Allocator) Error!transport.Transport {
+            return Error.Gone;
+        }
+    };
+    const mgr = try Manager.init(std.testing.allocator, &logger, &channel, &cancel, &Fail.open, @ptrCast(&logger));
+    defer mgr.shutdown();
+    mgr.sessionError(Error.Timeout);
+    var collector = Collector{};
+    defer collector.deinit();
+    channel.drain(&collector, Collector.cb);
+    try std.testing.expectEqual(@as(usize, 1), collector.finished.items.len);
+    try std.testing.expect(!collector.finished.items[0].success);
+    try std.testing.expectEqualStrings("session error: Timeout", collector.finished.items[0].message.slice());
 }
