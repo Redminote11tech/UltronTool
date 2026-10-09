@@ -224,7 +224,7 @@ Cross-vendor plans live in `docs/ROADMAP.md`.
 | Drain-to-complete on refused writes | ✅ | Protected partitions fail cleanly; session survives; the drain streams the image's own remaining bytes (not zeros), so whatever lands past a refusal is real image content |
 | Stuck-programmer recovery | ✅ | nop probe → USB reset → fresh EDL → auto loader re-upload |
 | Huawei UPDATE.APP flashing | ✅ | container parse (55AA5AA5 chunks, splitupdate/`huextract` reference format), Android sparse→raw conversion, image→GPT-partition matching, digest-verified writes; checksum tables not verified (device-side SHA-256 covers it) |
-| Multi-device targeting | ✅ | bus/devnum + `_SN:` product-string serial filter (qdl --serial semantics), picker appears with 2+ visible devices |
+| Multi-device targeting | ✅ | GUI targets explicit USB bus/devnum; backend `_SN:` product-string filtering follows qdl semantics |
 | Multi-image Sahara archives (zip / id:file) | ⏳ planned | qdl decode_programmer; explicitly deferred |
 | RAM dump / Memory Debug (900E crash dumps) | ✅ | MEM_DEBUG64 region table + filtered dumps (minidump.elf assembly deferred) |
 | UFS provisioning (<ufs> XML) | ✅ | full qdl ufs.c port: validation pass (commit=0) then commit; the GUI's Finalize switch must match the XML's bConfigDescrLock, and OTP commits require an explicit destructive confirmation |
