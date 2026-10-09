@@ -3017,20 +3017,6 @@ fn spawnLgJob(ui: *Ui, ctx: *LgJobCtx) void {
     ui.lg_thread = thread;
 }
 
-/// Open a LAF session on the block device: hello → OPEN (empty path =
-/// /dev/block/mmcblk0 read-write). The caller closes the session.
-fn lgOpenDisk(ctx: *LgJobCtx, sess: *lg_laf.Session) transport.Error!u32 {
-    const ui = ctx.ui;
-    var usb_dev = try usb.open(&lg_usb_ids.policy, ctx.target, 8000, ui.logger, ui.alloc, &ui.cancel);
-    defer usb_dev.close();
-    var io = transport.Io.init(ui.alloc, usb_dev.transport());
-    errdefer io.deinit();
-    sess.* = .{ .alloc = ui.alloc, .io = &io, .logger = ui.logger, .cancel = &ui.cancel };
-    try sess.init();
-    try sess.hello();
-    return try sess.openDevice("");
-}
-
 fn lgRun(ctx: *LgJobCtx) void {
     const ui = ctx.ui;
     defer lgJobCtxFree(ctx);
@@ -3062,14 +3048,17 @@ fn lgRun(ctx: *LgJobCtx) void {
 
 fn lgRunInner(ctx: *LgJobCtx) !void {
     const ui = ctx.ui;
-    var sess: lg_laf.Session = undefined;
-    var sess_open = false;
-    errdefer if (sess_open) sess.deinit();
-    // lgOpenDisk assigns sess BEFORE any error return; sess_open must flip
-    // only on success or the errdefer deinits an undefined session.
-    const fd = try lgOpenDisk(ctx, &sess);
-    sess_open = true;
+    // Keep the USB owner, Io and LAF session alive for the entire operation.
+    // refs/lglaf/partitions.py likewise owns its handle across OPEN and I/O.
+    var usb_dev = try usb.open(&lg_usb_ids.policy, ctx.target, 8000, ui.logger, ui.alloc, &ui.cancel);
+    defer usb_dev.close();
+    var io = transport.Io.init(ui.alloc, usb_dev.transport());
+    defer io.deinit();
+    var sess = lg_laf.Session{ .alloc = ui.alloc, .io = &io, .logger = ui.logger, .cancel = &ui.cancel };
+    try sess.init();
     defer sess.deinit();
+    try sess.hello();
+    const fd = try sess.openDevice("");
 
     switch (ctx.kind) {
         .gpt => {
