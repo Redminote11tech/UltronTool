@@ -18,11 +18,13 @@ export function daemonListen(onLine: (line: string) => void): () => void {
         // Spawn/replay only after the listener is installed. StrictMode's
         // cancelled first subscription must never start a backend.
         void import("@tauri-apps/api/core").then(({ invoke }) => invoke("daemon_start")).catch(error => {
-          onLine(JSON.stringify({ ev: "daemon_gone", reason: String(error) }));
+          if (!cancelled) onLine(JSON.stringify({ ev: "daemon_gone", reason: String(error) }));
         });
       }
     }),
-  );
+  ).catch(error => {
+    if (!cancelled) onLine(JSON.stringify({ ev: "daemon_gone", reason: String(error) }));
+  });
   return () => {
     cancelled = true;
     unlisten?.();

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { initial, reducer } from '../src/state/model.ts';
+import { initial, createInitial, reducer } from '../src/state/model.ts';
 const device = path => ({path,vid:0x05c6,pid:0x9008,bus:1,devnum:path==='A'?2:3,mode:'qualcomm_edl',label:'EDL',serial:'',manufacturer:'',product:''});
 const selected = () => ({...structuredClone(initial),source:'daemon',devices:[device('A'),device('B')],selectedPath:'A',session:'firehose_ready',parts:{rows:[{name:'boot'}]},configured:{storage:'emmc',skipInit:false,vipDir:''}});
 test('another USB device disappearing preserves the connected session and partition table', () => {
@@ -41,4 +41,22 @@ test('the configured backend storage replaces a rejected requested type', () => 
   const state = reducer(selected(),{type:'configured',storage:'emmc',skipInit:true,vipDir:'/signed'});
   assert.equal(state.draft.storage,'emmc'); assert.equal(state.draft.skipInit,true);
   assert.equal(state.configured.vipDir,'/signed');
+});
+
+test('native startup never advertises simulation and attachment waits for the daemon greeting', () => {
+  const state = createInitial('daemon');
+  assert.equal(state.source, 'daemon');
+  assert.equal(state.draft.scope, 'daemon:none');
+  assert.equal(state.logs.length, 1);
+  assert.match(state.logs[0].text, /starting device service/);
+  assert.ok(state.logs.every(line => !/simulated|browser preview|attached/.test(line.text)));
+  const connected = reducer(state, {type:'sourceSet', source:'daemon', protocolVersion:1});
+  assert.match(connected.logs.at(-1).text, /attached.*real device bus.*v1/);
+  assert.ok(connected.logs.every(line => !/simulated|browser preview/.test(line.text)));
+});
+test('browser preview identifies simulation from its first render', () => {
+  const state = createInitial('sim');
+  assert.equal(state.source, 'sim');
+  assert.equal(state.draft.scope, 'sim:none');
+  assert.match(state.logs[0].text, /simulated bus.*browser preview/);
 });

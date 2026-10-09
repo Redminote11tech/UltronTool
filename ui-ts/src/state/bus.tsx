@@ -14,7 +14,7 @@ import { onDaemonEvent, sendDaemon } from "./daemon";
 import type { DaemonDevice, SessionState } from "./daemon";
 
 export type { Level, Page, Storage, Source, Job, LogLine, State, FlashDraft, StagedFile } from "./model";
-import { initial, reducer, CHIP_NAMES } from "./model";
+import { createInitial, reducer, CHIP_NAMES } from "./model";
 import type { State, Level, Storage, Action } from "./model";
 let toastId = 0;
 
@@ -49,7 +49,7 @@ interface Api {
 const Ctx = createContext<Api | null>(null);
 
 export function BusProvider({ children }: { children: ReactNode }) {
-  const [state, dispatch] = useReducer(reducer, initial);
+  const [state, dispatch] = useReducer(reducer, isTauri() ? "daemon" : "sim", createInitial);
   const stateRef = useRef(state);
   stateRef.current = state;
 
@@ -242,11 +242,11 @@ export function BusProvider({ children }: { children: ReactNode }) {
   // exactly like the GTK UI's jobDone().
   useEffect(() => {
     if (!isTauri()) return;
-    dispatch({ type: "sourceSet", source: "daemon" });
     let session: SessionState = "disconnected";
     return onDaemonEvent((e) => {
       switch (e.ev) {
         case "hello":
+          dispatch({ type: "sourceSet", source: "daemon", protocolVersion: e.version });
           return;
         case "log": {
           const level: Level = e.level === "debug" ? "info" : e.level;

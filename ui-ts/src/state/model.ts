@@ -81,7 +81,7 @@ export type Action =
   | { type: "jobEnd"; failed: boolean }
   | { type: "toast"; toast: Toast }
   | { type: "toastGone"; id: number }
-  | { type: "sourceSet"; source: Source }
+  | { type: "sourceSet"; source: Source; protocolVersion?: number }
   | { type: "devAdd"; dev: DaemonDevice }
   | { type: "devRemove"; path: string }
   | { type: "devSelect"; path: string | null }
@@ -103,25 +103,29 @@ export const CHIP_NAMES: Record<Exclude<Mode, "none">, string> = {
 
 let logId = 0;
 
-export const initial: State = {
-  page: "device",
-  draft: emptyDraft("sim:none"),
-  mode: "none",
-  scanning: false,
-  chip: null,
-  logs: [
-    { id: logId++, at: Date.now(), level: "info", text: "ultron ui — simulated bus (browser preview)" },
-  ],
-  job: null,
-  toasts: [],
-  source: "sim",
-  devices: [],
-  selectedPath: null,
-  session: "disconnected",
-  configured: null,
-  daemonGone: null,
-  parts: null,
-};
+export function createInitial(source: Source): State {
+  return {
+    page: "device",
+    draft: emptyDraft(`${source}:none`),
+    mode: "none",
+    scanning: false,
+    chip: null,
+    logs: [
+      { id: logId++, at: Date.now(), level: "info", text: source === "sim" ? "ultron ui — simulated bus (browser preview)" : "daemon: starting device service…" },
+    ],
+    job: null,
+    toasts: [],
+    source,
+    devices: [],
+    selectedPath: null,
+    session: "disconnected",
+    configured: null,
+    daemonGone: null,
+    parts: null,
+  };
+}
+
+export const initial = createInitial("sim");
 
 function pushLog(s: State, level: Level, text: string): LogLine[] {
   const next = [...s.logs, { id: logId++, at: Date.now(), level, text }];
@@ -168,7 +172,7 @@ export function reducer(s: State, a: Action): State {
     case "toastGone":
       return { ...s, toasts: s.toasts.filter((t) => t.id !== a.id) };
     case "sourceSet":
-      return { ...s, source: a.source, logs: pushLog(s, "info", `daemon: attached — real device bus (protocol v1)`) };
+      return { ...s, source: a.source, logs: pushLog(s, "info", a.source === "daemon" ? `daemon: attached — real device bus (protocol v${a.protocolVersion ?? 1})` : "ultron ui — simulated bus (browser preview)") };
     case "devAdd": {
       const devices = s.devices.filter((d) => d.path !== a.dev.path).concat(a.dev);
       return { ...s, devices, logs: pushLog(s, "info", `usb: ${a.dev.label} — ${a.dev.vid.toString(16).padStart(4, "0")}:${a.dev.pid.toString(16).padStart(4, "0")}`) };
