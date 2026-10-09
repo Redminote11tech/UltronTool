@@ -1,6 +1,7 @@
-import { Cpu, HardDriveDownload, Terminal, HardDrive } from "lucide-react";
+import { Cpu, HardDriveDownload, Terminal } from "lucide-react";
 import { useBus } from "../state/bus";
 import type { Page } from "../state/bus";
+const iconUrl = new URL("../assets/ultron.svg", import.meta.url).href;
 const NAV: { id: Page; icon: typeof Cpu; label: string }[] = [
   { id: "device", icon: Cpu, label: "Devices" },
   { id: "flash", icon: HardDriveDownload, label: "Flash firmware" },
@@ -9,7 +10,7 @@ const NAV: { id: Page; icon: typeof Cpu; label: string }[] = [
 export function Rail() {
   const { state, dispatch } = useBus();
   return <nav className="rail" aria-label="Main navigation">
-    <div className="rail-brand"><span className="brand-icon"><HardDrive size={23} /></span><div><b>Ultron</b><span>Device recovery</span></div></div>
+    <div className="rail-brand"><img className="brand-icon" src={iconUrl} alt="" aria-hidden="true" /><div><b>Ultron</b><span>Device recovery</span></div></div>
     <div className="nav-items">{NAV.map(({ id, icon: Icon, label }) => <button key={id}
       className={`rail-item ${state.page === id ? "active" : ""}`} aria-label={label} aria-current={state.page === id ? "page" : undefined}
       onClick={() => dispatch({ type: "page", page: id })}><Icon size={20} /><span>{label}</span></button>)}</div>

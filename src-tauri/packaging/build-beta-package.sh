@@ -12,7 +12,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 ver="0.3.0"
-pkgrel="7"
+pkgrel="8"
 name="ultrontool-beta"
 out="UltronTool-BETA-${ver}-${pkgrel}-x86_64.pkg.tar.zst"
 stage="$(mktemp -d)"
@@ -42,6 +42,7 @@ install -Dm644 "${root}/LICENSE" "$stage/usr/share/licenses/${name}/LICENSE"
 install -Dm644 "${root}/src-tauri/packaging/${name}.desktop" "$stage/usr/share/applications/${name}.desktop"
 install -Dm644 "${root}/src-tauri/icons/icon.png" "$stage/usr/share/icons/hicolor/128x128/apps/${name}.png"
 install -Dm644 "${root}/src-tauri/icons/icon512.png" "$stage/usr/share/icons/hicolor/512x512/apps/${name}.png"
+install -Dm644 "${root}/src-tauri/icons/icon.svg" "$stage/usr/share/icons/hicolor/scalable/apps/${name}.svg"
 
 size="$(du -sb "$stage" | cut -f1)"
 builddate="$(date +%s)"

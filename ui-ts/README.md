@@ -18,6 +18,9 @@ Colors are generated from HCT seed `#5266a4` with pinned
 `@material/material-color-utilities` 0.3.0. Light and dark schemes follow the
 system preference. Roboto is used for controls; technical values use monospace.
 Regenerate checked-in color tokens with `node ui-ts/tools/generate-tokens.mjs`.
+The flat phone/recovery icon is shared by the launcher, native window and sidebar.
+Its source is `src-tauri/icons/icon.svg`; regenerate its PNGs and frontend copy
+with `bash src-tauri/icons/generate.sh` (requires `rsvg-convert` from librsvg).
 
 Firmware choices persist when switching pages and are scoped to the selected
 device. Real flashing requires a review of the exact device, XML files, storage

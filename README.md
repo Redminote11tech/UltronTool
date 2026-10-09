@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="data/icons/io.github.redminote11tech.Ultron-source.png" width="140" alt="Ultron icon"/>
+<img src="src-tauri/icons/icon.svg" width="140" alt="Ultron icon"/>
 
 # Ultron
 
