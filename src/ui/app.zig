@@ -1294,7 +1294,7 @@ fn refreshMainPage(ui: *Ui) void {
 
     const is_samsung = has_device and ui.device.?.mode == .samsung_odin;
     const is_lg = has_device and ui.device.?.mode == .lg_laf;
-    const is_mtk = has_device and ui.device.?.mode == .mtk_brom;
+    const is_mtk = has_device and (ui.device.?.mode == .mtk_brom or ui.device.?.mode == .mtk_preloader);
     const is_spd = has_device and ui.device.?.mode == .spd_brom;
     const vendor = is_samsung or is_lg or is_mtk or is_spd;
     const ready = ui.session == .firehose_ready or ui.session == .samsung_ready or ui.session == .lg_ready;
