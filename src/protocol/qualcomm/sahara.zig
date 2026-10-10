@@ -110,6 +110,19 @@ pub const Session = struct {
     progress: ProgressHook = .{},
     cancel: ?*const std.atomic.Value(bool) = null,
     protocol_version: u32 = 0,
+    transfer_stage: TransferStage = .waiting_hello,
+
+    pub const TransferStage = enum { waiting_hello, sending_hello, waiting_image, sending_image, waiting_done };
+
+    pub fn stageDescription(self: *const Session) []const u8 {
+        return switch (self.transfer_stage) {
+            .waiting_hello => "waiting for Sahara HELLO",
+            .sending_hello => "sending Sahara HELLO response",
+            .waiting_image => "waiting for a Sahara packet after HELLO response / image data",
+            .sending_image => "sending requested programmer data",
+            .waiting_done => "waiting for Sahara transfer completion",
+        };
+    }
 
     fn cancelled(self: *Session) bool {
         return self.cancel != null and self.cancel.?.load(.acquire);
@@ -130,14 +143,17 @@ pub const Session = struct {
         _ = self.io.write(&buf, cmd_timeout_ms) catch {};
     }
 
-    fn sendHelloResp(self: *Session, version: u32, mode: u32) void {
+    fn sendHelloResp(self: *Session, version: u32, mode: u32) Error!void {
         var buf: [HELLO_LENGTH]u8 = @splat(0);
         putHeader(&buf, HELLO_RESP, HELLO_LENGTH);
         std.mem.writeInt(u32, buf[8..12], version, .little);
         std.mem.writeInt(u32, buf[12..16], 1, .little); // compatible
         std.mem.writeInt(u32, buf[16..20], SUCCESS, .little); // status
         std.mem.writeInt(u32, buf[20..24], mode, .little);
-        _ = self.io.write(&buf, cmd_timeout_ms) catch {};
+        // qdl sends the same packet; unlike its unchecked write, retain
+        // transport failures instead of misreporting a later read timeout.
+        const sent = try self.io.write(&buf, cmd_timeout_ms);
+        if (sent != buf.len) return Error.Io;
     }
 
     fn sendDone(self: *Session) void {
@@ -197,9 +213,15 @@ pub const Session = struct {
 
             switch (cmd) {
                 HELLO => try self.handleHello(&buf),
-                READ_DATA => try self.handleRead(&buf, false),
-                READ_DATA64 => try self.handleRead(&buf, true),
-                END_OF_IMAGE => try self.handleEoi(&buf),
+                READ_DATA, READ_DATA64 => {
+                    self.transfer_stage = .sending_image;
+                    try self.handleRead(&buf, cmd == READ_DATA64);
+                    self.transfer_stage = .waiting_image;
+                },
+                END_OF_IMAGE => {
+                    try self.handleEoi(&buf);
+                    self.transfer_stage = .waiting_done;
+                },
                 DONE_RESP => {
                     if (length < DONE_RESP_LENGTH) {
                         self.logger.err("Sahara: short DONE_RESP packet", .{});
@@ -240,7 +262,9 @@ pub const Session = struct {
         const mode = std.mem.readInt(u32, buf[20..24], .little);
         self.logger.info("Sahara: HELLO version {x} compatible {x} max_len {d} mode {d}", .{ version, compatible, max_len, mode });
         self.protocol_version = version;
-        self.sendHelloResp(VERSION, mode);
+        self.transfer_stage = .sending_hello;
+        try self.sendHelloResp(VERSION, mode);
+        self.transfer_stage = .waiting_image;
     }
 
     fn handleRead(self: *Session, buf: []const u8, wide: bool) Error!void {
@@ -341,7 +365,7 @@ pub const Session = struct {
         const mode = std.mem.readInt(u32, buf[20..24], .little);
         self.logger.debug("Sahara HELLO version {d} mode {d}", .{ version, mode });
         self.protocol_version = version;
-        self.sendHelloResp(version, MODE_COMMAND);
+        try self.sendHelloResp(version, MODE_COMMAND);
 
         errdefer self.sendSwitchMode(MODE_IMAGE_TX_PENDING);
 
@@ -508,7 +532,7 @@ pub const Session = struct {
             return Error.Timeout;
         };
         self.logger.info("RAM dump: HELLO mode {d} (memory debug = 2)", .{mode});
-        self.sendHelloResp(self.protocol_version, mode);
+        try self.sendHelloResp(self.protocol_version, mode);
 
         // 2. The device announces where its region table lives.
         while (true) {
@@ -691,7 +715,6 @@ pub const Session = struct {
     }
 };
 
-
 /// Port of qdl's sahara_pkhash_trim: collapse repeated prefix, strip trailing
 /// zero bytes, then snap to a known digest size (32/48/64).
 fn pkhashTrim(buf_in: []const u8) []const u8 {
@@ -727,7 +750,7 @@ test "hello response wire format" {
     defer io.deinit();
 
     var sess = Session{ .io = &io, .logger = &logger, .images = &.{} };
-    sess.sendHelloResp(VERSION, 0x3);
+    try sess.sendHelloResp(VERSION, 0x3);
 
     const expected = [_]u8{
         0x02, 0x00, 0x00, 0x00, // HELLO_RESP
@@ -900,4 +923,40 @@ test "ramDump fetches the region table, streams regions and resets" {
     const dumped = try fileio.readFileAlloc(std.testing.allocator, dump_path, 1 << 20);
     defer std.testing.allocator.free(dumped);
     try std.testing.expectEqualSlices(u8, &data, dumped);
+}
+
+test "HELLO response write errors are propagated with the correct stage" {
+    const H = @import("../../transport/sim.zig").Harness;
+    var hello: [48]u8 = @splat(0);
+    putTestHello(&hello);
+    var h = try H.init(std.testing.allocator, &.{ .{ .respond = &hello }, .{ .write_error = Error.Gone } });
+    defer h.deinit();
+    var io = Io.init(std.testing.allocator, h.transport());
+    defer io.deinit();
+    var logger = log.Logger{ .mirror_stderr = false };
+    var sess = Session{ .io = &io, .logger = &logger, .images = &.{} };
+    try std.testing.expectError(Error.Gone, sess.run(.{ .detect_firehose = false }));
+    try std.testing.expectEqual(Session.TransferStage.sending_hello, sess.transfer_stage);
+}
+
+fn putTestHello(buf: *[48]u8) void {
+    std.mem.writeInt(u32, buf[0..4], HELLO, .little);
+    std.mem.writeInt(u32, buf[4..8], 48, .little);
+    std.mem.writeInt(u32, buf[8..12], 2, .little);
+    std.mem.writeInt(u32, buf[12..16], 1, .little);
+    std.mem.writeInt(u32, buf[16..20], 1024, .little);
+}
+
+test "timeout after a received HELLO is not classified as missing HELLO" {
+    const H = @import("../../transport/sim.zig").Harness;
+    var hello: [48]u8 = @splat(0);
+    putTestHello(&hello);
+    var h = try H.init(std.testing.allocator, &.{ .{ .respond = &hello }, .{ .expect_write_len = 48 } });
+    defer h.deinit();
+    var io = Io.init(std.testing.allocator, h.transport());
+    defer io.deinit();
+    var logger = log.Logger{ .mirror_stderr = false };
+    var sess = Session{ .io = &io, .logger = &logger, .images = &.{} };
+    try std.testing.expectError(Error.Timeout, sess.run(.{ .detect_firehose = false }));
+    try std.testing.expectEqual(Session.TransferStage.waiting_image, sess.transfer_stage);
 }

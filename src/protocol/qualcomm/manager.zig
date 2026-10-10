@@ -638,12 +638,11 @@ pub const Manager = struct {
         };
         self.logger.info("uploading loader {s} over Sahara", .{programmer});
         sa.run(.{ .detect_firehose = false }) catch |e| {
-            if (e == Error.Timeout) {
-                self.logger.err("device did not answer Sahara HELLO — replug the device into EDL mode and retry", .{});
-            }
-            self.logger.err("Sahara transfer failed: {s}", .{@errorName(e)});
+            self.logger.err("Sahara transfer failed while {s}: {s}", .{ sa.stageDescription(), @errorName(e) });
+            var failure_buf: [256]u8 = undefined;
+            const message = std.fmt.bufPrint(&failure_buf, "Sahara: {s} while {s}", .{ @errorName(e), sa.stageDescription() }) catch @errorName(e);
             self.teardown();
-            self.finish(false, @errorName(e));
+            self.finish(false, message);
             self.emitState(.disconnected);
             return;
         };
