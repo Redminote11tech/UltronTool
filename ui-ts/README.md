@@ -22,6 +22,14 @@ The flat phone/recovery icon is shared by the launcher, native window and sideba
 Its source is `src-tauri/icons/icon.svg`; regenerate its PNGs and frontend copy
 with `bash src-tauri/icons/generate.sh` (requires `rsvg-convert` from librsvg).
 
+Connect and load the Firehose programmer on Devices without selecting firmware
+or XML. The programmer is uploaded to RAM; this does not flash storage. Open
+Partitions & backups to read GPT tables per LUN and save raw partition images.
+Flash XML is optional: inspect its image writes, erase ranges, disk patches and
+automatic bootable-LUN changes, then explicitly confirm the reviewed operations.
+XML content changes after review are rejected before execution. Restart requires
+a running Firehose programmer; Disconnect only releases the host connection.
+
 Firmware choices persist when switching pages and are scoped to the selected
 device. Real flashing requires a review of the exact device, XML files, storage
 and VIP settings. Connected sessions show their actual negotiated configuration.
@@ -34,8 +42,8 @@ are handled by native HTML dialogs.
 - Qualcomm EDL: hotplug detection, connect, programmer upload, rawprogram/patch
   flashing, VIP, progress, logs, reset and disconnect.
 - Other vendors remain available in GTK. Their TS cards explain this limitation.
-- Partition operations, UFS provisioning and Huawei UPDATE.APP exist in the
-  daemon contract but are not exposed by the TS interface yet.
+- Partition browsing and backups are exposed. Partition writes/erase, UFS
+  provisioning and Huawei UPDATE.APP are not exposed by the TS interface yet.
 - Sparse containers are rejected on raw write paths before any payload is sent.
 - Browser preview uses simulated devices and operations. It does not access USB.
 - Log export saves the retained session buffer (up to 600 entries).
@@ -130,7 +138,7 @@ WebKitGTK-on-NVIDIA blank-window class — it is simply not what bit us here.
 
 1. Port the vendor one-shot flows (Samsung tar.md5, LG, MTK, Unisoc) from the
    GTK UI layer into daemon jobs, then light up their pages here.
-2. Surface partition ops, UFS provisioning and the Huawei UPDATE.APP path
+2. Surface partition writes/erase, UFS provisioning and the Huawei UPDATE.APP path
    (the daemon protocol already carries them).
 3. Drag-and-drop onto slots.
 4. Retire GTK after feature parity and native/hardware validation.

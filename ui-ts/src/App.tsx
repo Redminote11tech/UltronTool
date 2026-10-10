@@ -1,14 +1,17 @@
 import { BusProvider, useBus } from "./state/bus";
+import { JobStatus } from "./components/JobStatus";
 import { Rail } from "./components/Rail";
 import { Toasts } from "./components/Toasts";
 import { CloseGuard } from "./components/CloseGuard";
 import { DevicePage } from "./pages/DevicePage";
 import { FlashPage } from "./pages/FlashPage";
+import { PartitionsPage } from "./pages/PartitionsPage";
 import { ConsolePage } from "./pages/ConsolePage";
 
 const PAGES = {
   device: { title: "Devices", description: "Choose a device and establish a connection." },
-  flash: { title: "Flash firmware", description: "Prepare your files, review the plan, then flash." },
+  flash: { title: "Flash XML (optional)", description: "Inspect exactly what an XML plan will write before you choose to flash." },
+  partitions: {title:"Partitions & backups",description:"Inspect storage and save partition images without flashing firmware."},
   console: { title: "Session log", description: "Inspect backend messages and save a troubleshooting log." },
 };
 function Shell() {
@@ -23,8 +26,10 @@ function Shell() {
         <span className={`status-chip ${state.daemonGone ? "error" : ""}`}><span className="dot" />{status}</span>
       </header>
       <div className="content">
+        <JobStatus/>
         {state.page === "device" && <DevicePage />}
         {state.page === "flash" && <FlashPage />}
+        {state.page === "partitions" && <PartitionsPage />}
         {state.page === "console" && <ConsolePage />}
       </div>
     </main>

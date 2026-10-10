@@ -1,10 +1,11 @@
-import { Cpu, HardDriveDownload, Terminal } from "lucide-react";
+import { Cpu, HardDriveDownload, Terminal, Database } from "lucide-react";
 import { useBus } from "../state/bus";
 import type { Page } from "../state/bus";
 const iconUrl = new URL("../assets/ultron.svg", import.meta.url).href;
 const NAV: { id: Page; icon: typeof Cpu; label: string }[] = [
   { id: "device", icon: Cpu, label: "Devices" },
-  { id: "flash", icon: HardDriveDownload, label: "Flash firmware" },
+  { id: "partitions", icon: Database, label: "Partitions & backups" },
+  { id: "flash", icon: HardDriveDownload, label: "Flash XML (optional)" },
   { id: "console", icon: Terminal, label: "Session log" },
 ];
 export function Rail() {

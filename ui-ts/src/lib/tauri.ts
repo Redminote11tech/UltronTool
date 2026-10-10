@@ -76,3 +76,8 @@ export async function saveLog(contents: string): Promise<boolean> {
   }
   return true;
 }
+
+export async function pickSavePath(defaultPath: string): Promise<string | null> {
+  const {save} = await import("@tauri-apps/plugin-dialog");
+  return save({title:"Save partition backup",defaultPath,filters:[{name:"Raw partition image",extensions:["img","bin"]}]});
+}

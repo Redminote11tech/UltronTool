@@ -4,7 +4,7 @@ import type { Mode } from "./vendors.ts";
 import type { DaemonDevice, SessionState } from "./daemon";
 
 export type Level = "info" | "ok" | "warn" | "error" | "protocol";
-export type Page = "device" | "flash" | "console";
+export type Page = "device" | "flash" | "partitions" | "console";
 export type Storage = "ufs" | "emmc" | "spinor" | "nand" | "nvme";
 export type Source = "sim" | "daemon";
 
@@ -25,6 +25,7 @@ export interface Job {
   eta: number;
   failed: boolean;
   finished: boolean;
+  message: string;
 }
 
 export interface Toast {
@@ -78,7 +79,7 @@ export type Action =
   | { type: "disconnect" }
   | { type: "jobStart"; title: string; total: number }
   | { type: "jobProgress"; label: string; value: number; rate: number; eta: number; total?: number; fraction?: number | null }
-  | { type: "jobEnd"; failed: boolean }
+  | { type: "jobEnd"; failed: boolean; message?: string }
   | { type: "toast"; toast: Toast }
   | { type: "toastGone"; id: number }
   | { type: "sourceSet"; source: Source; protocolVersion?: number }
@@ -155,7 +156,7 @@ export function reducer(s: State, a: Action): State {
     case "jobStart":
       return {
         ...s,
-        job: { title: a.title, label: "Preparing…", value: 0, fraction: null, total: a.total, rate: 0, eta: 0, failed: false, finished: false },
+        job: { title: a.title, label: "Preparing…", value: 0, fraction: null, total: a.total, rate: 0, eta: 0, failed: false, finished: false, message: "" },
         logs: pushLog(s, "info", `job: ${a.title}`),
       };
     case "jobProgress":
@@ -164,7 +165,7 @@ export function reducer(s: State, a: Action): State {
       if (!s.job) return s;
       return {
         ...s,
-        job: { ...s.job, finished: true, failed: a.failed, fraction: a.failed ? s.job.fraction : 1, value: a.failed ? s.job.value : s.job.total },
+        job: { ...s.job, finished: true, failed: a.failed, message: a.message ?? "", fraction: a.failed ? s.job.fraction : 1, value: a.failed ? s.job.value : s.job.total },
         logs: pushLog(s, a.failed ? "error" : "ok", a.failed ? `job: ${s.job.title} — FAILED` : `job: ${s.job.title} — finished`),
       };
     case "toast":

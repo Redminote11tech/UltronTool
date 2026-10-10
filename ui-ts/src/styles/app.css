@@ -159,3 +159,14 @@ p { color: var(--text-2); }
 .plan-summary b { font-weight: 500; text-align: right; max-width: 65%; }
 .settings-note,.start-note { font-size: 12px; margin-top: 14px; }
 .start-note { text-align: center; }
+
+.table-scroll { overflow-x: auto; margin-top: 20px; }
+.partition-table { width: 100%; border-collapse: collapse; text-align: left; }
+.partition-table th, .partition-table td { padding: 14px 12px; border-bottom: 1px solid var(--md-outline-variant); vertical-align: top; }
+.partition-table th { color: var(--text-2); font-weight: 500; }
+.partition-table .mono { overflow-wrap: anywhere; }
+.review-table { max-height: 42vh; overflow: auto; }
+
+.slot-file.mono, .review-table .note { overflow-wrap: anywhere; }
+
+.content > .job-card { margin-bottom: 24px; }

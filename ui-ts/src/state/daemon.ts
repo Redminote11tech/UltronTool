@@ -26,7 +26,10 @@ export type SessionState =
   | "lg_ready"
   | "spd_ready";
 
+export interface FlashInspection { ev: "flash_plan"; digest: string; operations: {kind: "program" | "erase" | "patch" | "set_bootable"; label: string; start: string; lun: number; bytes: number; sectors: number; detail: string; image: string}[] }
+
 export type DaemonEvent =
+  | FlashInspection
   | { ev: "hello"; protocol: string; version: number }
   | { ev: "log"; level: Level | "debug"; text: string }
   | { ev: "device_added" } & DaemonDevice
