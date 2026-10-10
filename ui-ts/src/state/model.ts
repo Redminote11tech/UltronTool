@@ -79,6 +79,7 @@ export type Action =
   | { type: "disconnect" }
   | { type: "jobStart"; title: string; total: number }
   | { type: "jobProgress"; label: string; value: number; rate: number; eta: number; total?: number; fraction?: number | null }
+  | { type: "jobDismiss" }
   | { type: "jobEnd"; failed: boolean; message?: string }
   | { type: "toast"; toast: Toast }
   | { type: "toastGone"; id: number }
@@ -161,6 +162,8 @@ export function reducer(s: State, a: Action): State {
       };
     case "jobProgress":
       return s.job ? { ...s, job: { ...s.job, label: a.label, value: a.value, total: a.total ?? s.job.total, fraction: a.fraction !== undefined ? a.fraction : s.job.total > 0 ? a.value / s.job.total : null, rate: a.rate, eta: a.eta } } : s;
+    case "jobDismiss":
+      return s.job?.finished ? {...s,job:null} : s;
     case "jobEnd":
       if (!s.job) return s;
       return {

@@ -19,7 +19,9 @@ commands or duplicate protocol logic in TypeScript/Rust.
 - [x] Self-contained frontend and daemon package with truthful launcher metadata.
 - [x] Qualcomm partition browsing across LUNs and backups.
 - [x] Standalone loader connection and read-only XML operation review.
-- [ ] Qualcomm verified partition writes and erase.
+- [x] Reviewed Qualcomm raw partition writes, with device SHA-256 verification
+  when supported by the programmer.
+- [ ] Qualcomm partition erase.
 - [ ] UFS provisioning, with separate validation/commit and explicit OTP-lock gate.
 - [ ] Huawei UPDATE.APP inspection and flashing.
 - [ ] Sahara crash-dump region selection and export.

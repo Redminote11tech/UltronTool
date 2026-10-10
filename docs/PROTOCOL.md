@@ -422,3 +422,18 @@ first alternate descriptor of each interface, claim it, and do not send
 SET_INTERFACE. Endpoint-bearing alternate activation remains available for
 other vendor policies (Samsung/odin4). Bulk OUT timeouts log the endpoint,
 bytes transferred and deadline without retrying a possibly delivered packet.
+
+### Direct partition image inspection
+
+The internal GUI bridge accepts `inspect_image` with a local `path` and emits
+`image_info` (path, byte size, sparse flag) followed by exactly one job completion.
+Inspection reads only local file metadata and the image magic; it sends no USB
+commands. Sparse detection uses the Android sparse magic rather than the suffix.
+
+The Material 3 direct writer passes `expected_size` with `write_partition`; the
+manager rejects changed size, empty files, sparse containers and payloads larger
+than the selected range before programming. It uses the existing Firehose raw
+writer, pads a partial final sector with zeroes, and leaves the remaining partition
+sectors untouched. Device SHA-256 verification is attempted when supported.
+The review binds the USB identity, session configuration, LUN and partition table;
+a changed session or refreshed table invalidates the pending review.

@@ -9,16 +9,16 @@ import { PartitionsPage } from "./pages/PartitionsPage";
 import { ConsolePage } from "./pages/ConsolePage";
 
 const PAGES = {
-  device: { title: "Devices", description: "Choose a device and establish a connection." },
-  flash: { title: "Flash XML (optional)", description: "Inspect exactly what an XML plan will write before you choose to flash." },
-  partitions: {title:"Partitions & backups",description:"Inspect storage and save partition images without flashing firmware."},
+  device: { title: "Device connection", description: "Select a device and load its Firehose programmer." },
+  flash: { title: "XML flash plans", description: "Batch flashing from rawprogram and patch XML files." },
+  partitions: {title:"Partitions",description:"Save a backup or write an image to a selected partition. No XML required."},
   console: { title: "Session log", description: "Inspect backend messages and save a troubleshooting log." },
 };
 function Shell() {
   const { state } = useBus();
   const page = PAGES[state.page];
   const running = !!state.job && !state.job.finished;
-  const status = state.daemonGone ? "Backend stopped" : running ? "Operation running" : state.source === "sim" ? "Simulation" : state.session === "firehose_ready" ? "Connected" : state.session === "needs_loader" ? "Loader required" : "Waiting for connection";
+  const status = state.daemonGone ? "Backend stopped" : running ? "Operation running" : state.source === "sim" ? "Simulation" : state.session === "firehose_ready" ? "Firehose connected" : state.session === "needs_loader" ? "Loader required" : "Waiting for connection";
   return <div className="app">
     <Rail />
     <main className="main">

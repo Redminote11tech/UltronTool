@@ -24,8 +24,12 @@ with `bash src-tauri/icons/generate.sh` (requires `rsvg-convert` from librsvg).
 
 Connect and load the Firehose programmer on Devices without selecting firmware
 or XML. The programmer is uploaded to RAM; this does not flash storage. Open
-Partitions & backups to read GPT tables per LUN and save raw partition images.
-Flash XML is optional: inspect its image writes, erase ranges, disk patches and
+Partitions to read GPT tables per LUN, save backups, or select a partition and
+write a raw `.img` / `.bin` directly. Choose an image, review the device, partition
+and exact sector range, then confirm the write. No user-supplied XML is needed.
+Empty, oversized and Android sparse images are rejected; expand sparse images
+to raw first. The backend rechecks the selected file size before writing.
+XML plans are optional: inspect its image writes, erase ranges, disk patches and
 automatic bootable-LUN changes, then explicitly confirm the reviewed operations.
 XML content changes after review are rejected before execution. Restart requires
 a running Firehose programmer; Disconnect only releases the host connection.
@@ -42,8 +46,9 @@ are handled by native HTML dialogs.
 - Qualcomm EDL: hotplug detection, connect, programmer upload, rawprogram/patch
   flashing, VIP, progress, logs, reset and disconnect.
 - Other vendors remain available in GTK. Their TS cards explain this limitation.
-- Partition browsing and backups are exposed. Partition writes/erase, UFS
-  provisioning and Huawei UPDATE.APP are not exposed by the TS interface yet.
+- Partition browsing, backups and reviewed raw image writes are exposed. Erase,
+  UFS provisioning and Huawei UPDATE.APP remain in the GTK interface. Device
+  SHA-256 verification is used when supported by the programmer.
 - Sparse containers are rejected on raw write paths before any payload is sent.
 - Browser preview uses simulated devices and operations. It does not access USB.
 - Log export saves the retained session buffer (up to 600 entries).
@@ -138,7 +143,7 @@ WebKitGTK-on-NVIDIA blank-window class — it is simply not what bit us here.
 
 1. Port the vendor one-shot flows (Samsung tar.md5, LG, MTK, Unisoc) from the
    GTK UI layer into daemon jobs, then light up their pages here.
-2. Surface partition writes/erase, UFS provisioning and the Huawei UPDATE.APP path
+2. Surface partition erase, UFS provisioning and the Huawei UPDATE.APP path
    (the daemon protocol already carries them).
 3. Drag-and-drop onto slots.
 4. Retire GTK after feature parity and native/hardware validation.

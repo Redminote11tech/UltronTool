@@ -4,8 +4,8 @@ import type { Page } from "../state/bus";
 const iconUrl = new URL("../assets/ultron.svg", import.meta.url).href;
 const NAV: { id: Page; icon: typeof Cpu; label: string }[] = [
   { id: "device", icon: Cpu, label: "Devices" },
-  { id: "partitions", icon: Database, label: "Partitions & backups" },
-  { id: "flash", icon: HardDriveDownload, label: "Flash XML (optional)" },
+  { id: "partitions", icon: Database, label: "Partitions" },
+  { id: "flash", icon: HardDriveDownload, label: "XML plans" },
   { id: "console", icon: Terminal, label: "Session log" },
 ];
 export function Rail() {

@@ -45,6 +45,7 @@ interface Api {
   resetDevice: () => void;
   startFlashReal: (plan: FlashPlan) => void;
   cancelFlash: () => void;
+  inspectImage: (path: string) => Promise<import("./daemon").ImageInspection>;
   inspectPlan: (files: string[]) => Promise<import("./daemon").FlashInspection>;
   partitionJob: (cmd: Record<string, unknown>, target: string, lun: number, row?: {name: string; first_lba: number; last_lba: number}) => boolean;
   toast: (ok: boolean, title: string, body?: string) => void;
@@ -61,6 +62,7 @@ export function BusProvider({ children }: { children: ReactNode }) {
   const gate = useRef(new JobGate());
   const targetLost = useRef(false);
   const inspection = useRef<{resolve: (value: import("./daemon").FlashInspection) => void; reject: (error: Error) => void; result?: import("./daemon").FlashInspection} | null>(null);
+  const imageInspection = useRef<{resolve:(value:import("./daemon").ImageInspection)=>void;reject:(error:Error)=>void;result?:import("./daemon").ImageInspection} | null>(null);
   const lastTick = useRef<Sample | null>(null);
 
   const api = useMemo<Omit<Api, "state" | "dispatch"> & { submit: (cmd: Record<string, unknown>, title: string, target?: string | null) => boolean }>(() => {
@@ -75,6 +77,7 @@ export function BusProvider({ children }: { children: ReactNode }) {
         if (!gate.current.finish(id)) return;
         inspection.current?.reject(new Error(String(error)));
         inspection.current = null;
+        imageInspection.current?.reject(new Error(String(error))); imageInspection.current = null;
         dispatch({ type: "jobEnd", failed: true });
         toast(false, "Command failed", String(error));
       });
@@ -152,12 +155,17 @@ export function BusProvider({ children }: { children: ReactNode }) {
         inspection.current = null; reject(new Error("Could not inspect plan"));
       }
     });
+    const inspectImage = (path: string) => new Promise<import("./daemon").ImageInspection>((resolve, reject) => {
+      if (imageInspection.current || gate.current.busy) {reject(new Error("Another operation is running")); return;}
+      imageInspection.current = {resolve, reject};
+      if (!submit({cmd:"inspect_image",path}, "Inspecting image")) {imageInspection.current=null;reject(new Error("Could not inspect image"));}
+    });
     const partitionJob = (cmd: Record<string, unknown>, target: string, lun: number, row?: {name: string; first_lba: number; last_lba: number}) => {
       const s = stateRef.current;
       if (!canReadPartition(s, target, lun, row)) {
         toast(false, "Device or partition table changed", "Read the table again before continuing"); return false;
       }
-      return submit({...cmd, lun}, String(cmd.cmd).replaceAll("_", " "));
+      return submit({...cmd, lun}, cmd.cmd === "write_partition" ? `Writing ${cmd.label}` : cmd.cmd === "read_partition" ? `Backing up ${cmd.label}` : "Reading partition table");
     };
 
     const connectDevice = (dev: DaemonDevice) => {
@@ -221,6 +229,7 @@ export function BusProvider({ children }: { children: ReactNode }) {
       resetDevice,
       startFlashReal,
       inspectPlan,
+      inspectImage,
       partitionJob,
       cancelFlash,
       toast,
@@ -236,6 +245,9 @@ export function BusProvider({ children }: { children: ReactNode }) {
 
     return onDaemonEvent((e) => {
       switch (e.ev) {
+        case "image_info":
+          if (imageInspection.current) imageInspection.current.result = e;
+          return;
         case "flash_plan":
           if (inspection.current) inspection.current.result = e;
           return;
@@ -293,6 +305,10 @@ export function BusProvider({ children }: { children: ReactNode }) {
             const pending = inspection.current; inspection.current = null;
             if (e.success && pending.result) pending.resolve(pending.result); else pending.reject(new Error(e.message || "Plan inspection failed"));
           }
+          if (imageInspection.current) {
+            const pending=imageInspection.current; imageInspection.current=null;
+            if(e.success && pending.result) pending.resolve(pending.result); else pending.reject(new Error(e.message || "Image inspection failed"));
+          }
           return;
         }
         case "chip_info": {
@@ -309,6 +325,7 @@ export function BusProvider({ children }: { children: ReactNode }) {
         case "huawei_app":
           return;
         case "daemon_gone":
+          imageInspection.current?.reject(new Error(e.reason || "Backend stopped")); imageInspection.current=null;
           inspection.current?.reject(new Error(e.reason || "Backend stopped")); inspection.current = null;
           if (gate.current.active !== null) gate.current.finish(gate.current.active);
           dispatch({ type: "daemonGone", reason: e.reason ?? "unknown" });

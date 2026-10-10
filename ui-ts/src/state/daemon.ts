@@ -28,8 +28,11 @@ export type SessionState =
 
 export interface FlashInspection { ev: "flash_plan"; digest: string; operations: {kind: "program" | "erase" | "patch" | "set_bootable"; label: string; start: string; lun: number; bytes: number; sectors: number; detail: string; image: string}[] }
 
+export interface ImageInspection {ev:"image_info";path:string;size:number;sparse:boolean}
+
 export type DaemonEvent =
   | FlashInspection
+  | ImageInspection
   | { ev: "hello"; protocol: string; version: number }
   | { ev: "log"; level: Level | "debug"; text: string }
   | { ev: "device_added" } & DaemonDevice
