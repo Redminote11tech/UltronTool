@@ -397,8 +397,15 @@ and ERASE_FLASH carrying the selection itself.
 
 ## Material 3 connection and plan review
 
-The GUI separates probing, programmer upload, partition browsing/backups and
-optional XML flashing. No XML is needed to upload Firehose or read storage.
+The GUI separates programmer connection, partition browsing/backups and optional
+XML flashing. No XML is needed to upload Firehose or read storage. Select the
+programmer before **Connect and load programmer**: the initial `connect` request
+carries its path, and the worker proceeds directly from the probed HELLO into
+Sahara upload. The advanced probe-only path keeps the transport and replays the
+HELLO, but cannot guarantee that the PBL will wait indefinitely for a later GUI
+upload. A delayed handshake may need a physical replug into EDL.
+Sahara failures identify the transfer stage and propagate HELLO-response write
+errors; a timeout after HELLO is not reported as a missing HELLO.
 The internal `preview_xml` request uses the execution rawprogram parser without
 USB access. It reports image labels/paths, LUNs, start sectors, declared lengths,
 erase ranges, disk patches and automatic bootable-LUN selection. A SHA-256 review

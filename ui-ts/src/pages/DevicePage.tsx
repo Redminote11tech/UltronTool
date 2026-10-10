@@ -35,7 +35,7 @@ export function DevicePage() {
               </button>
               {!supported && <p className="device-note">Use GTK for this mode. Material 3 currently exposes Qualcomm EDL operations; crash-dump exports and other vendor flows remain in GTK.</p>}
               {active && supported && <div className="device-actions"><span className="session-label">{state.session === "needs_loader" ? "Sahara detected — load a programmer in the connection panel" : state.session === "firehose_ready" ? "Firehose connected" : "Not connected"}</span>
-                {!connected ? <Button variant="filled" disabled={busy} onClick={() => connectDevice(dev)}><PlugZap size={17} />Probe device (no writes)</Button>
+                {!connected ? <Button variant="outlined" disabled={busy} onClick={() => connectDevice(dev)}><PlugZap size={17} />Probe only (advanced)</Button>
                   : <><Button variant="filled" disabled={busy || state.session !== "firehose_ready"} onClick={() => dispatch({ type: "page", page: "partitions" })}>Browse partitions<ArrowRight size={17} /></Button>
                     <Button variant="text" disabled={busy} onClick={disconnectDevice}><RefreshCw size={16} />Disconnect</Button>
                     <Button variant="text" disabled={busy || state.session !== "firehose_ready"} onClick={() => setResetTarget(dev.path)}><Power size={16} />Restart (Firehose)</Button></>}

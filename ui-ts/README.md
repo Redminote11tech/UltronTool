@@ -144,3 +144,9 @@ WebKitGTK-on-NVIDIA blank-window class — it is simply not what bit us here.
 4. Retire GTK after feature parity and native/hardware validation.
 
 See [the migration checklist](../docs/UI_MIGRATION.md) for the retirement gates.
+
+Choose the Firehose programmer before connecting, then use **Connect and load programmer**.
+The initial internal connect request carries the programmer, so probe and Sahara upload run
+as one worker operation without waiting for a file chooser. **Probe only (advanced)** remains
+available to detect an existing Firehose session; on bare EDL it leaves the handshake waiting,
+and a delayed upload may require unplugging and re-entering EDL. Neither flow flashes firmware.

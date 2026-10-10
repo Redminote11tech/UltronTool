@@ -9,7 +9,7 @@ import type { Mode } from "./vendors";
 import { progressSample } from "./progress";
 import type { Sample } from "./progress";
 import { JobGate, canSelectDevice } from "./jobGate";
-import { canLoadProgrammer, canReadPartition } from "./sessionPolicy";
+import { programmerRequest, canReadPartition } from "./sessionPolicy";
 import { isTauri } from "../lib/tauri";
 import { onDaemonEvent, sendDaemon } from "./daemon";
 import type { DaemonDevice } from "./daemon";
@@ -80,11 +80,6 @@ export function BusProvider({ children }: { children: ReactNode }) {
       });
       return true;
     };
-    const targetFields = () => {
-      const dev = stateRef.current.devices.find(d => d.path === stateRef.current.selectedPath);
-      return dev ? { bus: dev.bus, devnum: dev.devnum } : {};
-    };
-
     // ------------------------------------------------------------- sim
     const setMode = (m: Mode) => {
       if (stateRef.current.source !== "sim") return;
@@ -186,8 +181,11 @@ export function BusProvider({ children }: { children: ReactNode }) {
     };
 
     const uploadLoader = (programmer: string, storage: Storage, skipInit: boolean, vipDir?: string) => {
-      if (!canLoadProgrammer(stateRef.current) || gate.current.busy) return;
-      submit({ ...targetFields(), cmd: "upload_loader", programmer, storage, skip_storage_init: skipInit, vip_dir: vipDir ?? undefined }, "Uploading programmer");
+      if (gate.current.busy) return;
+      const request = programmerRequest(stateRef.current, programmer, storage, skipInit, vipDir);
+      if (!request) return;
+      targetLost.current = false;
+      submit(request, request.cmd === "connect" ? "Connecting and loading programmer" : "Uploading programmer");
     };
 
     const disconnectDevice = () => {

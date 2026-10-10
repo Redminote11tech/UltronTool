@@ -1979,6 +1979,14 @@ test "manager: already-in-firehose connect loads partitions" {
 }
 
 test "manager: loader upload reuses the probed connection (replayed HELLO)" {
+    try testLoaderConnection(false);
+}
+
+test "manager: connect with programmer completes Sahara without a separate upload request" {
+    try testLoaderConnection(true);
+}
+
+fn testLoaderConnection(combined: bool) !void {
     const channel = try heap.create(EventChannel);
     channel.* = .{};
     defer heap.destroy(channel);
@@ -2062,27 +2070,28 @@ test "manager: loader upload reuses the probed connection (replayed HELLO)" {
     defer mgr.shutdown();
     try mgr.start();
 
-    // User flow: Connect (no loader chosen) -> needs_loader -> choose file ->
-    // Upload loader — all on ONE kept-open connection.
-    mgr.enqueue(.{ .connect = .{} });
-
-    var collector = Collector{};
-    defer collector.deinit();
-    var saw_needs_loader = false;
-    var deadline: usize = 0;
-    while (deadline < 200 and !saw_needs_loader) : (deadline += 1) {
-        channel.drain(&collector, Collector.cb);
-        for (collector.states.items) |st| {
-            if (st == .needs_loader) saw_needs_loader = true;
-        }
-        glib.usleep(10 * std.time.us_per_ms);
-    }
-    try std.testing.expect(saw_needs_loader);
-    try std.testing.expect(harness.failure == null);
-
     var pbuf: [176]u8 = undefined;
     const prog_path = try tmp.filePath(&pbuf, "prog.elf");
-    mgr.enqueue(.{ .upload_loader = .{ .programmer = prog_path, .skip_storage_init = true } });
+    var collector = Collector{};
+    defer collector.deinit();
+    var deadline: usize = 0;
+    if (combined) {
+        // No GUI round trip/file picker between receiving HELLO and replying.
+        mgr.enqueue(.{ .connect = .{ .programmer = prog_path, .skip_storage_init = true } });
+    } else {
+        mgr.enqueue(.{ .connect = .{} });
+        var saw_needs_loader = false;
+        while (deadline < 200 and !saw_needs_loader) : (deadline += 1) {
+            channel.drain(&collector, Collector.cb);
+            for (collector.states.items) |st| {
+                if (st == .needs_loader) saw_needs_loader = true;
+            }
+            glib.usleep(10 * std.time.us_per_ms);
+        }
+        try std.testing.expect(saw_needs_loader);
+        try std.testing.expect(harness.failure == null);
+        mgr.enqueue(.{ .upload_loader = .{ .programmer = prog_path, .skip_storage_init = true } });
+    }
 
     var got_partitions = false;
     deadline = 0;
