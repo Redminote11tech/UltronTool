@@ -416,3 +416,9 @@ not a signature or a claim that firmware matches the device.
 Firehose restart requires a running programmer and an ACK. Refusal/timeout is
 reported as failure; acceptance requests the existing ten-second device delay.
 Disconnect releases the host session and never substitutes for a device reset.
+
+Qualcomm USB opening follows qdl: inspect the active configuration, match the
+first alternate descriptor of each interface, claim it, and do not send
+SET_INTERFACE. Endpoint-bearing alternate activation remains available for
+other vendor policies (Samsung/odin4). Bulk OUT timeouts log the endpoint,
+bytes transferred and deadline without retrying a possibly delivered packet.

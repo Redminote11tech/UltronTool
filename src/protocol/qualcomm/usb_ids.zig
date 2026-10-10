@@ -6,7 +6,6 @@
 //! allowlist keeps up with", qdl src/usb.c). The interface-level rule is a
 //! vendor-specific interface (class 0xff, subclass 0xff) with Sahara
 //! protocol codes 0x10/0x11/0x13 on modern devices and 0xff on older ones,
-
 //! exposing exactly one bulk IN + one bulk OUT with non-zero max packet size.
 
 const usb = @import("../../transport/usb.zig");
@@ -74,6 +73,7 @@ fn classify(input: proto_mod.ClassifyInput) proto_mod.ModeTag {
 pub const policy = usb.Policy{
     .matchDevice = matchDevice,
     .matchInterface = matchInterface,
+    .preserve_active_interface = true,
 };
 
 pub const protocol = proto_mod.Protocol{

@@ -61,6 +61,10 @@ pub const Policy = struct {
     matchDevice: *const fn (desc: DeviceDesc) bool,
     /// Interface-level check; returns the bulk endpoint pair to claim, or null.
     matchInterface: *const fn (ifc: InterfaceDesc) ?EpPair,
+    /// qdl uses the active configuration's first alternate descriptor and
+    /// leaves its setting unchanged. Other vendors may need to activate an
+    /// endpoint-bearing alternate explicitly (notably Samsung/odin4).
+    preserve_active_interface: bool = false,
 };
 
 pub const default_out_chunk_size: usize = 1024 * 1024;
@@ -185,7 +189,10 @@ pub const Usb = struct {
                 self.logger.err("USB bulk write failed: {s} (ep 0x{x})", .{ errName(ret), self.out_ep });
                 return if (ret == c.LIBUSB_ERROR_NO_DEVICE) Error.Gone else Error.Io;
             }
-            if (ret == c.LIBUSB_ERROR_TIMEOUT and actual == 0) return Error.Timeout;
+            if (ret == c.LIBUSB_ERROR_TIMEOUT and actual == 0) {
+                self.logger.err("USB bulk OUT timeout: ep 0x{x}, {d}/{d} bytes sent, {d} ms deadline", .{ self.out_ep, count, buf.len, timeout_ms });
+                return Error.Timeout;
+            }
 
             const moved: usize = @intCast(actual);
             count += moved;
@@ -221,38 +228,39 @@ fn findInterface(
     desc: *const c.libusb_device_descriptor,
     policy: *const Policy,
 ) ?EpPair {
+    if (policy.preserve_active_interface) {
+        var config: ?*c.libusb_config_descriptor = null;
+        if (c.libusb_get_active_config_descriptor(dev, &config) != 0) return null;
+        defer c.libusb_free_config_descriptor(config);
+        return findConfigInterface(config.?, policy);
+    }
     for (0..@intCast(desc.bNumConfigurations)) |ci| {
         var config: ?*c.libusb_config_descriptor = null;
         if (c.libusb_get_config_descriptor(dev, @intCast(ci), &config) != 0) continue;
         defer c.libusb_free_config_descriptor(config);
-        const cfg = config.?;
+        if (findConfigInterface(config.?, policy)) |pair| return pair;
+    }
+    return null;
+}
 
-        for (0..@intCast(cfg.bNumInterfaces)) |ii| {
-            const libusb_ifc = &cfg.interface[ii]; // altsetting array
-            for (0..@intCast(libusb_ifc.num_altsetting)) |ai| {
-                const a = &libusb_ifc.altsetting[ai];
-                var eps_buf: [16]EndpointDesc = undefined;
-                const n_ep = @min(@as(usize, a.bNumEndpoints), eps_buf.len);
-                for (0..n_ep) |ei| {
-                    const ep = &a.endpoint[ei];
-                    eps_buf[ei] = .{
-                        .address = ep.bEndpointAddress,
-                        .attributes = ep.bmAttributes,
-                        .max_packet_size = ep.wMaxPacketSize,
-                    };
-                }
-                const ifc = InterfaceDesc{
-                    .class = a.bInterfaceClass,
-                    .subclass = a.bInterfaceSubClass,
-                    .protocol = a.bInterfaceProtocol,
-                    .endpoints = eps_buf[0..n_ep],
-                };
-                if (policy.matchInterface(ifc)) |pair| {
-                    var p = pair;
-                    p.interface_number = a.bInterfaceNumber;
-                    p.alt_setting = a.bAlternateSetting;
-                    return p;
-                }
+fn findConfigInterface(cfg: *const c.libusb_config_descriptor, policy: *const Policy) ?EpPair {
+    for (0..@intCast(cfg.bNumInterfaces)) |ii| {
+        const libusb_ifc = &cfg.interface[ii];
+        const alt_count: usize = if (policy.preserve_active_interface) @min(@as(usize, @intCast(libusb_ifc.num_altsetting)), 1) else @intCast(libusb_ifc.num_altsetting);
+        for (0..alt_count) |ai| {
+            const a = &libusb_ifc.altsetting[ai];
+            var eps_buf: [16]EndpointDesc = undefined;
+            const n_ep = @min(@as(usize, a.bNumEndpoints), eps_buf.len);
+            for (0..n_ep) |ei| {
+                const ep = &a.endpoint[ei];
+                eps_buf[ei] = .{ .address = ep.bEndpointAddress, .attributes = ep.bmAttributes, .max_packet_size = ep.wMaxPacketSize };
+            }
+            const ifc = InterfaceDesc{ .class = a.bInterfaceClass, .subclass = a.bInterfaceSubClass, .protocol = a.bInterfaceProtocol, .endpoints = eps_buf[0..n_ep] };
+            if (policy.matchInterface(ifc)) |pair| {
+                var p = pair;
+                p.interface_number = a.bInterfaceNumber;
+                p.alt_setting = if (policy.preserve_active_interface) -1 else a.bAlternateSetting;
+                return p;
             }
         }
     }
@@ -389,7 +397,8 @@ fn tryOpenCandidate(
         handle = null;
         return null;
     }
-    // Activate the endpoint-bearing alternate setting (odin4 semantics).
+    // Activate only when the vendor policy requests it (odin4 semantics).
+    // Qualcomm follows qdl: leave the active interface untouched.
     if (pair.alt_setting >= 0) {
         const alt = c.libusb_set_interface_alt_setting(handle.?, pair.interface_number, pair.alt_setting);
         if (alt != 0) {
@@ -438,4 +447,43 @@ test "serialFromProduct parses qdl-style strings" {
 
 test "USB transport exposes its reset hook" {
     try std.testing.expect(Usb.vtable.reset != null);
+}
+
+test "qdl policy preserves the active interface while alternate activation remains available" {
+    const Matcher = struct {
+        fn device(_: DeviceDesc) bool {
+            return true;
+        }
+        fn iface(ifc: InterfaceDesc) ?EpPair {
+            if (ifc.endpoints.len != 2) return null;
+            return .{ .interface_number = 0, .in_ep = ifc.endpoints[0].address, .out_ep = ifc.endpoints[1].address, .in_max = 512, .out_max = 512 };
+        }
+    };
+    var eps: [2]c.libusb_endpoint_descriptor = @splat(std.mem.zeroes(c.libusb_endpoint_descriptor));
+    eps[0].bEndpointAddress = 0x81;
+    eps[0].wMaxPacketSize = 512;
+    eps[0].bmAttributes = 2;
+    eps[1].bEndpointAddress = 1;
+    eps[1].wMaxPacketSize = 512;
+    eps[1].bmAttributes = 2;
+    var alts: [2]c.libusb_interface_descriptor = @splat(std.mem.zeroes(c.libusb_interface_descriptor));
+    alts[0].bInterfaceNumber = 3;
+    alts[0].bNumEndpoints = 2;
+    alts[0].endpoint = &eps;
+    alts[1] = alts[0];
+    alts[1].bAlternateSetting = 1;
+    var iface = c.libusb_interface{ .altsetting = &alts, .num_altsetting = 2 };
+    var cfg = std.mem.zeroes(c.libusb_config_descriptor);
+    cfg.bNumInterfaces = 1;
+    cfg.interface = @ptrCast(&iface);
+    const qdl_policy = Policy{ .matchDevice = Matcher.device, .matchInterface = Matcher.iface, .preserve_active_interface = true };
+    const alternate_policy = Policy{ .matchDevice = Matcher.device, .matchInterface = Matcher.iface };
+    const pair = findConfigInterface(&cfg, &qdl_policy).?;
+    try std.testing.expectEqual(@as(i32, -1), pair.alt_setting);
+    try std.testing.expectEqual(@as(u8, 3), pair.interface_number);
+    // An endpoint-less first alternate must not silently select/mutate a
+    // different Qualcomm setting; Samsung still discovers and activates it.
+    alts[0].bNumEndpoints = 0;
+    try std.testing.expect(findConfigInterface(&cfg, &qdl_policy) == null);
+    try std.testing.expectEqual(@as(i32, 1), findConfigInterface(&cfg, &alternate_policy).?.alt_setting);
 }
