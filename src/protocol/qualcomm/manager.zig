@@ -81,6 +81,7 @@ pub const Request = union(enum) {
     /// Write a file onto a partition range.
     write_partition: struct {
         path: []const u8,
+        expected_size: ?u64 = null,
         first_lba: u64,
         max_sectors: u64,
         lun: u32,
@@ -323,7 +324,7 @@ pub const Manager = struct {
             .upload_loader => |u| self.uploadLoader(u.programmer, u.storage, u.skip_storage_init, u.vip_dir, u.target),
             .list_partitions => |lp| self.listPartitions(lp.lun),
             .read_partition => |r| self.readPartition(r.path, r.first_lba, r.num_sectors, r.lun, r.label),
-            .write_partition => |w| self.writePartition(w.path, w.first_lba, w.max_sectors, w.lun, w.label),
+            .write_partition => |w| self.writePartition(w.path, w.first_lba, w.max_sectors, w.lun, w.label, w.expected_size),
             .erase_partition => |e| self.erasePartition(e.first_lba, e.num_sectors, e.lun, e.label),
             .provision_ufs => |p| self.provisionUfs(p.path, p.finalize),
             .flash_huawei_app => |f| self.flashHuaweiApp(f.path, f.mappings),
@@ -955,7 +956,7 @@ pub const Manager = struct {
         }
     }
 
-    fn writePartition(self: *Manager, path: []const u8, first_lba: u64, max_sectors: u64, lun: u32, label: []const u8) void {
+    fn writePartition(self: *Manager, path: []const u8, first_lba: u64, max_sectors: u64, lun: u32, label: []const u8, expected_size: ?u64) void {
         const fh = self.requireSession() orelse return;
         const sector_size = self.sector_size;
         if (sector_size == 0) {
@@ -980,13 +981,18 @@ pub const Manager = struct {
             self.finish(false, "partition too large");
             return;
         }
-        const file_size = file.size() catch 0;
-        const needed: u64 = (file_size + sector_size - 1) / sector_size;
-        if (needed > max_sectors) {
-            self.logger.err("{s} ({d} sectors) does not fit partition {s} ({d} sectors) — aborted", .{ path, needed, label, max_sectors });
-            self.finish(false, "image larger than partition");
+        const file_size = file.size() catch |e| {
+            self.finish(false, @errorName(e));
             return;
-        }
+        };
+        checkPartitionImageSize(file_size, sector_size, max_sectors, expected_size) catch |e| {
+            self.finish(false, switch (e) {
+                error.ImageSizeChanged => "image size changed after review; choose and review it again",
+                error.EmptyImage => "image is empty; nothing was written",
+                else => "image larger than partition; nothing was written",
+            });
+            return;
+        };
 
         var start_buf: [32]u8 = undefined;
         const op = rawprogram.Program{
@@ -2299,5 +2305,62 @@ test "changed reviewed XML refuses execution before any USB writes" {
     try std.testing.expectEqual(@as(usize, 1), collector.finished.items.len);
     try std.testing.expect(!collector.finished.items[0].success);
     try std.testing.expectEqual(@as(usize, 0), harness.step_idx);
+    try std.testing.expect(harness.failure == null);
+}
+
+fn checkPartitionImageSize(size: u64, sector_size: u32, max_sectors: u64, expected_size: ?u64) !void {
+    if (expected_size) |expected| if (size != expected) return error.ImageSizeChanged;
+    if (size == 0) return error.EmptyImage;
+    if (sector_size == 0 or max_sectors == 0) return error.ImageTooLarge;
+    // Division/remainder avoid overflowing a rounded-up byte count.
+    const needed = size / sector_size + @intFromBool(size % sector_size != 0);
+    if (needed > max_sectors) return error.ImageTooLarge;
+}
+
+test "direct writes reject empty, oversized and changed reviewed images" {
+    try checkPartitionImageSize(513, 512, 2, 513);
+    try std.testing.expectError(error.EmptyImage, checkPartitionImageSize(0, 512, 2, null));
+    try std.testing.expectError(error.ImageTooLarge, checkPartitionImageSize(513, 512, 1, null));
+    try std.testing.expectError(error.ImageSizeChanged, checkPartitionImageSize(513, 512, 2, 512));
+    try std.testing.expectError(error.ImageTooLarge, checkPartitionImageSize(std.math.maxInt(u64), 512, 2, null));
+}
+
+test "rejected direct write emits one failed finish before any device writes" {
+    try testRejectedDirectWrite("", 2, null);
+    try testRejectedDirectWrite("raw payload", 0, null);
+    try testRejectedDirectWrite("raw payload", 2, 512);
+    try testRejectedDirectWrite(&.{ 0x3a, 0xff, 0x26, 0xed }, 2, 4);
+}
+
+fn testRejectedDirectWrite(content: []const u8, max_sectors: u64, expected_size: ?u64) !void {
+    const alloc = std.testing.allocator;
+    var tmp = try fileio.TmpDir.init();
+    defer tmp.cleanup();
+    try tmp.writeFile("boot.img", content);
+    var path_buf: [176]u8 = undefined;
+    const path = try tmp.filePath(&path_buf, "boot.img");
+    var logger = log.Logger{ .mirror_stderr = false };
+    var harness = try SimHarness.init(alloc, &.{});
+    defer harness.deinit();
+    var opener = SimOpener{ .harness = &harness };
+    const channel = try alloc.create(EventChannel);
+    defer alloc.destroy(channel);
+    channel.* = .{};
+    var cancel = std.atomic.Value(bool).init(false);
+    const mgr = try Manager.init(alloc, &logger, channel, &cancel, &SimOpener.open, &opener);
+    defer mgr.shutdown();
+    defer mgr.teardown();
+    mgr.io = try alloc.create(transport.Io);
+    mgr.io.?.* = transport.Io.init(alloc, harness.transport());
+    mgr.fh = try alloc.create(firehose.Session);
+    mgr.fh.?.* = .{ .alloc = alloc, .io = mgr.io.?, .logger = &logger, .cancel = &cancel };
+    mgr.sector_size = 512;
+    mgr.writePartition(path, 8, max_sectors, 0, "boot_a", expected_size);
+    var collector = Collector{};
+    defer collector.deinit();
+    channel.drain(&collector, Collector.cb);
+    try std.testing.expectEqual(@as(usize, 1), collector.finished.items.len);
+    try std.testing.expect(!collector.finished.items[0].success);
+    try std.testing.expectEqual(@as(usize, 0), harness.written.items.len);
     try std.testing.expect(harness.failure == null);
 }

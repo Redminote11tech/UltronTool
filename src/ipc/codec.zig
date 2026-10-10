@@ -255,6 +255,7 @@ pub const ParseError = error{
 /// until the caller resets the arena (the manager dupes on enqueue).
 pub const Parsed = union(enum) {
     preview_xml: struct { files: []const []const u8 },
+    inspect_image: struct { path: []const u8 },
     manager: manager.Request,
     cancel,
     shutdown,
@@ -375,12 +376,16 @@ pub fn parseRequest(arena: std.mem.Allocator, line: []const u8) ParseError!Parse
             .label = (try objStr(obj, "label")) orelse "partition",
         } } };
     }
+    if (std.mem.eql(u8, cmd, "inspect_image")) {
+        return .{ .inspect_image = .{ .path = (try objStr(obj, "path")) orelse return error.BadField } };
+    }
     if (std.mem.eql(u8, cmd, "write_partition")) {
         return .{ .manager = .{ .write_partition = .{
             .path = (try objStr(obj, "path")) orelse return error.BadField,
             .first_lba = try objInt(obj, u64, "first_lba", 0),
             .max_sectors = try objInt(obj, u64, "max_sectors", null),
             .lun = try objInt(obj, u32, "lun", 0),
+            .expected_size = if (obj.get("expected_size")) |_| try objInt(obj, u64, "expected_size", null) else null,
             .label = (try objStr(obj, "label")) orelse "partition",
         } } };
     }
@@ -557,4 +562,13 @@ test "configured session reports actual storage and VIP settings" {
     } });
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("{\"ev\":\"session_config\",\"storage\":\"emmc\",\"skip_init\":true,\"vip_dir\":\"/tables\"}", out);
+}
+
+test "direct write image inspection and reviewed size requests" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const inspection = try parseRequest(arena.allocator(), "{\"cmd\":\"inspect_image\",\"path\":\"/tmp/boot.img\"}");
+    try std.testing.expectEqualStrings("/tmp/boot.img", inspection.inspect_image.path);
+    const write = try parseRequest(arena.allocator(), "{\"cmd\":\"write_partition\",\"path\":\"/tmp/boot.img\",\"max_sectors\":8,\"expected_size\":1024}");
+    try std.testing.expectEqual(@as(?u64, 1024), write.manager.write_partition.expected_size);
 }

@@ -125,3 +125,41 @@ test "preview includes disk patch details and automatic boot LUN selection" {
     try std.testing.expectEqualStrings("set_bootable", ops[2].object.get("kind").?.string);
     try std.testing.expectEqual(@as(i64, 1), ops[2].object.get("lun").?.integer);
 }
+
+/// Read only the file size and format marker; no device access or full-image allocation.
+pub fn inspectImage(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
+    const fileio = @import("../core/fileio.zig");
+    const sparse = @import("../firmware/sparse.zig");
+    var file = try fileio.File.open(path);
+    defer file.close();
+    const size = try file.size();
+    var magic: [4]u8 = @splat(0);
+    const n = try file.readAll(&magic);
+    const is_sparse = n == 4 and sparse.isSparse(&magic);
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, "{\"ev\":\"image_info\",\"path\":");
+    try codec.appendJsonString(&out, alloc, path);
+    var buf: [128]u8 = undefined;
+    try out.appendSlice(alloc, try std.fmt.bufPrint(&buf, ",\"size\":{d},\"sparse\":{s}}}\n", .{ size, if (is_sparse) "true" else "false" }));
+    return out.toOwnedSlice(alloc);
+}
+
+test "image inspection distinguishes sparse content regardless of extension" {
+    const fileio = @import("../core/fileio.zig");
+    var tmp = try fileio.TmpDir.init();
+    defer tmp.cleanup();
+    try tmp.writeFile("boot.img", "raw-image");
+    try tmp.writeFile("system.bin", &.{ 0x3a, 0xff, 0x26, 0xed });
+    try tmp.writeFile("empty.img", "");
+    var buf: [176]u8 = undefined;
+    const raw_info = try inspectImage(std.testing.allocator, try tmp.filePath(&buf, "boot.img"));
+    defer std.testing.allocator.free(raw_info);
+    try std.testing.expect(std.mem.indexOf(u8, raw_info, "\"size\":9,\"sparse\":false") != null);
+    const sparse_info = try inspectImage(std.testing.allocator, try tmp.filePath(&buf, "system.bin"));
+    defer std.testing.allocator.free(sparse_info);
+    try std.testing.expect(std.mem.indexOf(u8, sparse_info, "\"sparse\":true") != null);
+    const empty_info = try inspectImage(std.testing.allocator, try tmp.filePath(&buf, "empty.img"));
+    defer std.testing.allocator.free(empty_info);
+    try std.testing.expect(std.mem.indexOf(u8, empty_info, "\"size\":0") != null);
+}

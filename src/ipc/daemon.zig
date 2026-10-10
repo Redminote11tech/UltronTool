@@ -128,6 +128,16 @@ fn handleLine(shared: *Shared, arena: std.mem.Allocator, line: []const u8) void 
         return;
     };
     switch (parsed) {
+        .inspect_image => |request| {
+            shared.job_active.store(true, .release);
+            const result = preview.inspectImage(shared.alloc, request.path) catch |e| {
+                rejectRequest(shared, @errorName(e));
+                return;
+            };
+            defer shared.alloc.free(result);
+            writeLine(result);
+            shared.channel.push(.{ .finished = .{ .success = true, .message = ev.FixedStr(512).fromSlice("image inspected; no device writes") } });
+        },
         .preview_xml => |request| {
             shared.job_active.store(true, .release);
             const result = preview.inspect(shared.alloc, request.files, shared.logger) catch |e| {
