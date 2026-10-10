@@ -879,7 +879,7 @@ pub const Session = struct {
         const req = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><data><power value=\"reset\" DelayInSeconds=\"10\"/></data>";
         try self.writeRequest(req);
         const resp = try self.readResponse(5000);
-        if (resp.kind == .io) {
+        if (!resp.isAck()) {
             self.logger.err("failed to request device reset", .{});
             return Error.Io;
         }
@@ -1632,4 +1632,14 @@ test "program aborts a timed-out payload without sending the next chunk" {
     try std.testing.expectEqual(@as(usize, 3), env.h.step_idx);
     try std.testing.expectEqual(@as(u64, 512), file.tell());
     try std.testing.expect(env.h.failure == null);
+}
+
+test "reset refuses NAK instead of reporting success" {
+    const steps = [_]SimStep{
+        .{ .any_write = {} },
+        .{ .respond = "<?xml version=\"1.0\"?><data><response value=\"NAK\"/></data>" },
+    };
+    const env = try TestEnv.init(std.testing.allocator, &steps);
+    defer env.deinit(std.testing.allocator);
+    try std.testing.expectError(Error.Io, env.sess.reset());
 }

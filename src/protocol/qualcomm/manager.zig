@@ -331,10 +331,14 @@ pub const Manager = struct {
                     self.logger.info("resetting device", .{});
                     fh.reset() catch |e| {
                         self.logger.warn("reset request failed: {s}", .{@errorName(e)});
+                        self.teardown();
+                        self.emitState(.disconnected);
+                        self.finish(false, @errorName(e));
+                        return;
                     };
                     self.teardown();
                     self.emitState(.disconnected);
-                    pushFinished(self.channel, true, "device reset");
+                    self.finish(true, "reset accepted by programmer; allow 10 seconds for the device to restart");
                 }
                 // requireSession already finished the job when absent.
             },
