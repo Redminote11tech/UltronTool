@@ -394,3 +394,18 @@ selected by UTF-16LE name (36 u16 + LE size, high word for 64-bit mode):
 READ_START/READ_MIDST (LE len/offset)/READ_END for by-name reads,
 START_DATA/MIDST_DATA/END_DATA for by-name writes (15 s per-chunk timeout),
 and ERASE_FLASH carrying the selection itself.
+
+## Material 3 connection and plan review
+
+The GUI separates probing, programmer upload, partition browsing/backups and
+optional XML flashing. No XML is needed to upload Firehose or read storage.
+The internal `preview_xml` request uses the execution rawprogram parser without
+USB access. It reports image labels/paths, LUNs, start sectors, declared lengths,
+erase ranges, disk patches and automatic bootable-LUN selection. A SHA-256 review
+fingerprint binds ordered XML paths and contents; `flash_xml` rejects a changed
+fingerprint before executing the parsed plan. This is a review consistency check,
+not a signature or a claim that firmware matches the device.
+
+Firehose restart requires a running programmer and an ACK. Refusal/timeout is
+reported as failure; acceptance requests the existing ten-second device delay.
+Disconnect releases the host session and never substitutes for a device reset.

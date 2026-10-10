@@ -16,6 +16,7 @@ const sparse = @import("../../firmware/sparse.zig");
 pub const Loader = struct {
     arena: std.heap.ArenaAllocator,
     ops: std.ArrayList(Op) = .empty,
+    review_hash: std.crypto.hash.sha2.Sha256 = std.crypto.hash.sha2.Sha256.init(.{}),
 
     pub fn init(alloc: std.mem.Allocator) Loader {
         return .{ .arena = std.heap.ArenaAllocator.init(alloc) };
@@ -37,6 +38,10 @@ pub const Loader = struct {
             logger.err("unable to read {s}: {s}", .{ path, @errorName(e) });
             return e;
         };
+        self.review_hash.update(path);
+        self.review_hash.update("\x00");
+        self.review_hash.update(contents);
+        self.review_hash.update("\x00");
         const doc = xml.parse(a, contents) catch {
             logger.err("failed to parse XML file {s}", .{path});
             return error.Malformed;
@@ -51,6 +56,17 @@ pub const Loader = struct {
         } else {
             logger.err("failed to detect file type of {s} (root element <{s}>)", .{ path, doc.root.name });
             return error.UnknownFileType;
+        }
+    }
+
+    pub fn reviewDigest(self: *const Loader, out: *[64]u8) void {
+        var h = self.review_hash;
+        var digest: [32]u8 = undefined;
+        h.final(&digest);
+        const digits = "0123456789abcdef";
+        for (digest, 0..) |byte, i| {
+            out[i * 2] = digits[byte >> 4];
+            out[i * 2 + 1] = digits[byte & 15];
         }
     }
 

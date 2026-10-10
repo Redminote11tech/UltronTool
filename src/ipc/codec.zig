@@ -254,6 +254,7 @@ pub const ParseError = error{
 /// A parsed request. Manager requests reference arena-backed slices — valid
 /// until the caller resets the arena (the manager dupes on enqueue).
 pub const Parsed = union(enum) {
+    preview_xml: struct { files: []const []const u8 },
     manager: manager.Request,
     cancel,
     shutdown,
@@ -342,7 +343,7 @@ pub fn parseRequest(arena: std.mem.Allocator, line: []const u8) ParseError!Parse
             .target = try parseTarget(arena, obj),
         } } };
     }
-    if (std.mem.eql(u8, cmd, "flash_xml")) {
+    if (std.mem.eql(u8, cmd, "flash_xml") or std.mem.eql(u8, cmd, "preview_xml")) {
         const files_val = obj.get("files") orelse return error.BadField;
         const arr = switch (files_val) {
             .array => |a| a,
@@ -355,7 +356,9 @@ pub fn parseRequest(arena: std.mem.Allocator, line: []const u8) ParseError!Parse
                 else => return error.BadField,
             };
         }
+        if (std.mem.eql(u8, cmd, "preview_xml")) return .{ .preview_xml = .{ .files = files } };
         return .{ .manager = .{ .flash_xml = .{
+            .review_digest = try objStr(obj, "review_digest"),
             .files = files,
             .allow_missing = try objBool(obj, "allow_missing", false),
         } } };

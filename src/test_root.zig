@@ -34,4 +34,5 @@ test {
     _ = @import("device/scanner.zig");
     _ = @import("ipc/codec.zig");
     _ = @import("ipc/daemon.zig");
+    _ = @import("ipc/preview.zig");
 }

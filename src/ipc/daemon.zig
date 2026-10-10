@@ -24,6 +24,7 @@ const manager_mod = @import("../protocol/qualcomm/manager.zig");
 const usb = @import("../transport/usb.zig");
 const usb_ids = @import("../protocol/qualcomm/usb_ids.zig");
 const codec = @import("codec.zig");
+const preview = @import("preview.zig");
 
 const EventChannel = ev.Channel(ev.Event, 256);
 
@@ -127,6 +128,16 @@ fn handleLine(shared: *Shared, arena: std.mem.Allocator, line: []const u8) void 
         return;
     };
     switch (parsed) {
+        .preview_xml => |request| {
+            shared.job_active.store(true, .release);
+            const result = preview.inspect(shared.alloc, request.files, shared.logger) catch |e| {
+                rejectRequest(shared, @errorName(e));
+                return;
+            };
+            defer shared.alloc.free(result);
+            writeLine(result);
+            shared.channel.push(.{ .finished = .{ .success = true, .message = ev.FixedStr(512).fromSlice("flash plan inspected; no device writes") } });
+        },
         .cancel => shared.cancel.store(true, .release),
         .shutdown => shared.stopping.store(true, .release),
         .manager => |req| {
@@ -163,7 +174,10 @@ fn rejectRequest(shared: *Shared, message: []const u8) void {
 /// stdout writer: one libc write per line, looping over partial writes.
 /// (Raw fd write via libc: Zig 0.16's File writer needs the new Io interface,
 /// which is exactly the awkwardness this daemon avoids.)
+var stdout_mutex: glib.Mutex = .{ .f_i = .{ 0, 0 } };
 fn writeLine(bytes: []const u8) void {
+    stdout_mutex.lock();
+    defer stdout_mutex.unlock();
     var off: usize = 0;
     while (off < bytes.len) {
         const n = std.c.write(1, bytes.ptr + off, bytes.len - off);

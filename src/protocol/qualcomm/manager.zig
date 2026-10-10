@@ -106,6 +106,7 @@ pub const Request = union(enum) {
     },
     /// Flash rawprogram/patch XML files (qdl parity; no auto-reset).
     flash_xml: struct {
+        review_digest: ?[]const u8 = null,
         files: []const []const u8,
         allow_missing: bool,
     },
@@ -280,6 +281,7 @@ pub const Manager = struct {
                 item.mappings = maps;
             },
             .flash_xml => |*f| {
+                if (f.review_digest) |digest| f.review_digest = try item.dupe(digest);
                 const files = try heap.alloc([]const u8, f.files.len);
                 errdefer heap.free(files);
                 for (f.files, 0..) |file, i| files[i] = try item.dupe(file);
@@ -325,7 +327,7 @@ pub const Manager = struct {
             .erase_partition => |e| self.erasePartition(e.first_lba, e.num_sectors, e.lun, e.label),
             .provision_ufs => |p| self.provisionUfs(p.path, p.finalize),
             .flash_huawei_app => |f| self.flashHuaweiApp(f.path, f.mappings),
-            .flash_xml => |fx| self.flashXml(fx.files, fx.allow_missing),
+            .flash_xml => |fx| self.flashXml(fx.files, fx.allow_missing, fx.review_digest),
             .reset => {
                 if (self.requireSession()) |fh| {
                     self.logger.info("resetting device", .{});
@@ -1365,7 +1367,7 @@ pub const Manager = struct {
         self.channel.push(.{ .finished = .{ .success = true, .message = msg } });
     }
 
-    fn flashXml(self: *Manager, files: []const []const u8, allow_missing: bool) void {
+    fn flashXml(self: *Manager, files: []const []const u8, allow_missing: bool, review_digest: ?[]const u8) void {
         const fh = self.requireSession() orelse return;
 
         var loader = rawprogram.Loader.init(self.alloc);
@@ -1376,6 +1378,14 @@ pub const Manager = struct {
                 self.finish(false, @errorName(e));
                 return;
             };
+        }
+        if (review_digest) |expected| {
+            var actual: [64]u8 = undefined;
+            loader.reviewDigest(&actual);
+            if (!std.mem.eql(u8, expected, &actual)) {
+                self.finish(false, "XML files changed after review; inspect the plan again");
+                return;
+            }
         }
         const ops = loader.opsSlice();
         if (ops.len == 0) {
@@ -1504,7 +1514,7 @@ const ExecOp = union(enum) {
 
 /// Port of program_find_bootable_partition: first match wins with the
 /// priority xbl > xbl_a > sbl1.
-fn findBootablePartition(ops: []const rawprogram.Op) ?u32 {
+pub fn findBootablePartition(ops: []const rawprogram.Op) ?u32 {
     const candidates = [_][]const u8{ "xbl", "xbl_a", "sbl1" };
     for (candidates) |label| {
         for (ops) |op| {
@@ -2244,4 +2254,42 @@ test "scanner invalidation tears down state without completing a GUI job" {
     channel.drain(&collector, Collector.cb);
     try std.testing.expectEqual(ev.SessionState.disconnected, mgr.state);
     try std.testing.expectEqual(@as(usize, 0), collector.finished.items.len);
+}
+
+test "changed reviewed XML refuses execution before any USB writes" {
+    const alloc = std.testing.allocator;
+    var tmp = try fileio.TmpDir.init();
+    defer tmp.cleanup();
+    try tmp.writeFile("plan.xml", "<data><erase start_sector=\"8\" num_partition_sectors=\"1\"/></data>");
+    var path_buf: [176]u8 = undefined;
+    const path = try tmp.filePath(&path_buf, "plan.xml");
+    var logger = log.Logger{ .mirror_stderr = false };
+    var loader = rawprogram.Loader.init(alloc);
+    defer loader.deinit();
+    try loader.loadFile(path, false, &logger);
+    var reviewed: [64]u8 = undefined;
+    loader.reviewDigest(&reviewed);
+    try tmp.writeFile("plan.xml", "<data><erase start_sector=\"9\" num_partition_sectors=\"2\"/></data>");
+    var harness = try SimHarness.init(alloc, &.{});
+    defer harness.deinit();
+    var opener = SimOpener{ .harness = &harness };
+    const channel = try alloc.create(EventChannel);
+    defer alloc.destroy(channel);
+    channel.* = .{};
+    var cancel = std.atomic.Value(bool).init(false);
+    const mgr = try Manager.init(alloc, &logger, channel, &cancel, &SimOpener.open, &opener);
+    defer mgr.shutdown();
+    defer mgr.teardown();
+    mgr.io = try alloc.create(transport.Io);
+    mgr.io.?.* = transport.Io.init(alloc, harness.transport());
+    mgr.fh = try alloc.create(firehose.Session);
+    mgr.fh.?.* = .{ .alloc = alloc, .io = mgr.io.?, .logger = &logger, .cancel = &cancel };
+    mgr.flashXml(&.{path}, false, &reviewed);
+    var collector = Collector{};
+    defer collector.deinit();
+    channel.drain(&collector, Collector.cb);
+    try std.testing.expectEqual(@as(usize, 1), collector.finished.items.len);
+    try std.testing.expect(!collector.finished.items[0].success);
+    try std.testing.expectEqual(@as(usize, 0), harness.step_idx);
+    try std.testing.expect(harness.failure == null);
 }
