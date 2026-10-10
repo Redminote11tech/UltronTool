@@ -53,7 +53,7 @@ p { color: var(--text-2); }
 .notice { display: flex; align-items: center; gap: 14px; border-radius: 16px; padding: 16px 20px; background: var(--md-secondary-container); color: var(--md-on-secondary-container); margin-bottom: 24px; }
 .notice p { color: inherit; font-size: 13px; margin-top: 2px; }
 .notice .select { margin-left: auto; max-width: 300px; }
-.device-layout { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(250px, 1fr); gap: 24px; align-items: start; }
+.device-layout { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(340px, 1fr); gap: 24px; align-items: start; }
 .device-list { padding: 0 16px 16px; display: grid; gap: 12px; }
 .device-row { border: 1px solid var(--stroke-1); border-radius: 14px; background: var(--bg-2); overflow: hidden; }
 .device-row.selected { border-color: var(--md-primary); }
@@ -170,3 +170,15 @@ p { color: var(--text-2); }
 .slot-file.mono, .review-table .note { overflow-wrap: anywhere; }
 
 .content > .job-card { margin-bottom: 24px; }
+
+/* Connection actions must fit within their card, including long file paths. */
+.session-panel { display: grid; gap: 16px; min-width: 0; }
+.session-panel .switch-row { padding: 0 0 16px; }
+.session-panel .device-actions { padding: 0; }
+.session-panel .btn { white-space: normal; max-width: 100%; }
+.session-panel .select { flex-shrink: 0; }
+.session-advanced { border-top: 1px solid var(--stroke-1); padding-top: 16px; }
+.session-advanced summary { cursor: pointer; font-weight: 500; }
+.session-advanced-body { display: grid; gap: 16px; padding-top: 16px; }
+.device-row .device-actions { padding-top: 12px; }
+.device-select:focus-visible { outline-offset: -3px; }
